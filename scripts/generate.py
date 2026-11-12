@@ -391,6 +391,12 @@ def title_hooks(name, body):
         # exactly what the tail-called Sleep would return through.
         for label, ms in (("loc_001F917B: ;\n", 16), ("loc_001F9188: ;\n", 6)):
             body = replace_once(body, label, label + f"    if (black_throttle_skip({ms})) goto loc_001F91B6; /* host hook: RECOMP_BLACK_THROTTLE */\n")
+    if name == "sub_001EE820_gen":
+        # VR: the world draw has drawn the world, its effects and the camera sprites when it calls the HUD
+        # object's +0xC at 0x1EEB88; the HUD follows. black_vr_hud_begin (recomp_manual.c) marks it for the
+        # renderer, so HUD boxes that test no depth (the pickup caption, secondary-objective messages) are HUD.
+        # Keyed on the _gen name: sub_001EE820 is a manual override (split screen, VR world marks).
+        body = replace_once(body, "loc_001EEB93: ;\n", "loc_001EEB93: ;\n    black_vr_hud_begin(); /* VR: the HUD starts here */\n")
     if name == "sub_001EDC90":
         lines = body.split("\n")
         first = next(i for i, line in enumerate(lines) if "SET_LO8(l_edx," in line and "0x2020C" in line)
@@ -1008,6 +1014,7 @@ def main():
     declarations += "extern int black_silver_weapon_flag(int);\n"
     declarations += "extern float black_physics_drag(float);\n"
     declarations += "extern int black_throttle_skip(int);\n"
+    declarations += "extern void black_vr_hud_begin(void);\n"
     declarations += "extern int black_infinite_ammo_flag(int);\n"
     declarations += "\nextern void black_test_stream_unit(uint32_t);\n"
     declarations += "\nextern void black_checkpoint_event(uint32_t, uint32_t);\n"

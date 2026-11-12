@@ -2708,6 +2708,20 @@ static void black_split_produce(uint32_t camera, int pass)
     GUEST32(owner + 0x750u) = lens;
 }
 
+/* scripts/generate.py calls this inside the world draw (sub_001EE820_gen, at 0x1EEB93: right after its call of the
+ * HUD object's +0xC, once the world, the effects and the camera's sprites are drawn): the HUD starts here. In VR the
+ * renderer then puts every later draw on the head-locked HUD layer, including the boxes of the pickup caption and
+ * of the secondary-objective messages, which test no depth and come before the health bar the renderer otherwise
+ * waits for. BLACKVR_HUD_MARK=0: no mark (the renderer finds the HUD itself, as before). */
+void black_vr_hud_begin(void)
+{
+#ifdef BLACK_VR
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("BLACKVR_HUD_MARK"); on = !e || *e != '0'; }
+    if (on) black_vr_world_mark(2);
+#endif
+}
+
 void sub_001EE820(void)
 {
     const uint32_t esp = g_esp, ebx = g_ebx, esi = g_esi, edi = g_edi, ebp = g_ebp, seh = g_seh_ebp;
