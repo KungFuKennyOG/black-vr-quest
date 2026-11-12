@@ -1,0 +1,42 @@
+/game/
+/src/recomp/
+/src/black_xmv_idct.inc
+/.venv/
+/.work/
+/build*/
+/bin/
+/local/
+/save/
+/texture_pack_hd/
+/reports/
+/*.exe
+/BLACK Launcher
+/*.pdb
+/*.log
+__pycache__/
+*.pyc
+*.xbe
+*.iso
+*.xiso
+.env
+.env.*
+/releases/
+/.wine/
+/.proton/
+
+# Editors and IDEs
+/.idea/
+/.vs/
+/.vscode/
+/cmake-build-*/
+CMakeUserPresets.json
+*.user
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs written by tools run from the project folder
+/logs/
+/third_party/dlss/
