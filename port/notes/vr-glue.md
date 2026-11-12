@@ -87,7 +87,7 @@ Nothing has run on a headset.
   It keeps premultiplied alpha: transparent where nothing was drawn.
 - **Layer:** the shell adds an `XrCompositionLayerQuad` in VIEW space, after the projection
   layer, with `BLEND_TEXTURE_SOURCE_ALPHA`.
-  - It is placed at `hud_distance` (3.0 m) and `hud_width` (2.4 m), 4:3. These are new
+  - It is placed at `hud_distance` (2.0 m) and `hud_width` (2.4 m), 4:3. These are new
     `blackvr.ini` keys and match the backend's virtual screen.
 - **Pairing with the eye images:** the HUD image is published *with* `vr_release_eye_targets()`
   under the queue lock. A HUD is never shown over another frame's world. A STEREO frame

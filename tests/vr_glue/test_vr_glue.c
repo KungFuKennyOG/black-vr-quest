@@ -1603,7 +1603,7 @@ static int run(int multiview)
                   "swapchain %d: sRGB with the sRGB+UNORM format list", i);
         }
         CHECK(fx_swapchain(shell_hud_swapchain())->ci.width == 1280 && vr_hud_layout()->width_m == 2.4f &&
-              vr_hud_layout()->distance_m == 3.0f, "HUD swapchain and layout");
+              vr_hud_layout()->distance_m == 2.0f, "HUD swapchain and layout");
         /* fixed foveated rendering (blackvr.ini foveation, default medium): the runtime offers XR_FB_foveation(_vulkan),
          * so the eye swapchain(s) -- and only they -- are created with the fragment-density-map flag and get a level
          * profile through xrUpdateSwapchainFB; the profile is destroyed afterwards */
@@ -1680,8 +1680,8 @@ static int run(int multiview)
     CHECK(fx_last_end.nlayers == 2 && fx_last_end.nquads == 1, "frame 1: projection + HUD quad (%u layers)", fx_last_end.nlayers);
     if (fx_last_end.nquads == 1) {
         const XrCompositionLayerQuad *q = &fx_last_end.quads[0];
-        CHECK(q->space == shell_view_space() && q->pose.position.z == -3.0f && q->size.width == 2.4f &&
-              fabsf(q->size.height - 1.8f) < 1e-6f, "HUD quad: head-locked, 2.4 x 1.8 m at 3 m");
+        CHECK(q->space == shell_view_space() && q->pose.position.z == -2.0f && q->size.width == 2.4f &&
+              fabsf(q->size.height - 1.8f) < 1e-6f, "HUD quad: head-locked, 2.4 x 1.8 m at 2 m");
         CHECK((q->layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) &&
               !(q->layerFlags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT), "HUD quad: premultiplied alpha blending");
         CHECK(q->subImage.swapchain == shell_hud_swapchain(), "HUD quad shows the HUD swapchain");

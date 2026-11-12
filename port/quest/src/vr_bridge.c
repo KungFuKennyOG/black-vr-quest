@@ -991,7 +991,7 @@ const VrHudLayout *vr_hud_layout(void)
 {
     static VrHudLayout l;
     XrShell *s = &g_xr;
-    l.distance_m = s->cfg.hud_distance_m > 0.0f ? s->cfg.hud_distance_m : 3.0f;
+    l.distance_m = s->cfg.hud_distance_m > 0.0f ? s->cfg.hud_distance_m : 2.0f;
     l.width_m = s->cfg.hud_width_m > 0.0f ? s->cfg.hud_width_m : 2.4f;
     l.width = s->hud.width ? s->hud.width : 1280u;
     l.height = s->hud.height ? s->hud.height : 960u;

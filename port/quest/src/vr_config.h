@@ -40,7 +40,7 @@
  *   scope_zoom        = 2.5       ; zoom factor at which the scope view goes flat
  *   fov_margin        = 1.10      ; game frustum enlargement over the eye FOV union (late-latch room)
  *   bob_filter        = 1
- *   hud_distance      = 3.0       ; metres: the head-locked HUD / virtual screen
+ *   hud_distance      = 2.0       ; metres: the head-locked HUD / virtual screen
  *   hud_width         = 2.4       ; metres (4:3)
  *   haptic_fire       = 0.7       ; 0..1: shot pulse on the gun hand's controller (0 = off; the game's own rumble stays)
  *   gun_latch         = on        ; on | off: the first-person weapon follows the hand pose latched at display
@@ -115,7 +115,7 @@ static inline void vr_config_defaults(VrShellConfig *c)
     c->raster_spin_us = 50;
     c->multiview = 1;
     c->locomotion = VR_LOCO_HEAD;
-    c->hud_distance_m = 3.0f;
+    c->hud_distance_m = 2.0f;
     c->hud_width_m = 2.4f;
     c->haptic_fire = 0.7f;
     c->gun_latch = 1;
