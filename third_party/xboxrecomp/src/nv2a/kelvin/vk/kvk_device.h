@@ -92,6 +92,8 @@ typedef struct KvkStats {
      * because a view or sampler they name was released, NV2A vertex-emulator runs of the screen-space classifier and
      * its per-draw reuses, guest texture bytes hashed */
     uint64_t tset_writes, tset_flushes, np_vertices, np_cache_hits, tex_sig_bytes;
+    /* the density map (kvk_fdm.h): render passes begun with it attached, and times its contents were filled */
+    uint64_t fdm_passes, fdm_fills;
 } KvkStats;
 void kvk_get_stats(KvkStats *out);
 

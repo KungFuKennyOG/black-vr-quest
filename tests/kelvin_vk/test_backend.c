@@ -47,6 +47,14 @@ const VrGameCamera *vr_game_camera(void) { return g_vr_on ? &g_cam : NULL; }
 int vr_acquire_eye_targets(VrEyeTarget out[VR_EYE_COUNT]) { if (!g_eye_ok) return 0; out[0] = g_eyes[0]; out[1] = g_eyes[1]; return 1; }
 void vr_release_eye_targets(void) { g_released++; }
 
+/* "stereo-fdm": the backend is told the device has a density map (SwiftShader has none, so it draws the picture exactly as
+ * without one) and the frames count as STEREO at foveation level 3: every foveation code path runs (the render pass and
+ * pipeline variants, the framebuffer's third attachment, the map fill), and the pictures must not change. Otherwise the
+ * frame mode stays unknown and the level 0, which is what every other mode of this test has always had. */
+static int g_fake_fdm;
+int kvk_vr_frame_mode(void) { return g_fake_fdm ? VR_PRESENT_STEREO : -1; }
+int vr_foveation_level(void) { return g_fake_fdm ? 3 : 0; }
+
 static uint32_t rnd(uint32_t n) { return (uint32_t)rand() % n; }
 static float rnd255(void) { return (float)rnd(256) / 255.0f; }
 
@@ -123,6 +131,7 @@ static bool make_device(bool *bc, bool allow_bc)
         info.robust_buffer_access = en.robustBufferAccess != 0;
         info.depth_clamp = en.depthClamp != 0;
         info.texture_compression_bc = en.textureCompressionBC != 0;
+        if (g_fake_fdm) { info.fdm = true; info.fdm_texel_w = info.fdm_texel_h = 16; }
         kvk_set_device(&info);
     }
     return true;
@@ -1062,6 +1071,11 @@ static void test_stereo(void)
         }
     }
     kvk_get_stats(&stats);
+    if (g_fake_fdm) {
+        printf("stereo-fdm: %llu passes with the density map, %llu fills\n", (unsigned long long)stats.fdm_passes, (unsigned long long)stats.fdm_fills);
+        CHECK(stats.fdm_fills >= 1, "the density map was filled (%llu)", (unsigned long long)stats.fdm_fills);
+        CHECK(stats.fdm_passes >= 1, "main passes ran with the density map (%llu)", (unsigned long long)stats.fdm_passes);
+    }
     printf("stereo: draws %llu (stereo %llu, hud %llu), render passes %llu, pipelines %llu\n", (unsigned long long)stats.draws,
            (unsigned long long)stats.stereo_draws, (unsigned long long)stats.hud_draws, (unsigned long long)stats.passes,
            (unsigned long long)stats.pipelines);
@@ -1075,13 +1089,14 @@ int main(int argc, char **argv)
     const char *mode = argc > 1 ? argv[1] : "cpu-parity";
     bool bc = false;
     char dir[256];
+    g_fake_fdm = !strcmp(mode, "stereo-fdm");
     if (!make_device(&bc, strcmp(mode, "uber") != 0)) { printf("no Vulkan 1.1 device with multiview: skipped\n"); return 77; }
     snprintf(dir, sizeof(dir), "kvk-test-cache-%s", mode);
     kvk_set_cache_dir(dir);
     ktex_init();
     srand(3);
     make_textures();
-    if (!strcmp(mode, "stereo")) {
+    if (!strcmp(mode, "stereo") || g_fake_fdm) {
         g_vr_on = 1;
         kvk_set_stereo(true);
         kvk_set_raster_size(256, 192);
@@ -1092,7 +1107,7 @@ int main(int argc, char **argv)
     if (!strcmp(mode, "uber")) setenv("RECOMP_KGPU_PS_SPEC", "0", 1);
     if (!kgpu_init()) { printf("kgpu_init failed\n"); return 1; }
     kgpu_note_kick();
-    if (!strcmp(mode, "stereo")) {
+    if (!strcmp(mode, "stereo") || g_fake_fdm) {
         test_stereo();
     } else if (!strcmp(mode, "uber")) {
         printf("device BC textures: %s\n", bc ? "native" : "decoded on the CPU");

@@ -277,7 +277,6 @@ typedef struct KvkFdm {
     uint32_t mw, mh, texel_w, texel_h;
     uint64_t sig;
     int twin_pending;               /* startup pipeline variants still being compiled: no foveated pass until 0 */
-    uint64_t passes, frames, uploads;
     float work;                     /* the share of pixels the left eye's map shades, for the log */
 } KvkFdm;
 
@@ -2326,7 +2325,7 @@ static bool pass_begin(KvkSurf *cs, KvkSurf *zs)
     P.fdm = fdm;
     P.cls = cls;
     P.draws0 = G.st.draws;
-    if (fdm) G.fdm.passes++;
+    if (fdm) G.st.fdm_passes++;
     return true;
 }
 
@@ -3737,7 +3736,7 @@ static bool fdm_upload(int level, const float cx[2], const float cy[2], const fl
     bc.imageExtent.width = G.fdm.mw; bc.imageExtent.height = G.fdm.mh; bc.imageExtent.depth = 1;
     vkCmdCopyBufferToImage(ucb, cur_frame()->chunk[cur_frame()->cur].b.buf, G.fdm.map.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bc);
     barrier(ucb, &G.fdm.map, VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT);
-    G.fdm.uploads++;
+    G.st.fdm_fills++;
     return true;
 }
 
@@ -4226,6 +4225,9 @@ void kgpu_report(void)
         (unsigned long long)G.st.tex_uploads, (unsigned long long)G.st.tset_writes, (unsigned long long)G.st.tset_flushes,
         (unsigned long long)G.st.np_vertices, (unsigned long long)G.st.np_cache_hits,
         (unsigned long long)(G.st.tex_sig_bytes >> 20));
+    if (G.fdm.dev)
+        LOG("fdm: level %d, %llu foveated passes, %llu map fills, %d startup variants pending", G.fdm.level,
+            (unsigned long long)G.st.fdm_passes, (unsigned long long)G.st.fdm_fills, G.fdm.twin_pending);
 }
 
 void kgpu_note_kick(void) { G.epoch++; }
