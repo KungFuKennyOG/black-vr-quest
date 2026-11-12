@@ -116,6 +116,15 @@ typedef struct {
     VkFormat color_format;
     int multiview_supported;
     VrVulkanFeatures vk_features;  /* what the device was created with (vr_vulkan_features) */
+    /* fragment density map support as the device reports it (xrp_vulkan_device logs it): extensions present, features
+     * offered, properties, and whether the shell enabled them */
+    struct {
+        int ext_fdm, ext_fdm2, ext_qcom_offset, ext_fsr;   /* VK_EXT_fragment_density_map, _2, VK_QCOM_fragment_density_map_offset, VK_KHR_fragment_shading_rate */
+        int have_fdm, have_dynamic, have_nonsubsampled, have_deferred;   /* features offered */
+        uint32_t min_w, min_h, max_w, max_h, invocations;    /* VkPhysicalDeviceFragmentDensityMapPropertiesEXT */
+        int env_off;                                          /* RECOMP_KVK_FDM=0 */
+        uint32_t n_ext;                                       /* device extensions offered */
+    } fdm_info;
     char cache_dir[512];           /* app-private (internalDataPath)/kgpu-cache */
 
     /* swapchains: eye[0] is the 2-layer array swapchain in multiview mode;

@@ -138,6 +138,8 @@ int vr_renderer_init(const VrVulkanContext *ctx)
     di.sampler_anisotropy = f->sampler_anisotropy != 0;
     di.texture_compression_bc = f->texture_compression_bc != 0;
     di.swapchain_mutable_format = f->swapchain_mutable_format != 0;
+    di.fdm = f->fdm != 0 && f->fdm_texel_w && f->fdm_texel_h;
+    di.fdm_texel_w = f->fdm_texel_w; di.fdm_texel_h = f->fdm_texel_h;
     /* xrEndFrame / xrAcquire/ReleaseSwapchainImage use the queue on the XR thread */
     di.queue_lock = glue_queue_lock;
     di.queue_unlock = glue_queue_unlock;

@@ -104,11 +104,49 @@ int xrs_vulkan_create(XrShell *s)
         VkDeviceCreateInfo dci = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
         XrVulkanDeviceCreateInfoKHR xdi = { XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR };
         VkPhysicalDeviceMultiviewFeatures mv_on = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES };
+        VkPhysicalDeviceFragmentDensityMapFeaturesEXT fdmf = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_FEATURES_EXT };
+        VkPhysicalDeviceFragmentDensityMap2FeaturesEXT fdm2f = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_2_FEATURES_EXT };
+        VkPhysicalDeviceFragmentDensityMapFeaturesEXT fdm_on = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_FEATURES_EXT };
         const float prio = 1.0f;
+        const char *fdm_env = getenv("RECOMP_KVK_FDM");
+        int fdm_enable = 0;
+
+        /* the device's extensions first: the density map feature structs may only be chained where they exist */
+        vkEnumerateDeviceExtensionProperties(s->vk_phys, NULL, &ne, NULL);
+        ext = (VkExtensionProperties *)calloc(ne ? ne : 1, sizeof(*ext));
+        vkEnumerateDeviceExtensionProperties(s->vk_phys, NULL, &ne, ext);
+        memset(&s->fdm_info, 0, sizeof(s->fdm_info));
+        s->fdm_info.n_ext = ne;
+        s->fdm_info.ext_fdm = has_ext(ext, ne, "VK_EXT_fragment_density_map");
+        s->fdm_info.ext_fdm2 = has_ext(ext, ne, "VK_EXT_fragment_density_map2");
+        s->fdm_info.ext_qcom_offset = has_ext(ext, ne, "VK_QCOM_fragment_density_map_offset");
+        s->fdm_info.ext_fsr = has_ext(ext, ne, "VK_KHR_fragment_shading_rate");
+        s->fdm_info.env_off = fdm_env && *fdm_env == '0';
 
         f2.pNext = &mv;
+        if (s->fdm_info.ext_fdm) {
+            mv.pNext = &fdmf;
+            if (s->fdm_info.ext_fdm2) fdmf.pNext = &fdm2f;
+        }
         vkGetPhysicalDeviceFeatures2(s->vk_phys, &f2);
         s->multiview_supported = mv.multiview == VK_TRUE;
+        if (s->fdm_info.ext_fdm) {
+            VkPhysicalDeviceFragmentDensityMapPropertiesEXT fp = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_PROPERTIES_EXT };
+            VkPhysicalDeviceProperties2 p2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+            p2.pNext = &fp;
+            vkGetPhysicalDeviceProperties2(s->vk_phys, &p2);
+            s->fdm_info.have_fdm = fdmf.fragmentDensityMap == VK_TRUE;
+            s->fdm_info.have_dynamic = fdmf.fragmentDensityMapDynamic == VK_TRUE;
+            s->fdm_info.have_nonsubsampled = fdmf.fragmentDensityMapNonSubsampledImages == VK_TRUE;
+            s->fdm_info.have_deferred = s->fdm_info.ext_fdm2 && fdm2f.fragmentDensityMapDeferred == VK_TRUE;
+            s->fdm_info.min_w = fp.minFragmentDensityTexelSize.width; s->fdm_info.min_h = fp.minFragmentDensityTexelSize.height;
+            s->fdm_info.max_w = fp.maxFragmentDensityTexelSize.width; s->fdm_info.max_h = fp.maxFragmentDensityTexelSize.height;
+            s->fdm_info.invocations = fp.fragmentDensityInvocations;
+            /* the backend's own density map needs the map and non-subsampled images (its main targets are copied, cleared,
+             * read back and sampled arbitrarily); RECOMP_KVK_FDM=0 leaves the features off, the device as it was before */
+            fdm_enable = s->fdm_info.have_fdm && s->fdm_info.have_nonsubsampled && !s->fdm_info.env_off &&
+                         s->fdm_info.min_w && s->fdm_info.min_h;
+        }
 
         /* The renderer's VkPhysicalDeviceFeatures, limited to what the device has: asking for a missing feature
          * fails vkCreateDevice (VK_ERROR_FEATURE_NOT_PRESENT). The Kelvin backend needs robustBufferAccess and
@@ -125,9 +163,6 @@ int xrs_vulkan_create(XrShell *s)
             }
         }
 
-        vkEnumerateDeviceExtensionProperties(s->vk_phys, NULL, &ne, NULL);
-        ext = (VkExtensionProperties *)calloc(ne ? ne : 1, sizeof(*ext));
-        vkEnumerateDeviceExtensionProperties(s->vk_phys, NULL, &ne, ext);
         for (i = 0; i < rr.device_extension_count && en < 60; i++) {
             if (has_ext(ext, ne, rr.device_extensions[i])) exts[en++] = rr.device_extensions[i];
             else XLOGW("renderer asked for missing device extension %s", rr.device_extensions[i]);
@@ -137,14 +172,13 @@ int xrs_vulkan_create(XrShell *s)
         /* XR_FB_foveation_vulkan: an eye swapchain created with XR_SWAPCHAIN_CREATE_FOVEATION_FRAGMENT_DENSITY_MAP_BIT_FB
          * requires VK_EXT_fragment_density_map "supported and enabled" on this device (xr.xml); without it a runtime
          * may refuse the swapchain, which would end the launch. No extension, no foveation. */
-        if (s->has_foveation) {
-            if (has_ext(ext, ne, "VK_EXT_fragment_density_map") && en < 60) {
-                exts[en++] = "VK_EXT_fragment_density_map";
-            } else {
-                s->has_foveation = 0;
-                XLOGW("foveation off: the GPU has no VK_EXT_fragment_density_map (XR_FB_foveation_vulkan needs it)");
-            }
+        if (s->has_foveation && !s->fdm_info.ext_fdm) {
+            s->has_foveation = 0;
+            XLOGW("foveation off: the GPU has no VK_EXT_fragment_density_map (XR_FB_foveation_vulkan needs it)");
         }
+        if (s->fdm_info.ext_fdm && (s->has_foveation || fdm_enable) && en < 60) exts[en++] = "VK_EXT_fragment_density_map";
+        if (s->fdm_info.ext_fdm && s->fdm_info.ext_fdm2 && (s->has_foveation || fdm_enable) && en < 60)
+            exts[en++] = "VK_EXT_fragment_density_map2";    /* the runtime's foveation names it; no map2 feature is enabled */
         free(ext);
 
         q.queueFamilyIndex = s->vk_queue_family;
@@ -153,6 +187,12 @@ int xrs_vulkan_create(XrShell *s)
         /* multiview (core in 1.1) is always enabled when present: the renderer's stereo needs it */
         mv_on.multiview = s->multiview_supported ? VK_TRUE : VK_FALSE;
         mv_on.pNext = (void *)rr.device_features_pnext;
+        if (fdm_enable) {
+            fdm_on.fragmentDensityMap = VK_TRUE;
+            fdm_on.fragmentDensityMapNonSubsampledImages = VK_TRUE;
+            fdm_on.pNext = mv_on.pNext;
+            mv_on.pNext = &fdm_on;
+        }
         dci.pNext = &mv_on;
         dci.queueCreateInfoCount = 1;
         dci.pQueueCreateInfos = &q;
@@ -177,6 +217,9 @@ int xrs_vulkan_create(XrShell *s)
         /* the swapchains are created MUTABLE_FORMAT (xrs_swapchain_create) */
         s->vk_features.swapchain_mutable_format = 1;
         s->vk_features.swapchain_format_list = (uint32_t)s->has_format_list;
+        s->vk_features.fdm = (uint32_t)fdm_enable;
+        s->vk_features.fdm_texel_w = fdm_enable ? s->fdm_info.min_w : 0;
+        s->vk_features.fdm_texel_h = fdm_enable ? s->fdm_info.min_h : 0;
         XLOGI("device features: multiview %u robustBufferAccess %u depthClamp %u anisotropy %u BC %u",
               s->vk_features.multiview, on.robustBufferAccess, on.depthClamp, on.samplerAnisotropy,
               on.textureCompressionBC);

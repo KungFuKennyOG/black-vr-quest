@@ -23,7 +23,8 @@ set(KVK_GLSLANG_DIR "" CACHE PATH "glslang source checkout, compiled into the Vu
 
 add_library(kelvin_vk_shadergen STATIC
     ${KVK_DIR}/kvk_glsl.c
-    ${KVK_DIR}/kvk_stereo.c)
+    ${KVK_DIR}/kvk_stereo.c
+    ${KVK_DIR}/kvk_fdm.c)
 target_include_directories(kelvin_vk_shadergen PUBLIC ${KVK_DIR} ${KVK_VR_BRIDGE_DIR})
 set_property(TARGET kelvin_vk_shadergen PROPERTY C_STANDARD 11)
 set_property(TARGET kelvin_vk_shadergen PROPERTY POSITION_INDEPENDENT_CODE ON)

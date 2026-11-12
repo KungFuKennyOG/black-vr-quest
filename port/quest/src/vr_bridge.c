@@ -557,6 +557,7 @@ double vr_consume_turn(void)
 }
 
 const VrGameConfig *vr_game_config(void) { return &g_xr.cfg.game; }
+int vr_foveation_level(void) { return __atomic_load_n(&g_xr.cfg.foveation, __ATOMIC_RELAXED); }
 
 void vr_set_rumble(uint16_t left_motor, uint16_t right_motor)
 {

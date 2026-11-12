@@ -62,6 +62,7 @@
 #include "../nv2a_vsh_cpu/nv2a_vsh_disassembler.h"
 #include "../nv2a_vsh_cpu/nv2a_vsh_emulator.h"     /* VR: where a screen-space draw lands (np_pos) */
 #include "kvk_device.h"
+#include "kvk_fdm.h"
 #include "kvk_glsl.h"
 #include "kvk_spirv.h"
 #include "kvk_stereo.h"
@@ -139,6 +140,8 @@ __attribute__((weak)) int vr_acquire_eye_targets(VrEyeTarget out[VR_EYE_COUNT]) 
 __attribute__((weak)) void vr_release_eye_targets(void) {}
 __attribute__((weak)) int vr_active(void) { return 0; }
 __attribute__((weak)) const VrGameConfig *vr_game_config(void) { return NULL; }
+__attribute__((weak)) int vr_foveation_level(void) { return 0; }
+__attribute__((weak)) const VrEyeTransforms *vr_eye_transforms(void) { return NULL; }
 
 /* ---- objects ------------------------------------------------------------------------------------------------ */
 
@@ -241,8 +244,43 @@ typedef struct KvkPipeKey {
  * only fills in pipe and state of an entry the GPU thread inserted. */
 typedef struct KvkPipe { bool used; KvkPipeKey key; VkPipeline pipe; int state; } KvkPipe;
 
-typedef struct KvkRp { bool used; VkFormat cf, df; uint32_t views; int cload, dload; VkRenderPass rp; } KvkRp;
-typedef struct KvkFb { bool used; VkImageView c, d; VkRenderPass rp; uint32_t w, h; VkFramebuffer fb; } KvkFb;
+typedef struct KvkRp { bool used; VkFormat cf, df; uint32_t views; int cload, dload; bool fdm; VkRenderPass rp; } KvkRp;
+typedef struct KvkFb { bool used; VkImageView c, d, f; VkRenderPass rp; uint32_t w, h; VkFramebuffer fb; } KvkFb;
+
+/* ---- GPU timers (RECOMP_KVK_GPUTIME=1) and the fragment density map (kvk_fdm.h) ------------------------------------ */
+
+/* Pass classes of the timers. The main target's passes are told apart by order: the world pass is the first of a frame
+ * to the host-size stereo target, every later one (sprites, the glare composite) is a reopen of it. */
+enum { GT_MAIN_FIRST = 0, GT_MAIN_REST, GT_DEPTHCOL, GT_OFFSCREEN, GT_HUD, GT_COMPOSE, GT_OTHER, GT_N };
+#define GT_MAX_PASSES 96
+#define GT_WINDOW 180               /* frames per log line */
+typedef struct KvkGt {
+    bool on;
+    VkQueryPool pool[KVK_FRAMES];   /* two timestamps per pass: before it begins, after it ends */
+    double ms_per_tick;
+    uint64_t mask;
+    uint32_t np[KVK_FRAMES];        /* passes recorded in each frame slot */
+    uint8_t cls[KVK_FRAMES][GT_MAX_PASSES], fdm[KVK_FRAMES][GT_MAX_PASSES];
+    int open;                       /* the pass in progress (index in the frame), -1 none */
+    int main_seen;                  /* main-target passes begun in the frame being recorded */
+    double acc[GT_N], acc_frame, acc_gap, max_frame;
+    uint32_t frames, passes, fdm_passes, fdm_frames, stereo_frames;
+    uint64_t total_frames;
+} KvkGt;
+
+/* The backend's own density map. `dev`: the device has it and it is wanted (image exists). `ready`: filled for `level`
+ * (the level now in force, 0 = no foveated pass). sig: what the filled content was made from. */
+typedef struct KvkFdm {
+    bool dev, ready;
+    int level;
+    KvkImage map;
+    uint32_t mw, mh, texel_w, texel_h;
+    uint64_t sig;
+    int twin_pending;               /* startup pipeline variants still being compiled: no foveated pass until 0 */
+    uint64_t passes, frames, uploads;
+    float work;                     /* the share of pixels the left eye's map shades, for the log */
+} KvkFdm;
+
 typedef struct KvkSmp { bool used; uint64_t key; VkSampler s; } KvkSmp;
 typedef struct KvkTset { bool used; VkImageView v[4]; VkSampler s[4]; VkDescriptorSet set; uint64_t stamp; } KvkTset;
 typedef struct KvkEyeView { VkImage img; uint32_t layer, layers; VkFormat fmt; VkImageView view; VkFramebuffer fb[2]; VkRenderPass rp[2]; uint32_t w, h; } KvkEyeView;
@@ -280,6 +318,8 @@ static struct {
     VkDescriptorPool tset_pool;     /* the cached sets (FREE_DESCRIPTOR_SET); per-frame pools are the fallback */
     uint64_t tset_stamp;
     KvkEyeView eyeview[KVK_EYEVIEW_MAX];
+    KvkGt gt;
+    KvkFdm fdm;
     KvkImage fb_copy;
     uint64_t epoch, clock, wseq, surf_gen;
     uint64_t surf_va_gen, surf_va_bits[4];  /* a filter of the used surfaces' addresses, as of surf_gen (surf_va_maybe) */
@@ -307,6 +347,9 @@ static struct {
     VkBuffer ib;
     VkDeviceSize ib_off;
     VkIndexType ibt;
+    bool fdm;               /* the open pass has the density map attached (its pipelines are the fdm variants) */
+    int cls;                /* GT_* of the open pass */
+    uint64_t draws0;        /* G.st.draws when it began (RECOMP_KVK_PASSLOG) */
 } P;
 
 /* VR per frame */
@@ -564,6 +607,10 @@ static void layout_use(VkImageLayout l, VkPipelineStageFlags *stage, VkAccessFla
         *stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         *access = VK_ACCESS_TRANSFER_WRITE_BIT;
         break;
+    case VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT:      /* the density map, read before each foveated pass */
+        *stage = VK_PIPELINE_STAGE_FRAGMENT_DENSITY_PROCESS_BIT_EXT;
+        *access = VK_ACCESS_FRAGMENT_DENSITY_MAP_READ_BIT_EXT;
+        break;
     default:
         *stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         *access = 0;
@@ -679,6 +726,148 @@ static VkCommandBuffer upload_cmd(void)
     return f->ucb;
 }
 
+/* ---- GPU timers (RECOMP_KVK_GPUTIME=1) and the pass list (RECOMP_KVK_PASSLOG=1) ------------------------------------
+ * Two timestamps around every render pass (bottom of pipe, outside the pass), per frame slot; read back when the frame's
+ * fence has signalled, summed by pass class, logged every GT_WINDOW frames as "[KVK] gpu ms". Copies, clears and barriers
+ * between passes are not in a class: "between passes" is the frame's span minus the passes. Off: nothing is recorded. */
+static const char *const k_gt_name[GT_N] = { "main-first", "main-rest", "depth-as-colour", "offscreen", "hud", "compose", "other" };
+
+static void gt_init(void)
+{
+    const char *e = getenv("RECOMP_KVK_GPUTIME");
+    VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+    VkQueueFamilyProperties *qf;
+    uint32_t nq = 0, bits = 0;
+    int i;
+    memset(&G.gt, 0, sizeof(G.gt));
+    G.gt.open = -1;
+    if (!(e && *e && *e != '0')) return;
+    if (!G.props.limits.timestampComputeAndGraphics) { LOG("gpu timers: the device has no timestamps on the graphics queue"); return; }
+    vkGetPhysicalDeviceQueueFamilyProperties(G.phys, &nq, NULL);
+    qf = (VkQueueFamilyProperties *)calloc(nq ? nq : 1, sizeof(*qf));
+    if (!qf) return;
+    vkGetPhysicalDeviceQueueFamilyProperties(G.phys, &nq, qf);
+    if (s_dev.queue_family < nq) bits = qf[s_dev.queue_family].timestampValidBits;
+    free(qf);
+    if (!bits) { LOG("gpu timers: the queue family has no valid timestamp bits"); return; }
+    G.gt.mask = bits >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << bits) - 1u);
+    G.gt.ms_per_tick = (double)G.props.limits.timestampPeriod / 1.0e6;
+    qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qi.queryCount = 2 * GT_MAX_PASSES;
+    for (i = 0; i < KVK_FRAMES; i++) {
+        if (!VKOK(vkCreateQueryPool(G.dev, &qi, NULL, &G.gt.pool[i]))) {
+            while (--i >= 0) vkDestroyQueryPool(G.dev, G.gt.pool[i], NULL);
+            LOG("gpu timers: query pools could not be created");
+            return;
+        }
+    }
+    G.gt.on = true;
+    LOG("gpu timers on: %u valid bits, %.1f ns per tick, a log line every %d frames", bits, (double)G.props.limits.timestampPeriod, GT_WINDOW);
+}
+
+static void gt_shutdown(void)
+{
+    int i;
+    if (!G.gt.on) return;
+    for (i = 0; i < KVK_FRAMES; i++) vkDestroyQueryPool(G.dev, G.gt.pool[i], NULL);
+    G.gt.on = false;
+}
+
+/* the frame's command buffer was just begun: its query pool starts clean */
+static void gt_frame_begin(VkCommandBuffer cb)
+{
+    G.gt.np[G.fi] = 0;
+    G.gt.open = -1;
+    G.gt.main_seen = 0;
+    if (G.gt.on) vkCmdResetQueryPool(cb, G.gt.pool[G.fi], 0, 2 * GT_MAX_PASSES);
+}
+
+/* before vkCmdBeginRenderPass / after vkCmdEndRenderPass, outside the pass */
+static void gt_pass_begin(int cls, bool fdm)
+{
+    const int i = G.fi;
+    const uint32_t n = G.gt.np[i];
+    if (!G.gt.on) return;
+    if (n >= GT_MAX_PASSES) { G.gt.open = -1; return; }
+    vkCmdWriteTimestamp(cmd(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, G.gt.pool[i], 2 * n);
+    G.gt.cls[i][n] = (uint8_t)cls;
+    G.gt.fdm[i][n] = fdm ? 1 : 0;
+    G.gt.open = (int)n;
+}
+
+static void gt_pass_end(void)
+{
+    if (!G.gt.on || G.gt.open < 0) return;
+    vkCmdWriteTimestamp(cmd(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, G.gt.pool[G.fi], 2 * (uint32_t)G.gt.open + 1);
+    G.gt.np[G.fi]++;
+    G.gt.open = -1;
+}
+
+static void gt_log(void)
+{
+    const double n = G.gt.frames ? (double)G.gt.frames : 1.0;
+    LOG("gpu ms/frame over %u frames (%u with a stereo world pass; foveation %s, %u foveated passes in %u frames): "
+        "span %.2f (worst %.2f) | main-first %.2f main-rest %.2f depth-as-colour %.2f offscreen %.2f hud %.2f compose %.2f "
+        "other %.2f | between passes %.2f | %.1f passes/frame",
+        G.gt.frames, G.gt.stereo_frames, G.fdm.dev ? (G.fdm.level ? "ON" : "level off") : "unavailable",
+        G.gt.fdm_passes, G.gt.fdm_frames, G.gt.acc_frame / n, G.gt.max_frame, G.gt.acc[GT_MAIN_FIRST] / n,
+        G.gt.acc[GT_MAIN_REST] / n, G.gt.acc[GT_DEPTHCOL] / n, G.gt.acc[GT_OFFSCREEN] / n, G.gt.acc[GT_HUD] / n,
+        G.gt.acc[GT_COMPOSE] / n, G.gt.acc[GT_OTHER] / n, G.gt.acc_gap / n, (double)G.gt.passes / n);
+    memset(G.gt.acc, 0, sizeof(G.gt.acc));
+    G.gt.acc_frame = G.gt.acc_gap = G.gt.max_frame = 0.0;
+    G.gt.frames = G.gt.passes = G.gt.fdm_passes = G.gt.fdm_frames = G.gt.stereo_frames = 0;
+}
+
+/* the frame slot `fi`'s fence has signalled: its timestamps are final */
+static void gt_collect(int fi)
+{
+    uint64_t ts[2 * GT_MAX_PASSES];
+    const uint32_t n = G.gt.np[fi];
+    uint32_t i;
+    double sum = 0.0, span;
+    bool any_fdm = false, stereo = false;
+    if (!G.gt.on) return;
+    G.gt.np[fi] = 0;
+    if (!n) return;
+    if (!VKOK(vkGetQueryPoolResults(G.dev, G.gt.pool[fi], 0, 2 * n, sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT))) return;
+    for (i = 0; i < n; i++) {
+        const double ms = (double)(((ts[2 * i + 1] & G.gt.mask) - (ts[2 * i] & G.gt.mask)) & G.gt.mask) * G.gt.ms_per_tick;
+        G.gt.acc[G.gt.cls[fi][i]] += ms;
+        sum += ms;
+        if (G.gt.fdm[fi][i]) { G.gt.fdm_passes++; any_fdm = true; }
+        if (G.gt.cls[fi][i] == GT_MAIN_FIRST) stereo = true;
+    }
+    span = (double)(((ts[2 * n - 1] & G.gt.mask) - (ts[0] & G.gt.mask)) & G.gt.mask) * G.gt.ms_per_tick;
+    G.gt.acc_frame += span;
+    G.gt.acc_gap += span > sum ? span - sum : 0.0;
+    if (span > G.gt.max_frame) G.gt.max_frame = span;
+    G.gt.passes += n;
+    if (any_fdm) G.gt.fdm_frames++;
+    if (stereo) G.gt.stereo_frames++;
+    if (++G.gt.frames >= GT_WINDOW) gt_log();
+}
+
+/* RECOMP_KVK_PASSLOG=1: the pass list of one frame (RECOMP_KVK_PASSLOG_FRAME, default 600): class, size, layers,
+ * whether the density map is on it, draws. Also logs what a pass WOULD get when the device has no density map. */
+static int s_passlog = -1;
+static uint64_t s_passlog_frame = 600;
+static int passlog_on(void)
+{
+    if (s_passlog < 0) {
+        const char *e = getenv("RECOMP_KVK_PASSLOG"), *f = getenv("RECOMP_KVK_PASSLOG_FRAME");
+        s_passlog = e && *e && *e != '0';
+        if (f && *f) s_passlog_frame = strtoull(f, NULL, 10);
+    }
+    return s_passlog && G.st.frames == s_passlog_frame;
+}
+
+static void pass_note(int cls, unsigned w, unsigned h, unsigned layers, bool fdm, bool would, uint64_t draws)
+{
+    if (!passlog_on()) return;
+    LOG("pass (frame %llu): %-15s %ux%u x%u  density map %s  draws %llu", (unsigned long long)G.st.frames, k_gt_name[cls], w, h,
+        layers, fdm ? "ON" : would ? "no (the pass qualifies, the map is off or not ready)" : "no", (unsigned long long)draws);
+}
+
 /* A failed submit or fence wait is logged (the first few): VK_ERROR_DEVICE_LOST otherwise only shows as frames that
  * stop changing, which on the headset reads as a hang (port/notes/device-preflight.md). */
 static void vk_frame_error(const char *what, VkResult r)
@@ -705,6 +894,7 @@ static void frame_begin(void)
         vk_frame_error("vkWaitForFences (frame)", vkWaitForFences(G.dev, 1, &f->fence, VK_TRUE, UINT64_MAX));
         vkResetFences(G.dev, 1, &f->fence);
         f->pending = false;
+        gt_collect(G.fi);
     }
     run_dead(f);
     for (i = 0; i < f->ntpool; i++) vkResetDescriptorPool(G.dev, f->tpool[i], 0);
@@ -715,6 +905,7 @@ static void frame_begin(void)
     f->ucb_open = false;
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(f->cb, &bi);
+    gt_frame_begin(f->cb);
     last_reset();
     memset(&P, 0, sizeof(P));
 }
@@ -740,6 +931,7 @@ static void frame_submit(bool wait)
         vkWaitForFences(G.dev, 1, &f->fence, VK_TRUE, UINT64_MAX);
         vkResetFences(G.dev, 1, &f->fence);
         f->pending = false;
+        gt_collect(G.fi);
     }
     G.fi = (G.fi + 1) % KVK_FRAMES;
     frame_begin();
@@ -1097,14 +1289,15 @@ static VkShaderModule ps_lookup(const PSConst *c, uint64_t *sid, uint32_t *slen)
 
 enum { LOAD_LOAD = 0, LOAD_CLEAR, LOAD_DONTCARE };
 
-static VkRenderPass rp_get(VkFormat cf, VkFormat df, uint32_t views, int cload, int dload)
+static VkRenderPass rp_get_x(VkFormat cf, VkFormat df, uint32_t views, int cload, int dload, bool fdm)
 {
-    VkAttachmentDescription at[2];
+    VkAttachmentDescription at[3];
     VkAttachmentReference cr = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL }, dr;
     VkSubpassDescription sp;
     VkSubpassDependency dep[2];
     VkRenderPassCreateInfo ci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
     VkRenderPassMultiviewCreateInfo mv = { VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO };
+    VkRenderPassFragmentDensityMapCreateInfoEXT fdmi = { VK_STRUCTURE_TYPE_RENDER_PASS_FRAGMENT_DENSITY_MAP_CREATE_INFO_EXT };
     uint32_t mask = (1u << views) - 1u, n = 0;
     static const VkAttachmentLoadOp ops[3] = { VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_LOAD_OP_DONT_CARE };
     int i;
@@ -1112,9 +1305,10 @@ static VkRenderPass rp_get(VkFormat cf, VkFormat df, uint32_t views, int cload, 
     for (i = 0; i < KVK_RP_MAX; i++) {
         KvkRp *r = &G.rp[i];
         if (!r->used) { if (!free_slot) free_slot = r; continue; }
-        if (r->cf == cf && r->df == df && r->views == views && r->cload == cload && r->dload == dload) return r->rp;
+        if (r->cf == cf && r->df == df && r->views == views && r->cload == cload && r->dload == dload && r->fdm == fdm) return r->rp;
     }
     if (!free_slot) return VK_NULL_HANDLE;
+    if (fdm && !G.fdm.dev) return VK_NULL_HANDLE;
     memset(at, 0, sizeof(at));
     memset(&sp, 0, sizeof(sp));
     memset(dep, 0, sizeof(dep));
@@ -1142,6 +1336,18 @@ static VkRenderPass rp_get(VkFormat cf, VkFormat df, uint32_t views, int cload, 
         dr.attachment = n++;
         dr.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         sp.pDepthStencilAttachment = &dr;
+    }
+    if (fdm) {
+        /* the density map: read by the hardware before the pass, never by a subpass; it stays in its own layout */
+        at[n].format = VK_FORMAT_R8G8_UNORM;
+        at[n].samples = VK_SAMPLE_COUNT_1_BIT;
+        at[n].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        at[n].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        at[n].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        at[n].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        at[n].initialLayout = at[n].finalLayout = VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT;
+        fdmi.fragmentDensityMapAttachment.attachment = n++;
+        fdmi.fragmentDensityMapAttachment.layout = VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT;
     }
     /* everything before and after the pass that touches its attachments: earlier passes, transfers, clears.
      * The subpass side of each dependency may only name graphics stages (VUID-VkRenderPassCreateInfo-
@@ -1173,24 +1379,33 @@ static VkRenderPass rp_get(VkFormat cf, VkFormat df, uint32_t views, int cload, 
         mv.pCorrelationMasks = &mask;
         ci.pNext = &mv;
     }
+    if (fdm) {
+        fdmi.pNext = (void *)ci.pNext;
+        ci.pNext = &fdmi;
+    }
     if (!VKOK(vkCreateRenderPass(G.dev, &ci, NULL, &free_slot->rp))) return VK_NULL_HANDLE;
     free_slot->used = true;
     free_slot->cf = cf; free_slot->df = df; free_slot->views = views;
-    free_slot->cload = cload; free_slot->dload = dload;
+    free_slot->cload = cload; free_slot->dload = dload; free_slot->fdm = fdm;
     return free_slot->rp;
 }
 
-static VkFramebuffer fb_get(VkRenderPass compat, VkImageView c, VkImageView d, uint32_t w, uint32_t h)
+static VkRenderPass rp_get(VkFormat cf, VkFormat df, uint32_t views, int cload, int dload)
+{
+    return rp_get_x(cf, df, views, cload, dload, false);
+}
+
+static VkFramebuffer fb_get(VkRenderPass compat, VkImageView c, VkImageView d, uint32_t w, uint32_t h, VkImageView fv)
 {
     VkFramebufferCreateInfo ci = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-    VkImageView v[2];
+    VkImageView v[3];
     uint32_t n = 0;
     int i;
     KvkFb *slot = NULL;
     for (i = 0; i < KVK_FB_MAX; i++) {
         KvkFb *f = &G.fb[i];
         if (!f->used) { if (!slot) slot = f; continue; }
-        if (f->c == c && f->d == d && f->rp == compat && f->w == w && f->h == h) return f->fb;
+        if (f->c == c && f->d == d && f->f == fv && f->rp == compat && f->w == w && f->h == h) return f->fb;
     }
     if (!slot) {
         /* full: drop one (its frame may still use it: deferred) */
@@ -1204,12 +1419,13 @@ static VkFramebuffer fb_get(VkRenderPass compat, VkImageView c, VkImageView d, u
     }
     if (c) v[n++] = c;
     if (d) v[n++] = d;
+    if (fv) v[n++] = fv;                /* the density map, last: render pass attachment order */
     ci.renderPass = compat;
     ci.attachmentCount = n;
     ci.pAttachments = v;
     ci.width = w; ci.height = h; ci.layers = 1;
     if (!VKOK(vkCreateFramebuffer(G.dev, &ci, NULL, &slot->fb))) return VK_NULL_HANDLE;
-    slot->used = true; slot->c = c; slot->d = d; slot->rp = compat; slot->w = w; slot->h = h;
+    slot->used = true; slot->c = c; slot->d = d; slot->f = fv; slot->rp = compat; slot->w = w; slot->h = h;
     return slot->fb;
 }
 
@@ -1259,6 +1475,7 @@ typedef struct KvkPipeDesc {
     uint32_t vs_len, fs_len;
     VkFormat cf, df;
     uint32_t views;
+    bool fdm;                   /* for a render pass with the density map attached (its own pipeline variant) */
 } KvkPipeDesc;
 
 /* the built-in shaders' identities (a GLSL hash is never this small) */
@@ -1294,6 +1511,7 @@ static void pipe_key(const KvkPipeDesc *d, KvkPipeKey *k)
             ((uint32_t)(d->sfunc & 7) << 6) | ((uint32_t)(d->sfail & 15) << 9) | ((uint32_t)(d->szfail & 15) << 13) |
             ((uint32_t)(d->szpass & 15) << 17);
     k->rs = (uint32_t)d->topo | ((uint32_t)d->cull << 2) | (d->ccw ? 16u : 0u) | (d->clamp ? 32u : 0u);
+    k->pad = d->fdm ? 1u : 0u;        /* 0 for every pass without the map: keys and manifests of a build without it are unchanged */
 }
 
 /* The inverse of pipe_key's state words (the manifest stores the key). */
@@ -1306,6 +1524,7 @@ static void pipe_desc_from_key(const KvkPipeKey *k, KvkPipeDesc *d)
     d->szfail = (int)((k->ds >> 13) & 15); d->szpass = (int)((k->ds >> 17) & 15);
     d->topo = (int)(k->rs & 3); d->cull = (VkCullModeFlags)((k->rs >> 2) & 3); d->ccw = (k->rs & 16u) != 0;
     d->clamp = (k->rs & 32u) != 0;
+    d->fdm = (k->pad & 1u) != 0;
 }
 
 /* RECOMP_KGPU_PIPE_ASYNC: title-draw pipelines are created on the compile workers; until one is ready the draw uses
@@ -1449,6 +1668,7 @@ typedef struct KvkPipeJob {
     KvkPipeDesc d;
     KvkPipeKey k;
     bool record;                            /* a pipeline met for the first time: add it to the manifest */
+    bool twin;                              /* a startup foveated variant: counted in G.fdm.twin_pending */
 } KvkPipeJob;
 
 static VkShaderModule module_from_cache(int stage, uint64_t sid, uint32_t len)
@@ -1480,6 +1700,7 @@ static void pipe_job_run(KvkPipeJob *pj)
     pj->e->pipe = pipe;
     __atomic_store_n(&pj->e->state, ok ? 1 : 2, __ATOMIC_RELEASE);
     if (ok && pj->record) pipe_manifest_add(&pj->d, &pj->k);
+    if (pj->twin) __atomic_sub_fetch(&G.fdm.twin_pending, 1, __ATOMIC_RELEASE);
     free(pj);
 }
 
@@ -1537,7 +1758,7 @@ static void pipe_manifest_precreate(void)
         KvkPipeJob *pj;
         KvkPipe *e = NULL;
         VkFormatProperties fp;
-        unsigned int i, slot;
+        unsigned int i2, slot;
         uint64_t h;
         memcpy(&r, buf + at, sizeof(r));
         if (r.magic != KVK_PMAN_MAGIC || !r.views || r.views > G.layers || !r.key.vs || !r.key.fs) { skipped++; continue; }
@@ -1560,24 +1781,37 @@ static void pipe_manifest_precreate(void)
         if (d.vs_sid == KVK_SID_VS_CPU) d.vs = G.vs_cpu;
         if (d.fs_sid == KVK_SID_UBER) d.fs = G.ps_uber;
         if (d.fs_sid == KVK_SID_UBER_FLAT) d.fs = G.ps_uber_flat;
-        d.rp = rp_get(d.cf, d.df, d.views, LOAD_LOAD, LOAD_LOAD);
-        if (!d.rp) { skipped++; continue; }
         {
-            KvkPipeKey k;
-            pipe_key(&d, &k);                   /* this device's key (its depth format) */
-            h = kvk_hash64(&k, sizeof(k));
-            slot = (unsigned int)(h % KVK_PIPE_MAX);
-            for (i = 0; i < KVK_PIPE_MAX; i++, slot = (slot + 1) % KVK_PIPE_MAX) {
-                KvkPipe *q = &G.pipe[slot];
-                if (!q->used) { e = q; break; }
-                if (!memcmp(&q->key, &k, sizeof(k))) break;     /* a duplicate record */
+            /* a record without the map, of a stereo pass with colour and depth (the main targets' kind): its foveated
+             * variant is queued as well, so the first foveated frame finds its pipelines made (G.fdm.twin_pending) */
+            const bool recfdm = (r.key.pad & 1u) != 0;
+            const bool twin = !recfdm && G.fdm.dev && d.views == 2 && d.cf != VK_FORMAT_UNDEFINED && d.df != VK_FORMAT_UNDEFINED;
+            int var;
+            bool stop = false;
+            for (var = 0; var < (twin ? 2 : 1) && !stop; var++) {
+                KvkPipeKey k;
+                d.fdm = recfdm || var == 1;
+                if (d.fdm && !G.fdm.dev) { skipped++; continue; }
+                d.rp = rp_get_x(d.cf, d.df, d.views, LOAD_LOAD, LOAD_LOAD, d.fdm);
+                if (!d.rp) { skipped++; continue; }
+                e = NULL;
+                pipe_key(&d, &k);                   /* this device's key (its depth format) */
+                h = kvk_hash64(&k, sizeof(k));
+                slot = (unsigned int)(h % KVK_PIPE_MAX);
+                for (i2 = 0; i2 < KVK_PIPE_MAX; i2++, slot = (slot + 1) % KVK_PIPE_MAX) {
+                    KvkPipe *q = &G.pipe[slot];
+                    if (!q->used) { e = q; break; }
+                    if (!memcmp(&q->key, &k, sizeof(k))) break;     /* a duplicate record */
+                }
+                if (!e) continue;
+                if (!(pj = (KvkPipeJob *)calloc(1, sizeof(*pj)))) { stop = true; break; }
+                e->used = true; e->key = k; e->state = 0; e->pipe = VK_NULL_HANDLE;
+                pj->e = e; pj->d = d; pj->k = k; pj->record = false;
+                if (d.fdm && !recfdm) { pj->twin = true; __atomic_add_fetch(&G.fdm.twin_pending, 1, __ATOMIC_RELAXED); }
+                job_post(3, pj);
+                queued++;
             }
-            if (!e) continue;
-            if (!(pj = (KvkPipeJob *)calloc(1, sizeof(*pj)))) break;
-            e->used = true; e->key = k; e->state = 0; e->pipe = VK_NULL_HANDLE;
-            pj->e = e; pj->d = d; pj->k = k; pj->record = false;
-            job_post(3, pj);
-            queued++;
+            if (stop) break;
         }
     }
     free(buf);
@@ -1984,11 +2218,37 @@ static KvkSurf *surf_depth_for_texture(const KTexture *t)
 
 /* ---- render passes ------------------------------------------------------------------------------------------------ */
 
+/* The density map and the main target. main_like: a host-size colour target of every eye (the world's target). want: a
+ * pass the map may be on, device or not: that target (with a depth buffer of its size) in a STEREO frame. use: ...and
+ * the map exists, is filled, and its pipeline variants are made. Flat frames, the HUD, the offscreen chains and the
+ * depth-as-colour pass never qualify (they are not main_like, or the frame is not STEREO). */
+static bool fdm_main_like(const KvkSurf *cs)
+{
+    return cs && !cs->depth && !cs->hud && G.layers > 1 && cs->im.layers == G.layers && cs->hw == G.host_w && cs->hh == G.host_h;
+}
+
+static bool fdm_pass_want(const KvkSurf *cs, const KvkSurf *zs)
+{
+    if (!fdm_main_like(cs)) return false;
+    if (zs && (zs->im.layers != cs->im.layers || zs->hw != cs->hw || zs->hh != cs->hh)) return false;
+    return kvk_vr_frame_mode() == VR_PRESENT_STEREO;
+}
+
+static bool fdm_pass_use(const KvkSurf *cs, const KvkSurf *zs)
+{
+    return G.fdm.dev && G.fdm.ready && G.fdm.level > 0 && __atomic_load_n(&G.fdm.twin_pending, __ATOMIC_ACQUIRE) == 0 &&
+           fdm_pass_want(cs, zs);
+}
+
 static void pass_end(void)
 {
     if (!P.active) return;
     vkCmdEndRenderPass(cmd());
+    gt_pass_end();
+    if (passlog_on() && P.cs) pass_note(P.cls, P.cs->hw, P.cs->hh, P.views, P.fdm, fdm_pass_want(P.cs, P.zs), G.st.draws - P.draws0);
+    else if (passlog_on()) pass_note(P.cls, P.zs ? P.zs->hw : 0, P.zs ? P.zs->hh : 0, P.views, false, false, G.st.draws - P.draws0);
     P.active = false;
+    P.fdm = false;
     P.cs = P.zs = NULL;
     G.st.passes++;
 }
@@ -2013,9 +2273,10 @@ static bool pass_begin(KvkSurf *cs, KvkSurf *zs)
     VkClearValue cv[2];
     VkRenderPass rp, compat;
     VkFramebuffer fb;
-    int cload = LOAD_LOAD, dload = LOAD_LOAD;
+    int cload = LOAD_LOAD, dload = LOAD_LOAD, cls, attempt;
     uint32_t n = 0, w, h, views;
     const KvkSurf *ref = cs ? cs : zs;
+    bool fdm;
     if (P.active && P.cs == cs && P.zs == zs) return true;
     pass_end();
     if (!ref) return false;
@@ -2040,28 +2301,39 @@ static bool pass_begin(KvkSurf *cs, KvkSurf *zs)
         barrier(cb, &zs->im, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         n++;
     }
-    rp = rp_get(cs ? cs->im.fmt : VK_FORMAT_UNDEFINED, zs ? zs->im.fmt : VK_FORMAT_UNDEFINED, views, cload, dload);
-    compat = rp_get(cs ? cs->im.fmt : VK_FORMAT_UNDEFINED, zs ? zs->im.fmt : VK_FORMAT_UNDEFINED, views, LOAD_LOAD, LOAD_LOAD);
-    fb = compat ? fb_get(compat, cs ? cs->im.att : VK_NULL_HANDLE, zs ? zs->im.att : VK_NULL_HANDLE, w, h) : VK_NULL_HANDLE;
-    if (!rp || !fb) return false;
+    fdm = fdm_pass_use(cs, zs);
+    for (attempt = 0; attempt < 2; attempt++) {
+        rp = rp_get_x(cs ? cs->im.fmt : VK_FORMAT_UNDEFINED, zs ? zs->im.fmt : VK_FORMAT_UNDEFINED, views, cload, dload, fdm);
+        compat = rp_get_x(cs ? cs->im.fmt : VK_FORMAT_UNDEFINED, zs ? zs->im.fmt : VK_FORMAT_UNDEFINED, views, LOAD_LOAD, LOAD_LOAD, fdm);
+        fb = compat ? fb_get(compat, cs ? cs->im.att : VK_NULL_HANDLE, zs ? zs->im.att : VK_NULL_HANDLE, w, h, fdm ? G.fdm.map.att : VK_NULL_HANDLE) : VK_NULL_HANDLE;
+        if (rp && fb) break;
+        if (!fdm) return false;
+        fdm = false;                        /* the foveated variant could not be made: this pass without the map */
+    }
+    cls = !cs ? GT_OTHER : cs->hud ? GT_HUD : fdm_main_like(cs) ? (G.gt.main_seen++ ? GT_MAIN_REST : GT_MAIN_FIRST) : GT_OFFSCREEN;
     bi.renderPass = rp;
     bi.framebuffer = fb;
     bi.renderArea.extent.width = w;
     bi.renderArea.extent.height = h;
     bi.clearValueCount = n;
     bi.pClearValues = cv;
+    gt_pass_begin(cls, fdm);
     vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
     state_forget();
     P.active = true;
     P.cs = cs; P.zs = zs;
     P.views = views;
+    P.fdm = fdm;
+    P.cls = cls;
+    P.draws0 = G.st.draws;
+    if (fdm) G.fdm.passes++;
     return true;
 }
 
 static VkRenderPass pass_compat(void)
 {
-    return rp_get(P.cs ? P.cs->im.fmt : VK_FORMAT_UNDEFINED, P.zs ? P.zs->im.fmt : VK_FORMAT_UNDEFINED, P.views,
-                  LOAD_LOAD, LOAD_LOAD);
+    return rp_get_x(P.cs ? P.cs->im.fmt : VK_FORMAT_UNDEFINED, P.zs ? P.zs->im.fmt : VK_FORMAT_UNDEFINED, P.views,
+                    LOAD_LOAD, LOAD_LOAD, P.fdm);
 }
 
 /* ---- per-draw buffers ---------------------------------------------------------------------------------------------- */
@@ -2359,7 +2631,7 @@ static VkImageView depth_as_color(KvkSurf *d)
         barrier(cmd(), &d->conv, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         rp = rp_get(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_UNDEFINED, d->conv.layers, LOAD_DONTCARE, LOAD_LOAD);
         compat = rp_get(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_UNDEFINED, d->conv.layers, LOAD_LOAD, LOAD_LOAD);
-        fb = fb_get(compat, d->conv.att, VK_NULL_HANDLE, d->hw, d->hh);
+        fb = fb_get(compat, d->conv.att, VK_NULL_HANDLE, d->hw, d->hh, VK_NULL_HANDLE);
         pipe = fixed_pipe(G.fix[KVK_FIX_FULLSCREEN_VS], G.fix[KVK_FIX_D2C_PS], compat, true, false, RS_LIST, blend_none(15));
         s1 = tset_single(d->im.view, G.smp_nearest);
         if (!rp || !fb || !pipe || !s1) return VK_NULL_HANDLE;
@@ -2367,11 +2639,14 @@ static VkImageView depth_as_color(KvkSurf *d)
         bi.framebuffer = fb;
         bi.renderArea.extent.width = d->hw;
         bi.renderArea.extent.height = d->hh;
+        gt_pass_begin(GT_DEPTHCOL, false);
         vkCmdBeginRenderPass(cmd(), &bi, VK_SUBPASS_CONTENTS_INLINE);
         state_forget();
         memset(&pc, 0, sizeof(pc));
         fullscreen_draw(pipe, s1, &pc, d->hw, d->hh);
         vkCmdEndRenderPass(cmd());
+        gt_pass_end();
+        pass_note(GT_DEPTHCOL, d->hw, d->hh, d->conv.layers, false, false, 1);
         barrier(cmd(), &d->conv, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         d->conv_ver = d->ver;
     } else if (d->conv.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
@@ -2397,7 +2672,7 @@ static void depth_from_color(KvkSurf *z, KvkSurf *c)
     barrier(cmd(), &z->im, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     rp = rp_get(VK_FORMAT_UNDEFINED, z->im.fmt, z->im.layers, LOAD_LOAD, LOAD_LOAD);
     compat = rp;
-    fb = rp ? fb_get(compat, VK_NULL_HANDLE, z->im.att, z->hw, z->hh) : VK_NULL_HANDLE;
+    fb = rp ? fb_get(compat, VK_NULL_HANDLE, z->im.att, z->hw, z->hh, VK_NULL_HANDLE) : VK_NULL_HANDLE;
     pipe = rp ? fixed_pipe(G.fix[KVK_FIX_FULLSCREEN_VS], G.fix[KVK_FIX_C2D_PS], compat, false, true, RS_LIST, 0) : VK_NULL_HANDLE;
     s1 = tset_single(c->im.view, G.smp_nearest);
     if (!fb || !pipe || !s1) return;
@@ -2405,11 +2680,14 @@ static void depth_from_color(KvkSurf *z, KvkSurf *c)
     bi.framebuffer = fb;
     bi.renderArea.extent.width = z->hw;
     bi.renderArea.extent.height = z->hh;
+    gt_pass_begin(GT_OTHER, false);
     vkCmdBeginRenderPass(cmd(), &bi, VK_SUBPASS_CONTENTS_INLINE);
     state_forget();
     memset(&pc, 0, sizeof(pc));
     fullscreen_draw(pipe, s1, &pc, z->hw, z->hh);
     vkCmdEndRenderPass(cmd());
+    gt_pass_end();
+    pass_note(GT_OTHER, z->hw, z->hh, z->im.layers, false, false, 1);
     z->src_ver = c->ver;
     z->ver++;
     z->wseq = ++G.wseq;
@@ -3007,6 +3285,7 @@ static void draw_now(const KGpuDraw *d)
     pd.cf = P.cs ? P.cs->im.fmt : VK_FORMAT_UNDEFINED;
     pd.df = P.zs ? P.zs->im.fmt : VK_FORMAT_UNDEFINED;
     pd.views = P.views;
+    pd.fdm = P.fdm;
     pd.has_color = cs != NULL;
     if (cs) {
         VkColorComponentFlags mask = kvk_write_mask(ps->mask_r, ps->mask_g, ps->mask_b, ps->mask_a && has_alpha);
@@ -3396,6 +3675,107 @@ static KvkEyeView *eye_view(VkImage img, uint32_t layer, uint32_t layers, VkForm
     return e;
 }
 
+/* ---- the fragment density map (kvk_fdm.h) ------------------------------------------------------------------------ */
+
+/* RECOMP_KVK_FDM=0: no density map at all (the shell does not even enable the device features). Anything else, or unset:
+ * on where the device has it, at blackvr.ini's foveation level (the settings menu changes it live). */
+static void fdm_init(void)
+{
+    const char *e = getenv("RECOMP_KVK_FDM");
+    VkFormatProperties fp;
+    uint32_t tw, th;
+    memset(&G.fdm, 0, sizeof(G.fdm));
+    if (!s_dev.fdm) { LOG("fdm: the device has no usable VK_EXT_fragment_density_map: the main passes stay unfoveated"); return; }
+    if (e && *e == '0') { LOG("fdm: off (RECOMP_KVK_FDM=0)"); return; }
+    if (G.layers != 2) { LOG("fdm: off (not a stereo frame)"); return; }
+    vkGetPhysicalDeviceFormatProperties(G.phys, VK_FORMAT_R8G8_UNORM, &fp);
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_FRAGMENT_DENSITY_MAP_BIT_EXT)) {
+        LOG("fdm: off (R8G8_UNORM cannot be a density map on this device)");
+        return;
+    }
+    G.fdm.texel_w = s_dev.fdm_texel_w ? s_dev.fdm_texel_w : 16;
+    G.fdm.texel_h = s_dev.fdm_texel_h ? s_dev.fdm_texel_h : 16;
+    tw = kvk_fdm_dim(G.host_w, G.fdm.texel_w);
+    th = kvk_fdm_dim(G.host_h, G.fdm.texel_h);
+    if (!img_create(&G.fdm.map, VK_FORMAT_R8G8_UNORM, tw, th, 2, 1,
+                    VK_IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+        LOG("fdm: off (the %ux%u density map image could not be created)", tw, th);
+        memset(&G.fdm, 0, sizeof(G.fdm));
+        return;
+    }
+    G.fdm.mw = tw; G.fdm.mh = th;
+    G.fdm.dev = true;
+    LOG("fdm: density map %ux%u texels (%ux%u px each) x2 eyes for the %ux%u main target; foveation level follows blackvr.ini",
+        tw, th, G.fdm.texel_w, G.fdm.texel_h, G.host_w, G.host_h);
+}
+
+/* Fill both eyes' layers into the frame's upload ring and copy them into the map in this frame's upload command buffer,
+ * which runs before the frame's passes and (the barrier) after the earlier frames' passes that still read the old map. */
+static bool fdm_upload(int level, const float cx[2], const float cy[2], const float tud[2])
+{
+    const uint32_t per = G.fdm.mw * G.fdm.mh * 2u, total = per * 2u;
+    KvkFdmParams p;
+    VkDeviceSize off;
+    uint8_t *dst;
+    VkBufferImageCopy bc;
+    VkCommandBuffer ucb;
+    int e;
+    if (!ring_reserve(total + 64)) return false;
+    dst = ring_take(total, 16, &off);
+    for (e = 0; e < 2; e++) {
+        p.width = G.host_w; p.height = G.host_h; p.texel_w = G.fdm.texel_w; p.texel_h = G.fdm.texel_h;
+        p.cx = cx[e]; p.cy = cy[e]; p.level = level;
+        if (kvk_fdm_fill(dst + (size_t)e * per, per, &p, tud[e]) != per) return false;
+        if (e == 0) G.fdm.work = kvk_fdm_work(dst, &p);
+    }
+    ucb = upload_cmd();
+    barrier(ucb, &G.fdm.map, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    memset(&bc, 0, sizeof(bc));
+    bc.bufferOffset = off;
+    bc.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    bc.imageSubresource.layerCount = 2;
+    bc.imageExtent.width = G.fdm.mw; bc.imageExtent.height = G.fdm.mh; bc.imageExtent.depth = 1;
+    vkCmdCopyBufferToImage(ucb, cur_frame()->chunk[cur_frame()->cur].b.buf, G.fdm.map.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bc);
+    barrier(ucb, &G.fdm.map, VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT);
+    G.fdm.uploads++;
+    return true;
+}
+
+/* Once per flip: the level now in force and the eyes' projection centres. A new level or field of view refills the map
+ * (a recorded frame's passes then read the new map, which is harmless). Passes use the map only from the next frame on. */
+static void fdm_frame(void)
+{
+    const VrFrameState *fs;
+    float cx[2], cy[2], tud[2];
+    int level, e;
+    uint64_t sig;
+    struct { int level; float c[4], t[2]; uint32_t w, h; } key;
+    if (!G.fdm.dev) return;
+    level = vr_foveation_level();
+    if (level < KVK_FDM_OFF || level > KVK_FDM_HIGH_TOP) level = KVK_FDM_OFF;
+    if (level == KVK_FDM_OFF) { G.fdm.level = 0; return; }
+    fs = vr_frame_state();
+    if (!fs) return;                    /* no field of view yet: no map, no foveated pass */
+    for (e = 0; e < 2; e++) {
+        const VrFov *f = &fs->eye[e].fov;
+        const float tl = tanf(f->left), tr = tanf(f->right), tu = tanf(f->up), td = tanf(f->down);
+        kvk_fdm_centre(&cx[e], &cy[e], tl, tr, tu, td);     /* 0.5, 0.5 when the field of view is unusable */
+        tud[e] = isfinite(tu - td) ? tu - td : 0.0f;
+    }
+    memset(&key, 0, sizeof(key));
+    key.level = level; key.c[0] = cx[0]; key.c[1] = cy[0]; key.c[2] = cx[1]; key.c[3] = cy[1];
+    key.t[0] = tud[0]; key.t[1] = tud[1]; key.w = G.host_w; key.h = G.host_h;
+    sig = kvk_hash64(&key, sizeof(key));
+    if (!G.fdm.ready || sig != G.fdm.sig) {
+        if (!fdm_upload(level, cx, cy, tud)) { LOG("fdm: the density map could not be filled: foveation stays off"); G.fdm.dev = false; G.fdm.level = 0; return; }
+        G.fdm.sig = sig;
+        G.fdm.ready = true;
+        LOG("fdm: density map filled: level %d, centres L(%.3f,%.3f) R(%.3f,%.3f), the left map shades %.1f%% of the pixels",
+            level, cx[0], cy[0], cx[1], cy[1], G.fdm.work * 100.0f);
+    }
+    G.fdm.level = level;
+}
+
 /* One pass over an eye image view (both eyes under multiview, or eye `eye`): the world from the main target's
  * layers, or a frame without world on the virtual screen; then the HUD on the virtual screen. */
 static void compose_pass(KvkEyeView *ev, int eye, KvkSurf *main_cs, KvkSurf *hud_cs, bool world)
@@ -3430,6 +3810,7 @@ static void compose_pass(KvkEyeView *ev, int eye, KvkSurf *main_cs, KvkSurf *hud
     bi.renderArea.extent.height = ev->h;
     bi.clearValueCount = 1;
     bi.pClearValues = &cv;
+    gt_pass_begin(GT_COMPOSE, false);
     vkCmdBeginRenderPass(cmd(), &bi, VK_SUBPASS_CONTENTS_INLINE);
     P.pipe = VK_NULL_HANDLE; P.set1 = VK_NULL_HANDLE; P.bound0 = false; P.dyn = false;
     memset(&pc, 0, sizeof(pc));
@@ -3472,6 +3853,8 @@ static void compose_pass(KvkEyeView *ev, int eye, KvkSurf *main_cs, KvkSurf *hud
         }
     }
     vkCmdEndRenderPass(cmd());
+    gt_pass_end();
+    pass_note(GT_COMPOSE, ev->w, ev->h, views, false, false, 1);
     P.pipe = VK_NULL_HANDLE; P.set1 = VK_NULL_HANDLE; P.bound0 = false; P.dyn = false;
 }
 
@@ -3521,6 +3904,7 @@ static void flip_now(const KelvinTarget *t, unsigned int color_format)
     unsigned int i;
     if (!G.ok) return;
     cs = surf_get_ex(t, false, color_format, false);
+    fdm_frame();                                        /* the density map for the passes of the frames to come */
     if (cs) composed = compose_eyes(cs);
     G.st.frames++;
     G.st.world_draws += V.world_draws;
@@ -3815,8 +4199,10 @@ bool kgpu_init(void)
     if (!kvk_spirv_init()) { LOG("glslang did not initialise"); return false; }
     if (!init_layouts() || !init_frames()) { LOG("Vulkan objects could not be created"); return false; }
     G.fi = 0;
+    gt_init();
     frame_begin();
     if (!init_misc()) { LOG("internal shaders or caches could not be created"); return false; }
+    fdm_init();                                         /* before the pipeline manifest: its foveated variants */
     manifest_load_and_precompile();
     pipe_manifest_precreate();
     G.ok = 1;
@@ -3978,6 +4364,8 @@ void kvk_shutdown(void)
     for (i = 0; i < KVK_FRAMES; i++) run_dead(&G.frame[i]);
     img_destroy_now(&G.fb_copy);
     img_destroy_now(&G.dummy);
+    img_destroy_now(&G.fdm.map);
+    gt_shutdown();
     for (i = 0; i < KVK_FB_MAX; i++) if (G.fb[i].used) vkDestroyFramebuffer(G.dev, G.fb[i].fb, NULL);
     for (i = 0; i < KVK_EYEVIEW_MAX; i++) {
         if (G.eyeview[i].fb[0]) vkDestroyFramebuffer(G.dev, G.eyeview[i].fb[0], NULL);

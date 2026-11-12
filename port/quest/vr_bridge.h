@@ -351,8 +351,15 @@ typedef struct {
     uint32_t multiview, robust_buffer_access, depth_clamp, sampler_anisotropy, texture_compression_bc;
     uint32_t swapchain_mutable_format;  /* swapchains created MUTABLE_FORMAT; views may use the UNORM twin */
     uint32_t swapchain_format_list;     /* ... with XR_KHR_vulkan_swapchain_format_list (sRGB + UNORM) */
+    /* VK_EXT_fragment_density_map: 1 when enabled with fragmentDensityMap and fragmentDensityMapNonSubsampledImages
+     * (RECOMP_KVK_FDM=0 leaves them off); the device's minimum density texel size in pixels (0 when not enabled) */
+    uint32_t fdm, fdm_texel_w, fdm_texel_h;
 } VrVulkanFeatures;
 const VrVulkanFeatures *vr_vulkan_features(void);
+
+/* blackvr.ini's foveation level (VR_FOVEATION_*: 0 off, 1 low, 2 medium, 3 high, 4 hightop), as the settings menu has it
+ * now. The Kelvin backend sizes its own fragment density map from it (kvk_fdm.h); read once per frame. */
+int vr_foveation_level(void);
 
 /* App-private directory for shader / pipeline caches (created; never NULL). */
 const char *vr_cache_dir(void);

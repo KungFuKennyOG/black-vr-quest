@@ -130,6 +130,7 @@ static void vrl_pass(KvkEyeView *ev, const VrlQuad *q, int nq)
     bi.renderArea.extent.height = ev->h;
     bi.clearValueCount = 1;
     bi.pClearValues = &cv;
+    gt_pass_begin(GT_HUD, false);
     vkCmdBeginRenderPass(cmd(), &bi, VK_SUBPASS_CONTENTS_INLINE);
     P.pipe = VK_NULL_HANDLE; P.set1 = VK_NULL_HANDLE; P.bound0 = false; P.dyn = false;
     for (i = 0; i < nq; i++) {
@@ -152,6 +153,7 @@ static void vrl_pass(KvkEyeView *ev, const VrlQuad *q, int nq)
         vkCmdDraw(cmd(), 4, 1, 0, 0);
     }
     vkCmdEndRenderPass(cmd());
+    gt_pass_end();
     P.pipe = VK_NULL_HANDLE; P.set1 = VK_NULL_HANDLE; P.bound0 = false; P.dyn = false;
 }
 

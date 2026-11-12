@@ -354,6 +354,16 @@ void xrp_openxr(XrShell *s, int ok)
                 if (want[i].req) req_missing = 1;
             }
         }
+        {   /* information only (the foveation work asked whether the runtime offers them): not used, so not in "used" */
+            int rec = 0, vsc = 0;
+            uint32_t k;
+            for (k = 0; k < n; k++) {
+                if (!strcmp(ext[k].extensionName, "XR_META_recommended_layer_resolution")) rec = 1;
+                if (!strcmp(ext[k].extensionName, "XR_META_vulkan_swapchain_create_info")) vsc = 1;
+            }
+            XLOGI("PREFLIGHT info: XR_META_recommended_layer_resolution %s, XR_META_vulkan_swapchain_create_info %s",
+                  rec ? "offered" : "not offered", vsc ? "offered" : "not offered");
+        }
         free(ext);
         bvr_pf_report("openxr", req_missing ? BVR_PF_FAIL : miss[0] ? BVR_PF_WARN : BVR_PF_OK, req_missing,
                       "runtime \"%s\" %u.%u.%u, system \"%s\" (vendor 0x%X), eye %ux%u recommended (max %ux%u), %u "
@@ -382,6 +392,25 @@ void xrp_vulkan_device(XrShell *s, int ok)
                       s->vk_features.multiview, s->vk_features.robust_buffer_access, s->vk_features.depth_clamp,
                       s->vk_features.sampler_anisotropy, s->vk_features.texture_compression_bc,
                       s->multiview_supported ? "" : " -- no multiview: the renderer refuses, test pattern only");
+        /* the fragment density map (the backend's own foveation, kvk_fdm.h): what the device offers and what was enabled */
+        {
+            const int usable = s->fdm_info.have_fdm && s->fdm_info.have_nonsubsampled;
+            bvr_pf_report("fdm", s->vk_features.fdm ? BVR_PF_OK : BVR_PF_WARN, 0,
+                          "density map %s: VK_EXT_fragment_density_map %s, _map2 %s, VK_QCOM_fragment_density_map_offset %s, "
+                          "VK_KHR_fragment_shading_rate %s (%u device extensions); features: fragmentDensityMap %d, "
+                          "dynamic %d, nonSubsampledImages %d, deferred %d; texel size min %ux%u max %ux%u, invocations %u; "
+                          "XR_FB_foveation_vulkan %s; %s",
+                          s->vk_features.fdm ? "ENABLED" : "off",
+                          s->fdm_info.ext_fdm ? "yes" : "no", s->fdm_info.ext_fdm2 ? "yes" : "no",
+                          s->fdm_info.ext_qcom_offset ? "yes" : "no", s->fdm_info.ext_fsr ? "yes" : "no", s->fdm_info.n_ext,
+                          s->fdm_info.have_fdm, s->fdm_info.have_dynamic, s->fdm_info.have_nonsubsampled,
+                          s->fdm_info.have_deferred, s->fdm_info.min_w, s->fdm_info.min_h, s->fdm_info.max_w,
+                          s->fdm_info.max_h, s->fdm_info.invocations, s->has_foveation ? "yes" : "no",
+                          s->vk_features.fdm ? "the Kelvin main passes use their own map (RECOMP_KVK_FDM=0 turns it off)"
+                          : s->fdm_info.env_off ? "RECOMP_KVK_FDM=0: features left off"
+                          : !s->fdm_info.ext_fdm ? "the GPU has no VK_EXT_fragment_density_map"
+                          : !usable ? "the GPU lacks the map or non-subsampled images" : "no usable texel size");
+        }
     }
 }
 

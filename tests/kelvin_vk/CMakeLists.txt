@@ -1,5 +1,6 @@
 # Kelvin Vulkan backend tests (usage: port/notes/renderer.md, "Tests").
 #   kvk-stereo     per-eye transform math (kvk_stereo.c)
+#   kvk-fdm        fragment density map generator (kvk_fdm.c)
 #   kvk-shadergen  GLSL generators: every shader compiles to SPIR-V with glslang; GLSL mirrors the D3D11 HLSL
 #                  generators (extracted from the production .inc files); position classification
 #   kvk-backend    (host only) the whole backend on a Vulkan device (SwiftShader works): draws compared pixel by
@@ -39,6 +40,10 @@ add_custom_command(OUTPUT ${_d3d_gen}
 add_executable(kvk-stereo test_stereo.c)
 target_link_libraries(kvk-stereo PRIVATE kelvin_vk_shadergen)
 add_test(NAME kvk-stereo COMMAND kvk-stereo)
+
+add_executable(kvk-fdm test_fdm.c)
+target_link_libraries(kvk-fdm PRIVATE kelvin_vk_shadergen)
+add_test(NAME kvk-fdm COMMAND kvk-fdm)
 
 add_executable(kvk-shadergen test_shadergen.c ${_d3d_gen} ${KEL}/vk/kvk_spirv.c)
 target_include_directories(kvk-shadergen PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${KEL})

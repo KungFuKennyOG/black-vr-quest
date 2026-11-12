@@ -40,6 +40,11 @@ typedef struct KvkDeviceInfo {
      * backend then writes an _SRGB swapchain through a _UNORM view, so the title's gamma-space colours reach the
      * compositor unchanged. Without it they are written through the image's own format. */
     bool swapchain_mutable_format;
+    /* VK_EXT_fragment_density_map enabled on `device` with fragmentDensityMap and fragmentDensityMapNonSubsampledImages:
+     * the backend then gives its main stereo passes a density map of its own (kvk_fdm.h). fdm_texel_* are the device's
+     * minFragmentDensityTexelSize. false: none of it exists and every pass is as it always was. */
+    bool fdm;
+    uint32_t fdm_texel_w, fdm_texel_h;
     /* optional external synchronisation of `queue` with the OpenXR runtime */
     void (*queue_lock)(void *ctx);
     void (*queue_unlock)(void *ctx);
