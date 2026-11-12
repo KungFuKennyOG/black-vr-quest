@@ -455,7 +455,13 @@ static void test_menu_model(void)
     /* sections */
     n = vrs_section_settings(VRS_SEC_GRAPHICS, ids, 32);
     CHECK(n == 6 && ids[0] == VRS_RES_SCALE && ids[5] == VRS_SPRITE_DEBUG);
-    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 6 && vrs_section_settings(VRS_SEC_GESTURES, ids, 32) == 7);
+    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 8 && vrs_section_settings(VRS_SEC_GESTURES, ids, 32) == 7);
+    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 8 && ids[6] == VRS_HUD_DIST && ids[7] == VRS_HUD_WIDTH);
+    /* the HUD rows: live, written as the ini keys the shell reads */
+    vr_config_defaults(&c);
+    CHECK(vrs_step(&c, VRS_HUD_DIST, 1) && NEAR(c.hud_distance_m, 2.25, 1e-6));
+    CHECK(vrs_step(&c, VRS_HUD_WIDTH, -1) && NEAR(c.hud_width_m, 2.3, 1e-6));
+    CHECK(vr_config_line(&c, "hud_distance = 3.0") && NEAR(c.hud_distance_m, 3.0, 1e-6));
     CHECK(vrs_section_settings(VRS_SEC_INFO, ids, 32) == 0);
     /* settings_menu */
     vr_config_defaults(&c);
