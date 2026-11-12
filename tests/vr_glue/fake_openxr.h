@@ -46,7 +46,9 @@ typedef struct FxEndFrame {
     XrCompositionLayerProjection proj;
     XrCompositionLayerProjectionView views[2];
     uint32_t nquads;
-    XrCompositionLayerQuad quads[2];
+    XrCompositionLayerQuad quads[4];   /* flat or HUD, the settings panel and its laser */
+    uint32_t quad_image[4];            /* last released image of each quad's swapchain at xrEndFrame */
+    int quad_layer_index[4];           /* its position in the frame's layer list */
     uint32_t proj_image[2];          /* last released image of the projection view's swapchain at xrEndFrame */
 } FxEndFrame;
 

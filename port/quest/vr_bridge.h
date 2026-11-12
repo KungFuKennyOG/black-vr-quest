@@ -473,6 +473,27 @@ void vr_publish_game_input(const VrGameInputState *s);
  * intent (+45, with the toggle latch +104 held) before the native update. */
 int vr_game_aim_request(void);
 
+
+/* ---- VR SETTINGS inside the game's Options menu (port/notes/settings-panel.md) -----------------------------------
+ * Game thread (src/black_vr_menu.inc, the front-end update). The shell keeps the settings (vr_settings_menu.c): the
+ * page asks it for its rows' text and hands it the player's left / right / confirm on a row. Section -1 is the list
+ * of sections (GRAPHICS, COMFORT, GESTURES, INFO, then RECALIBRATE HEIGHT and RESTORE DEFAULTS). Texts are capitals,
+ * ASCII. Live settings apply at once; the file is written when the page is left (vr_menu_leave). */
+enum { VR_MENU_ROW_SETTING = 0, VR_MENU_ROW_SECTION = 1, VR_MENU_ROW_ACTION = 2, VR_MENU_ROW_INFO = 3 };
+typedef struct {
+    char name[40];
+    char value[48];
+    int  kind;               /* VR_MENU_ROW_*: INFO rows (and settings this headset lacks) do not change */
+} VrMenuRow;
+/* vr_menu_activate results */
+enum { VR_MENU_NOTHING = 0, VR_MENU_CHANGED = 1, VR_MENU_DONE = 2, VR_MENU_OPEN_SECTION_0 = 16 };
+int  vr_menu_native(void);                               /* blackvr.ini settings_menu: the page is offered */
+void vr_menu_enter(void);                                /* the page opened: edits start from the running config */
+int  vr_menu_rows(int section, VrMenuRow *out, int max); /* the rows' texts now; returns the count */
+int  vr_menu_activate(int section, int row, int dir);    /* dir -1 left, +1 right, 0 confirm */
+const char *vr_menu_title(int section);                  /* -1: "VR SETTINGS" */
+void vr_menu_leave(void);                                /* left the page: saved when changed */
+
 #ifdef __cplusplus
 }
 #endif

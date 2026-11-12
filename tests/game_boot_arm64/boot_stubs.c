@@ -121,6 +121,13 @@ void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register) { (void)m
 void vr_set_action_resolver(int (*resolve)(int slot)) { (void)resolve; }
 void vr_publish_game_input(const VrGameInputState *s) { (void)s; }
 int  vr_game_aim_request(void) { return -1; }
+/* VR SETTINGS in the game's Options menu (port/notes/settings-panel.md): no shell, the stock pages */
+int  vr_menu_native(void) { return 0; }
+void vr_menu_enter(void) {}
+int  vr_menu_rows(int section, VrMenuRow *out, int max) { (void)section; (void)out; (void)max; return 0; }
+int  vr_menu_activate(int section, int row, int dir) { (void)section; (void)row; (void)dir; return VR_MENU_NOTHING; }
+const char *vr_menu_title(int section) { (void)section; return "VR SETTINGS"; }
+void vr_menu_leave(void) {}
 
 /* ---- liblog / libandroid / libaaudio (shared-only in the NDK) -------------------------------- */
 int __android_log_print(int prio, const char *tag, const char *fmt, ...)

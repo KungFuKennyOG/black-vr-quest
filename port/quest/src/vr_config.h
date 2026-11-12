@@ -8,7 +8,8 @@
  *   # comments start with # or ;
  *   refresh_hz        = auto      ; auto (120 for game_hz 60, 90 for 30) | 72 | 80 | 90 | 120
  *   resolution_scale  = 0.8       ; eye swapchain (and Kelvin raster) size vs the runtime's recommendation
- *   foveation         = medium    ; off | low | medium | high: XR_FB_foveation fixed foveated rendering
+ *   foveation         = medium    ; off | low | medium | high | hightop: XR_FB_foveation fixed foveated rendering
+ *                                 ; (hightop: high, the sharp centre moved up by VR_FOVEATION_HIGH_TOP_OFFSET_DEG)
  *   game_hz           = 60        ; 30 | 60: the game's simulation and frame rate (port/notes/perf.md)
  *   raster_workers    = 1         ; 0..4 Kelvin raster/vertex worker threads beside the GPU thread
  *   raster_spin_us    = 50        ; 0..5000 us a raster worker spins for more work before it sleeps
@@ -44,6 +45,8 @@
  *   gun_latch         = on        ; on | off: the first-person weapon follows the hand pose latched at display
  *                                 ; time, not the game frame's (port/notes/gun-latch.md); env
  *                                 ; BLACKVR_GUN_LATCH_DEBUG=1 tints the draws taken for the weapon
+ *   settings_menu     = native    ; native: VR SETTINGS in the game's Options menu | panel: the floating panel
+ *                                 ; (left stick click in a menu) | both
  *   env RECOMP_BLACK_HZ=60        ; any "env NAME=VALUE" line is exported before the game starts
  */
 #ifndef VR_CONFIG_H
@@ -60,8 +63,12 @@
 #define VR_CONFIG_MAX_ENV 32
 
 enum { VR_LOCO_HEAD = 0, VR_LOCO_AIM = 1, VR_LOCO_OFFHAND = 2 };
+enum { VR_SETTINGS_MENU_NATIVE = 0, VR_SETTINGS_MENU_PANEL = 1, VR_SETTINGS_MENU_BOTH = 2 };
 /* XR_FB_foveation levels (XrFoveationLevelFB values) */
-enum { VR_FOVEATION_OFF = 0, VR_FOVEATION_LOW = 1, VR_FOVEATION_MEDIUM = 2, VR_FOVEATION_HIGH = 3 };
+enum { VR_FOVEATION_OFF = 0, VR_FOVEATION_LOW = 1, VR_FOVEATION_MEDIUM = 2, VR_FOVEATION_HIGH = 3,
+       /* not an XrFoveationLevelFB: HIGH with the level profile's verticalOffset (the VrApi "HighTop" level) */
+       VR_FOVEATION_HIGH_TOP = 4 };
+#define VR_FOVEATION_HIGH_TOP_OFFSET_DEG 10.0f
 
 typedef struct {
     float refresh_hz;
@@ -74,6 +81,7 @@ typedef struct {
     int   raster_workers;    /* -> RECOMP_KELVIN_THREADS = workers + 1 */
     int   raster_spin_us;    /* -> RECOMP_KELVIN_SPIN_US */
     int   gun_latch;         /* 1: the weapon's draws follow the late-latched hand (gun-latch) */
+    int   settings_menu;     /* VR_SETTINGS_MENU_*: the native page in the game's Options, the floating panel, both */
     VrInputConfig input;
     VrGestureConfig gest;    /* melee swing, duck crouch, scope raise, two-handed aim */
     VrGameConfig game;
@@ -183,6 +191,7 @@ static inline int vr_config_line(VrShellConfig *c, const char *line_in)
         else if (!strcmp(val, "low") || !strcmp(val, "1")) c->foveation = VR_FOVEATION_LOW;
         else if (!strcmp(val, "medium") || !strcmp(val, "2")) c->foveation = VR_FOVEATION_MEDIUM;
         else if (!strcmp(val, "high") || !strcmp(val, "3")) c->foveation = VR_FOVEATION_HIGH;
+        else if (!strcmp(val, "hightop") || !strcmp(val, "high_top") || !strcmp(val, "4")) c->foveation = VR_FOVEATION_HIGH_TOP;
         else return 0;
         return 1;
     }
@@ -205,6 +214,13 @@ static inline int vr_config_line(VrShellConfig *c, const char *line_in)
     if (!strcmp(key, "hud_distance")) { if (!vr_cfg_float(val, 0.5f, 10.0f, &f)) return 0; c->hud_distance_m = f; return 1; }
     if (!strcmp(key, "hud_width")) { if (!vr_cfg_float(val, 0.3f, 10.0f, &f)) return 0; c->hud_width_m = f; return 1; }
     if (!strcmp(key, "gun_latch")) return vr_cfg_bool(val, &c->gun_latch);
+    if (!strcmp(key, "settings_menu")) {
+        if (!strcmp(val, "native") || !strcmp(val, "game")) c->settings_menu = VR_SETTINGS_MENU_NATIVE;
+        else if (!strcmp(val, "panel") || !strcmp(val, "floating")) c->settings_menu = VR_SETTINGS_MENU_PANEL;
+        else if (!strcmp(val, "both")) c->settings_menu = VR_SETTINGS_MENU_BOTH;
+        else return 0;
+        return 1;
+    }
     if (!strcmp(key, "turn")) {
         if (!strcmp(val, "snap")) c->input.turn_mode = VR_TURN_SNAP;
         else if (!strcmp(val, "smooth")) c->input.turn_mode = VR_TURN_SMOOTH;

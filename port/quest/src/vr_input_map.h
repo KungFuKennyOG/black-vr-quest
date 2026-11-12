@@ -106,9 +106,9 @@ enum { VRI_T_A = 1, VRI_T_B = 2, VRI_T_X = 4, VRI_T_Y = 8, VRI_T_MENU = 16, VRI_
 /* (the stick clicks are not blocked: the recentre chord works in any mode) */
 static inline uint32_t vri_touch_mask(const VrTouchState *t)
 {
-    return (t->a ? VRI_T_A : 0u) | (t->b ? VRI_T_B : 0u) | (t->x ? VRI_T_X : 0u) | (t->y ? VRI_T_Y : 0u) |
-           (t->menu ? VRI_T_MENU : 0u) |
-           (t->lt > 0.3f ? VRI_T_LT : 0u) | (t->rt > 0.3f ? VRI_T_RT : 0u);
+    return (t->a ? (uint32_t)VRI_T_A : 0u) | (t->b ? (uint32_t)VRI_T_B : 0u) | (t->x ? (uint32_t)VRI_T_X : 0u) |
+           (t->y ? (uint32_t)VRI_T_Y : 0u) | (t->menu ? (uint32_t)VRI_T_MENU : 0u) |
+           (t->lt > 0.3f ? (uint32_t)VRI_T_LT : 0u) | (t->rt > 0.3f ? (uint32_t)VRI_T_RT : 0u);
 }
 static inline void vri_filter(VrInputRuntime *rt, int in_game, const VrTouchState *in, VrTouchState *t)
 {

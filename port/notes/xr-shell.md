@@ -1,5 +1,6 @@
 # xr-shell: Quest app shell, OpenXR, APK, game-side VR hooks
 
+Status 2026-11-12: in-headset settings panel (left stick click in a menu), see port/notes/settings-panel.md.
 Status 2026-11-12: VR controls (actions through the live action map, gestures) added, see Input.
 Status 2026-11-02: **the smoke APK builds, packages and signs**: `/root/black/build-quest/blackvr.apk`
 (924 KB, v3-verified, zipalign -p 16 OK, `aapt2 dump badging` clean). **Native tests: 4 suites

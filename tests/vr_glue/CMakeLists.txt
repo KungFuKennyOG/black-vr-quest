@@ -39,18 +39,27 @@ foreach(stage vert frag)
     list(APPEND SHADER_INCS "${inc}")
 endforeach()
 
+# the settings panel (port/notes/settings-panel.md): Dear ImGui, the panel's shaders and font
+set(PANEL_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/panel")
+include("${QUEST}/cmake/settings_panel.cmake")
+
 # the shell + glue, compiled for the host against stand-ins for the Android-only headers
 add_library(vrglue_shell STATIC
     ${QUEST}/src/xr_session.c
     ${QUEST}/src/xr_vulkan.c
     ${QUEST}/src/vr_bridge.c
     ${QUEST}/src/vr_renderer_kvk.c
+    ${QUEST}/src/vr_settings_menu.c
+    ${QUEST}/src/xr_panel.c
+    ${QUEST}/src/vr_panel_ui.cpp
     shell_access.c
     fake_openxr.c
-    ${SHADER_INCS})
+    ${SHADER_INCS} ${PANEL_GEN_INCS})
+set_source_files_properties(${QUEST}/src/vr_panel_ui.cpp PROPERTIES COMPILE_OPTIONS "-fno-exceptions;-fno-rtti")
 target_include_directories(vrglue_shell PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/stubs ${CMAKE_CURRENT_SOURCE_DIR} ${QUEST}/src ${QUEST} ${SHADER_OUT}
+    ${CMAKE_CURRENT_SOURCE_DIR}/stubs ${CMAKE_CURRENT_SOURCE_DIR} ${QUEST}/src ${QUEST} ${SHADER_OUT} ${PANEL_GEN_DIR}
     ${OPENXR_SDK_DIR}/include ${KEL}/vk)
+target_link_libraries(vrglue_shell PUBLIC blackvr_imgui)
 target_compile_definitions(vrglue_shell PRIVATE _GNU_SOURCE XR_USE_GRAPHICS_API_VULKAN)
 target_compile_options(vrglue_shell PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
                        -Wno-unused-function -fno-strict-aliasing)

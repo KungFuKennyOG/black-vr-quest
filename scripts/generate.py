@@ -385,6 +385,12 @@ def title_hooks(name, body):
         start = body.index(label) + len(label)
         end = body.index("\n\n", start)
         body = body[:start] + "    if (!black_idle_yield_skip()) {\n" + body[start:end] + "\n    }" + body[end:]
+        # The in-level throttle: Sleep(16) when paused (main+0x210C9), else Sleep(6), each frame while a world
+        # sub-state (+0x49D0 / +0x5250) is outside {0x1C, 1, 0x37}. black_throttle_skip counts each one for the
+        # HEARTBEAT line and, with RECOMP_BLACK_THROTTLE=0, skips it: loc_001F91B6 is the function's own ret 4,
+        # exactly what the tail-called Sleep would return through.
+        for label, ms in (("loc_001F917B: ;\n", 16), ("loc_001F9188: ;\n", 6)):
+            body = replace_once(body, label, label + f"    if (black_throttle_skip({ms})) goto loc_001F91B6; /* host hook: RECOMP_BLACK_THROTTLE */\n")
     if name == "sub_001EDC90":
         lines = body.split("\n")
         first = next(i for i, line in enumerate(lines) if "SET_LO8(l_edx," in line and "0x2020C" in line)
@@ -1001,6 +1007,7 @@ def main():
     declarations = "\nextern float black_osc_factor(void);\nextern float black_ctl_k(float);\nextern void black_movie_tag_flip(uint32_t);\nextern void black_pickup_text_ready(uint32_t);\nextern void black_weapon_trace(uint32_t, uint32_t);\nextern void black_weapon_model_trace(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);\nextern void black_weapon_attachment_trace(uint32_t, uint32_t);\nextern void black_viewmodel_muzzle_gate(uint32_t);\nextern void black_test_weapon_loadout(uint32_t);\nextern void black_viewmodel_owner(uint32_t);\nextern uint32_t black_viewmodel_draw_begin(uint32_t);\nextern void black_viewmodel_draw_end(uint32_t);\nextern void black_viewmodel_constants(uint32_t);\nextern void black_viewmodel_muzzle_constants(uint32_t, uint32_t);\n"
     declarations += "extern int black_silver_weapon_flag(int);\n"
     declarations += "extern float black_physics_drag(float);\n"
+    declarations += "extern int black_throttle_skip(int);\n"
     declarations += "extern int black_infinite_ammo_flag(int);\n"
     declarations += "\nextern void black_test_stream_unit(uint32_t);\n"
     declarations += "\nextern void black_checkpoint_event(uint32_t, uint32_t);\n"

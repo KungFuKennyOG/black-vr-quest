@@ -276,7 +276,7 @@ int xrs_swapchain_views(XrShell *s, XrsSwapchain *sc)
     return 1;
 }
 
-static void swapchain_destroy(XrShell *s, XrsSwapchain *sc)
+void xrs_swapchain_destroy(XrShell *s, XrsSwapchain *sc)
 {
     uint32_t i, l;
     if (!sc->handle) return;
@@ -502,9 +502,9 @@ void xrs_vulkan_destroy(XrShell *s)
     int i;
     if (!s->vk_device) return;
     vkDeviceWaitIdle(s->vk_device);
-    for (i = 0; i < VR_EYE_COUNT; i++) swapchain_destroy(s, &s->eye[i]);
-    swapchain_destroy(s, &s->flat);
-    swapchain_destroy(s, &s->hud);
+    for (i = 0; i < VR_EYE_COUNT; i++) xrs_swapchain_destroy(s, &s->eye[i]);
+    xrs_swapchain_destroy(s, &s->flat);
+    xrs_swapchain_destroy(s, &s->hud);
     if (s->tp_ready) {
         for (i = 0; i < VR_EYE_COUNT; i++) vkDestroyFence(s->vk_device, s->tp_fence[i], NULL);
         vkDestroyCommandPool(s->vk_device, s->tp_pool, NULL);

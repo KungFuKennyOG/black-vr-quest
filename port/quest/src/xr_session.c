@@ -170,8 +170,9 @@ static void xrs_foveation_apply(XrShell *s, XrsSwapchain *sc)
     XrSwapchainStateFoveationFB st = { XR_TYPE_SWAPCHAIN_STATE_FOVEATION_FB };
     XrFoveationProfileFB profile = XR_NULL_HANDLE;
     XrResult r;
-    lv.level = (XrFoveationLevelFB)s->cfg.foveation;
-    lv.verticalOffset = 0.0f;
+    /* hightop (the VrApi level): high, with the sharp centre moved up (where the HUD and the horizon are) */
+    lv.level = s->cfg.foveation == VR_FOVEATION_HIGH_TOP ? XR_FOVEATION_LEVEL_HIGH_FB : (XrFoveationLevelFB)s->cfg.foveation;
+    lv.verticalOffset = s->cfg.foveation == VR_FOVEATION_HIGH_TOP ? VR_FOVEATION_HIGH_TOP_OFFSET_DEG : 0.0f;
     lv.dynamic = XR_FOVEATION_DYNAMIC_DISABLED_FB;
     pci.next = &lv;
     r = s->xrCreateFoveationProfileFB(s->session, &pci, &profile);
@@ -182,6 +183,19 @@ static void xrs_foveation_apply(XrShell *s, XrsSwapchain *sc)
     if (XR_FAILED(r)) XLOGW("xrUpdateSwapchainFB (foveation): %d", (int)r);
     else s->foveation_applied = s->cfg.foveation;
     s->xrDestroyFoveationProfileFB(profile);         /* the swapchain keeps its state */
+}
+
+/* The settings panel: blackvr.ini foveation again, on the eye swapchain(s) created foveated (level off = a NONE
+ * profile). Under the queue lock, so it never overlaps the renderer's acquire / release of the same swapchain. */
+int xrs_foveation_update(XrShell *s)
+{
+    int i, n = s->multiview ? 1 : VR_EYE_COUNT;
+    if (!s->has_foveation || !s->foveation_swapchain) return 0;
+    pthread_mutex_lock(&s->queue_lock);
+    for (i = 0; i < n; i++) if (s->eye[i].handle) xrs_foveation_apply(s, &s->eye[i]);
+    pthread_mutex_unlock(&s->queue_lock);
+    XLOGI("foveation now %d (applied %d)", s->cfg.foveation, s->foveation_applied);
+    return s->foveation_applied == s->cfg.foveation;
 }
 
 int xrs_now(XrShell *s, XrTime *t)
@@ -387,6 +401,8 @@ static void input_sync(XrShell *s, XrTime t, double dt)
         if (XR_SUCCEEDED(xrLocateSpace(s->grip_space[h], s->world_space, t, &loc)) && (loc.locationFlags & need) == need)
             grip[h] = to_vr(&loc.pose);
     }
+    /* the settings panel takes the controllers while it is open (the game then sees a neutral pad) */
+    if (s->panel) s->panel->input(s, &ts, aim, valid, dt);
     vrb_set_hand_velocity(lin, vel_ok);
     vrb_set_input(s, &ts, aim, grip, valid, dt);
 
@@ -413,7 +429,7 @@ static void input_sync(XrShell *s, XrTime t, double dt)
 
 /* ---- session ------------------------------------------------------------------- */
 
-static void choose_refresh(XrShell *s)
+void xrs_refresh_request(XrShell *s, int preflight_line)
 {
     float rates[16], all[64];
     uint32_t n = 0, total = 0, i;
@@ -427,14 +443,14 @@ static void choose_refresh(XrShell *s)
     n = total < 16 ? total : 16;
     for (i = 0; i < n; i++) rates[i] = all[i];
     for (i = 0; i < n; i++) {
-        XLOGI("display offers %.1f Hz", rates[i]);
+        if (preflight_line) XLOGI("display offers %.1f Hz", rates[i]);
         if (fabsf(rates[i] - want) < fabsf(best - want)) best = rates[i];
     }
     if (best > 0.0f && XR_SUCCEEDED(s->xrRequestDisplayRefreshRateFB(s->session, best))) {
         s->refresh_hz = best;
         XLOGI("refresh rate %.1f Hz", best);
     }
-    {
+    if (preflight_line) {
         char list[96] = "";
         for (i = 0; i < n && i < 16; i++) {
             size_t l = strlen(list);
@@ -519,12 +535,14 @@ int xrs_session_create(XrShell *s)
             const int fv = foveate && s->has_foveation;
             if (xrs_swapchain_create_ex(s, &s->eye[i], w, h, layers, fv ? &fov : NULL)) {
                 if (fv) xrs_foveation_apply(s, &s->eye[i]);
+                s->foveation_swapchain = fv;
                 continue;
             }
             if (!fv) return 0;
             XLOGW("the foveated eye swapchain was refused: retrying without foveation");
             s->has_foveation = 0;
             if (!xrs_swapchain_create_ex(s, &s->eye[i], w, h, layers, NULL)) return 0;
+            s->foveation_swapchain = 0;
         }
         XLOGI("foveation: %s", !s->has_foveation ? "not used (no XR_FB_foveation_vulkan, no VK_EXT_fragment_density_map, "
                                                    "or the foveated swapchain was refused)"
@@ -615,6 +633,26 @@ void xrs_swapchain_release(XrShell *s, XrsSwapchain *sc)
 
 /* ---- events -------------------------------------------------------------------- */
 
+/* XR_EXT_performance_settings: the CPU and GPU levels for a BLACKVR_PERF value (session start: the environment; the
+ * settings panel: its Performance setting, live) */
+void xrs_perf_apply(XrShell *s, const char *mode)
+{
+    /* BLACKVR_PERF (blackvr.ini "env BLACKVR_PERF=..."): sustained_high (default) | boost | boost_cpu |
+     * boost_gpu. Boost asks for the highest clocks; the runtime may cap or throttle it (watch the
+     * VrApi "CPU%d/GPU=%d/%d" lines and thermal warnings in the log). */
+    const char *pe = mode;
+    XrPerfSettingsLevelEXT cpu = XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT, gpu = cpu;
+    XrResult rc, rg;
+    if (!s->has_perf_settings || !s->xrPerfSettingsSetPerformanceLevelEXT || !s->session) return;
+    if (pe && (!strcmp(pe, "boost") || !strcmp(pe, "boost_cpu"))) cpu = XR_PERF_SETTINGS_LEVEL_BOOST_EXT;
+    if (pe && (!strcmp(pe, "boost") || !strcmp(pe, "boost_gpu"))) gpu = XR_PERF_SETTINGS_LEVEL_BOOST_EXT;
+    rc = s->xrPerfSettingsSetPerformanceLevelEXT(s->session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, cpu);
+    rg = s->xrPerfSettingsSetPerformanceLevelEXT(s->session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, gpu);
+    XLOGI("performance levels: CPU %s (%d), GPU %s (%d)",
+          cpu == XR_PERF_SETTINGS_LEVEL_BOOST_EXT ? "boost" : "sustained high", (int)rc,
+          gpu == XR_PERF_SETTINGS_LEVEL_BOOST_EXT ? "boost" : "sustained high", (int)rg);
+}
+
 static void session_state(XrShell *s, XrSessionState st)
 {
     s->state = st;
@@ -624,11 +662,8 @@ static void session_state(XrShell *s, XrSessionState st)
         bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         if (XR_SUCCEEDED(xrBeginSession(s->session, &bi))) {
             s->session_running = 1;
-            choose_refresh(s);
-            if (s->has_perf_settings && s->xrPerfSettingsSetPerformanceLevelEXT) {
-                s->xrPerfSettingsSetPerformanceLevelEXT(s->session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
-                s->xrPerfSettingsSetPerformanceLevelEXT(s->session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
-            }
+            xrs_refresh_request(s, 1);
+            xrs_perf_apply(s, getenv("BLACKVR_PERF"));
             if (s->has_thread_settings && s->xrSetAndroidApplicationThreadKHR)
                 s->xrSetAndroidApplicationThreadKHR(s->session, XR_ANDROID_THREAD_TYPE_APPLICATION_MAIN_KHR, gettid());
         }
@@ -751,7 +786,7 @@ void xrs_frame(XrShell *s)
     XrCompositionLayerProjectionView pv[VR_EYE_COUNT];
     XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
     XrCompositionLayerQuad hudq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
-    const XrCompositionLayerBaseHeader *layers[3];
+    const XrCompositionLayerBaseHeader *layers[6];   /* projection, HUD or flat, settings panel + its laser */
     uint32_t nl = 0, i;
     static double last_t;
     static double t0;
@@ -771,6 +806,8 @@ void xrs_frame(XrShell *s)
     vr_queue_lock();
     xrBeginFrame(s->session, &bi);
     vr_queue_unlock();
+    vrsm_xr_frame(s);                    /* settings changed on the game's VR SETTINGS page: refresh, foveation, perf */
+    if (s->panel && fs.shouldRender) s->panel->draw(s);      /* nothing while the panel is closed */
 
     memset(pv, 0, sizeof(pv));
 
@@ -878,6 +915,8 @@ void xrs_frame(XrShell *s)
             quad.size.height = quad.size.width / s->flat_aspect;
             layers[nl++] = (const XrCompositionLayerBaseHeader *)&quad;
         }
+        /* the settings panel over everything (world-locked quad + laser beam) */
+        if (s->panel) nl += s->panel->layers(s, layers + nl, (uint32_t)(sizeof(layers) / sizeof(layers[0])) - nl);
     }
     ei.displayTime = fs.predictedDisplayTime;
     ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
@@ -899,6 +938,7 @@ void xrs_session_destroy(XrShell *s)
             return;
         }
     }
+    if (s->panel && s->panel->destroy) s->panel->destroy(s);
     xrs_vulkan_destroy(s);
     for (h = 0; h < 2; h++) {
         if (s->aim_space[h]) xrDestroySpace(s->aim_space[h]);

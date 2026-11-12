@@ -46,6 +46,8 @@
 #include "vr_bridge.h"
 #include "vr_game_math.h"
 #include "shell_access.h"
+#include "vr_settings.h"
+#include "vr_panel.h"
 
 static int s_fail, s_checks;
 #define CHECK(c, ...) do { s_checks++; if (!(c)) { s_fail++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -1201,6 +1203,358 @@ static void *xr_thread(void *arg)
 
 /* ---- the run ---- */
 
+
+/* ---- the settings panel (port/notes/settings-panel.md) ---------------------------------------------------------- */
+
+static struct { int lclick, rclick, b, menu, a; float rtrig; int hand_ok; VrPose hand; } s_pin;
+
+static int pin_bool(const char *a, XrPath sub, XrBool32 *st)
+{
+    *st = XR_FALSE;
+    if (!strcmp(a, "stick_click")) *st = (sub == 16 ? s_pin.lclick : s_pin.rclick) ? XR_TRUE : XR_FALSE;   /* 16 left, 17 right */
+    else if (!strcmp(a, "button_b")) *st = s_pin.b ? XR_TRUE : XR_FALSE;
+    else if (!strcmp(a, "menu")) *st = s_pin.menu ? XR_TRUE : XR_FALSE;
+    else if (!strcmp(a, "button_a")) *st = s_pin.a ? XR_TRUE : XR_FALSE;
+    return 1;
+}
+static int pin_float(const char *a, XrPath sub, float *st)
+{
+    *st = !strcmp(a, "trigger") && sub == 17 ? s_pin.rtrig : 0.0f;
+    return 1;
+}
+static int pin_vec2(const char *a, XrPath sub, XrVector2f *st) { (void)a; (void)sub; st->x = st->y = 0.0f; return 1; }
+static int pin_hand(int hand, int grip, XrTime t, XrPosef *pose)
+{
+    (void)grip; (void)t;
+    if (hand != 1 || !s_pin.hand_ok) return 0;
+    *pose = to_xr(s_pin.hand);
+    return 1;
+}
+
+static void pframe(void) { fx_now += fx_period; shell_xr_frame(); }
+
+static VrPose xr_to_vr(XrPosef p)
+{
+    VrPose r;
+    r.orientation = vrm_q(p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w);
+    r.position = vrm_v3(p.position.x, p.position.y, p.position.z);
+    return r;
+}
+
+/* the right hand pointing at panel pixel (px, py) from 0.6 m in front of the panel, a little right of and below it */
+static void aim_at(float px, float py)
+{
+    ShellPanel sp;
+    VrPose q;
+    VrVec3 r, up, n, target, hand;
+    shell_panel(&sp);
+    q = xr_to_vr(sp.quad_pose);
+    r = vrm_q_rotate(q.orientation, vrm_v3(1, 0, 0));
+    up = vrm_q_rotate(q.orientation, vrm_v3(0, 1, 0));
+    n = vrm_q_rotate(q.orientation, vrm_v3(0, 0, 1));
+    target = vrm_add(q.position, vrm_add(vrm_scale(r, (px / 1024.0f - 0.5f) * sp.width_m),
+                                         vrm_scale(up, (0.5f - py / 768.0f) * sp.height_m)));
+    hand = vrm_add(target, vrm_add(vrm_scale(n, 0.6f), vrm_add(vrm_scale(r, 0.08f), vrm_scale(up, -0.15f))));
+    s_pin.hand.position = hand;
+    s_pin.hand.orientation = vrg_look_rotation(vrm_sub(target, hand), vrm_v3(0, 1, 0));
+    s_pin.hand_ok = 1;
+}
+
+/* point at a control drawn in the last frame, then trigger down and up */
+static int click(const char *name)
+{
+    float rc[4];
+    ShellPanel sp;
+    if (!vrp_ui_test_rect(name, rc)) { CHECK(0, "panel: control %s drawn", name); return 0; }
+    aim_at(0.5f * (rc[0] + rc[2]), 0.5f * (rc[1] + rc[3]));
+    pframe();
+    shell_panel(&sp);
+    CHECK(sp.mouse_valid && fabsf(sp.mouse_x - 0.5f * (rc[0] + rc[2])) < 1.5f && fabsf(sp.mouse_y - 0.5f * (rc[1] + rc[3])) < 1.5f,
+          "panel: the laser hits %s at %.1f %.1f (%.1f %.1f)", name, 0.5f * (rc[0] + rc[2]), 0.5f * (rc[1] + rc[3]),
+          sp.mouse_x, sp.mouse_y);
+    s_pin.rtrig = 1.0f;
+    pframe();
+    s_pin.rtrig = 0.0f;
+    pframe();
+    pframe();                                   /* the change is drawn */
+    return 1;
+}
+
+static uint32_t crc_tab[256];
+static uint32_t crc32_of(uint32_t c, const uint8_t *p, size_t n)
+{
+    size_t i;
+    if (!crc_tab[1]) {
+        uint32_t k, j, v;
+        for (k = 0; k < 256; k++) { v = k; for (j = 0; j < 8; j++) v = v & 1 ? 0xEDB88320u ^ (v >> 1) : v >> 1; crc_tab[k] = v; }
+    }
+    c = ~c;
+    for (i = 0; i < n; i++) c = crc_tab[(c ^ p[i]) & 255] ^ (c >> 8);
+    return ~c;
+}
+static void put32(FILE *f, uint32_t v) { uint8_t b[4] = { (uint8_t)(v >> 24), (uint8_t)(v >> 16), (uint8_t)(v >> 8), (uint8_t)v }; fwrite(b, 1, 4, f); }
+static void png_chunk(FILE *f, const char *type, const uint8_t *d, uint32_t n)
+{
+    uint32_t c = crc32_of(0, (const uint8_t *)type, 4);
+    put32(f, n);
+    fwrite(type, 1, 4, f);
+    if (n) fwrite(d, 1, n, f);
+    c = crc32_of(c, d, n);
+    put32(f, c);
+}
+/* premultiplied RGBA composited over the dark void the panel floats in, as an RGB PNG (zlib stored blocks) */
+static int png_write_panel(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h)
+{
+    const size_t raw_n = (size_t)h * (w * 3 + 1);
+    uint8_t *raw = (uint8_t *)malloc(raw_n), *z, hdr[13];
+    size_t zn = 0, i, off;
+    uint32_t a1 = 1, a2 = 0, x, y;
+    FILE *f;
+    for (y = 0; y < h; y++) {
+        raw[(size_t)y * (w * 3 + 1)] = 0;
+        for (x = 0; x < w; x++) {
+            const uint8_t *p = rgba + ((size_t)y * w + x) * 4;
+            static const int bg[3] = { 18, 20, 24 };
+            int c;
+            for (c = 0; c < 3; c++) {
+                int v = p[c] + bg[c] * (255 - p[3]) / 255;
+                raw[(size_t)y * (w * 3 + 1) + 1 + x * 3 + c] = (uint8_t)(v > 255 ? 255 : v);
+            }
+        }
+    }
+    z = (uint8_t *)malloc(raw_n + raw_n / 65535 * 5 + 64);
+    z[zn++] = 0x78; z[zn++] = 0x01;
+    for (off = 0; off < raw_n;) {
+        const size_t n = raw_n - off > 65535 ? 65535 : raw_n - off;
+        z[zn++] = off + n == raw_n ? 1 : 0;
+        z[zn++] = (uint8_t)n; z[zn++] = (uint8_t)(n >> 8); z[zn++] = (uint8_t)~n; z[zn++] = (uint8_t)(~n >> 8);
+        memcpy(z + zn, raw + off, n);
+        zn += n;
+        off += n;
+    }
+    for (i = 0; i < raw_n; i++) { a1 = (a1 + raw[i]) % 65521; a2 = (a2 + a1) % 65521; }
+    z[zn++] = (uint8_t)(a2 >> 8); z[zn++] = (uint8_t)a2; z[zn++] = (uint8_t)(a1 >> 8); z[zn++] = (uint8_t)a1;
+    if (!(f = fopen(path, "wb"))) { free(raw); free(z); return 0; }
+    fwrite("\x89PNG\r\n\x1a\n", 1, 8, f);
+    hdr[0] = (uint8_t)(w >> 24); hdr[1] = (uint8_t)(w >> 16); hdr[2] = (uint8_t)(w >> 8); hdr[3] = (uint8_t)w;
+    hdr[4] = (uint8_t)(h >> 24); hdr[5] = (uint8_t)(h >> 16); hdr[6] = (uint8_t)(h >> 8); hdr[7] = (uint8_t)h;
+    hdr[8] = 8; hdr[9] = 2; hdr[10] = hdr[11] = hdr[12] = 0;
+    png_chunk(f, "IHDR", hdr, 13);
+    png_chunk(f, "IDAT", z, (uint32_t)zn);
+    png_chunk(f, "IEND", NULL, 0);
+    fclose(f);
+    free(raw);
+    free(z);
+    return 1;
+}
+
+static void capture_panel(const char *what, const char *file)
+{
+    ShellPanel sp;
+    uint8_t *img = (uint8_t *)malloc(1024 * 768 * 4);
+    char path[600], cwd[400];
+    unsigned x, y, red = 0, opaque = 0;
+    shell_panel(&sp);
+    read_quad_image(sp.panel, img);
+    for (y = 0; y < 768; y++)
+        for (x = 0; x < 1024; x++) {
+            const uint8_t *p = img + ((size_t)y * 1024 + x) * 4;
+            if (p[3] > 240) opaque++;
+            if (p[0] > 150 && p[1] < 60 && p[2] < 60) red++;
+        }
+    CHECK(img[3] == 0 && img[(1023) * 4 + 3] == 0, "%s: the panel's rounded corners are transparent (alpha %u %u)", what, img[3], img[1023 * 4 + 3]);
+    CHECK(opaque > 1024u * 768u * 9u / 10u, "%s: the panel is opaque inside (%u px)", what, opaque);
+    CHECK(red > 2000, "%s: the red accents are drawn (%u px)", what, red);
+    {
+        const uint8_t *c = img + ((size_t)384 * 1024 + 512) * 4;
+        CHECK(c[3] > 240, "%s: premultiplied colour never exceeds its alpha (centre %u %u %u / %u)", what, c[0], c[1], c[2], c[3]);
+    }
+    if (!getcwd(cwd, sizeof(cwd))) snprintf(cwd, sizeof(cwd), ".");
+    snprintf(path, sizeof(path), "%s/%s", cwd, file);
+    CHECK(png_write_panel(path, img, 1024, 768), "%s: %s written", what, path);
+    printf("panel: %s -> %s\n", what, path);
+    free(img);
+}
+
+static const XrCompositionLayerQuad *quad_of(XrSwapchain sc, int *index)
+{
+    uint32_t q;
+    for (q = 0; q < fx_last_end.nquads; q++)
+        if (fx_last_end.quads[q].subImage.swapchain == sc) { if (index) *index = fx_last_end.quad_layer_index[q]; return &fx_last_end.quads[q]; }
+    return NULL;
+}
+
+static void test_panel(void)
+{
+    static const char k_ini_text[] =
+        "# my settings\n"
+        "turn = snap              ; snap | smooth | off\n"
+        "resolution_scale = 0.8\n"
+        "some_future_key = 7\n"
+        "env RECOMP_BLACK_HZ=60\n";
+    char dir[] = "/tmp/vrglue-panel-XXXXXX", path[600], buf[4096];
+    ShellPanel sp;
+    VrPadState pad;
+    const XrCompositionLayerQuad *q;
+    int idx = -1, i;
+    uint64_t acq;
+    FILE *f;
+    size_t n;
+    XrPosef head;
+    XrPosef eye[2];
+    XrFovf fov[2];
+
+    CHECK(mkdtemp(dir) != NULL, "panel: temp dir");
+    /* the floating panel is the fallback front end (blackvr.ini settings_menu = panel; native: the game's Options) */
+    CHECK(shell_config_line("settings_menu = panel"), "panel: settings_menu = panel parses");
+    shell_set_game_root(dir);
+    snprintf(path, sizeof(path), "%s/blackvr.ini", dir);
+    if ((f = fopen(path, "w"))) { fputs(k_ini_text, f); fclose(f); }
+    memset(&s_pin, 0, sizeof(s_pin));
+    fx_input_bool = pin_bool;
+    fx_input_float = pin_float;
+    fx_input_vec2 = pin_vec2;
+    fx_hand_pose = pin_hand;
+
+    /* gameplay: the left stick click is Crouch, never the panel */
+    shell_set_present_mode(VR_PRESENT_STEREO);
+    vr_publish_game_camera(vr_game_camera());     /* a fresh camera: the controls are in gameplay */
+    s_pin.lclick = 1; pframe(); pframe();
+    s_pin.lclick = 0; pframe();
+    shell_panel(&sp);
+    CHECK(!sp.open && !sp.inited, "panel: not opened in gameplay");
+
+    /* paused (the menus): a left stick click opens it */
+    shell_set_present_mode(VR_PRESENT_FLAT_MENU);
+    s_pin.lclick = 1; pframe(); pframe(); pframe();
+    s_pin.lclick = 0;
+    pframe();
+    shell_panel(&sp);
+    CHECK(sp.open && sp.inited && sp.released, "panel: opened in the menu (open %d, ready %d, drawn %d)", sp.open, sp.inited, sp.released);
+    fx_trajectory(fx_now, &head, eye, fov);
+    {
+        const double dx = sp.quad_pose.position.x - head.position.x, dz = sp.quad_pose.position.z - head.position.z;
+        CHECK(fabs(sqrt(dx * dx + dz * dz) - 1.2) < 0.05 && fabs(sp.quad_pose.position.y - (head.position.y - 0.10)) < 0.05,
+              "panel: placed 1.2 m ahead, just below the eyes (%.3f m, dy %.3f)", sqrt(dx * dx + dz * dz),
+              sp.quad_pose.position.y - head.position.y);
+    }
+    pframe();
+    q = quad_of(sp.panel, &idx);
+    CHECK(q != NULL, "panel: its quad layer is submitted");
+    if (q) {
+        CHECK(q->space == shell_world_space(), "panel: world-locked (stage space)");
+        CHECK(fabsf(q->size.width - 0.8f) < 1e-5f && fabsf(q->size.height - 0.6f) < 1e-5f, "panel: 0.8 x 0.6 m (%.3f x %.3f)",
+              q->size.width, q->size.height);
+        CHECK(!memcmp(&q->pose, &sp.quad_pose, sizeof(q->pose)), "panel: submitted at the pose it opened with");
+        CHECK(q->layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT, "panel: alpha-blended (premultiplied)");
+        CHECK(q->subImage.imageRect.extent.width == 1024 && q->subImage.imageRect.extent.height == 768, "panel: 1024x768 image");
+        CHECK(idx >= 1 && (uint32_t)idx >= fx_last_end.nlayers - 2, "panel: over the game's layers (layer %d of %u)", idx, fx_last_end.nlayers);
+    }
+    /* the controllers are the panel's: the game sees a neutral pad even with buttons held */
+    s_pin.a = 1; s_pin.rtrig = 1.0f;
+    aim_at(512, 384);
+    pframe();
+    CHECK(vr_get_pad(&pad) && pad.buttons == 0 && pad.right_trigger == 0 && pad.left_trigger == 0, "panel: the game gets a neutral pad (%04X)", pad.buttons);
+    {
+        int lidx = -1;
+        const XrCompositionLayerQuad *lq = quad_of(sp.laser, &lidx);
+        shell_panel(&sp);
+        CHECK(lq && lidx == (int)fx_last_end.nlayers - 1 && fabsf(lq->size.height - sp.laser_len) < 1e-4f && sp.laser_len > 0.5f,
+              "panel: the laser beam is the last layer, as long as the hit (%.3f m)", sp.laser_len);
+        CHECK(sp.mouse_valid && fabsf(sp.mouse_x - 512.0f) < 1.0f && fabsf(sp.mouse_y - 384.0f) < 1.0f, "panel: the laser hits the centre (%.1f %.1f)",
+              sp.mouse_x, sp.mouse_y);
+    }
+    s_pin.a = 0; s_pin.rtrig = 0.0f;
+    pframe();
+    pframe();
+    capture_panel("Graphics tab", "panel_graphics.png");
+
+    /* a laser click changes a live setting: Comfort -> Turning: Smooth, Snap angle + */
+    CHECK(shell_cfg_get(VRS_TURN) == 0.0f, "panel: turning starts as snap");
+    click("tab:Comfort");
+    click("seg:turn:1");
+    CHECK(shell_cfg_get(VRS_TURN) == 1.0f, "panel: Smooth applied live (%g)", shell_cfg_get(VRS_TURN));
+    click("plus:snap_degrees");
+    CHECK(shell_cfg_get(VRS_SNAP_DEG) == 35.0f, "panel: snap angle + -> 35 (%g)", shell_cfg_get(VRS_SNAP_DEG));
+    capture_panel("Comfort tab", "panel_comfort.png");
+    /* a restart setting does not change the running config */
+    click("tab:Graphics");
+    click("seg:game_hz:0");
+    CHECK(shell_cfg_get(VRS_GAME_HZ) == 1.0f, "panel: game rate 30 waits for a restart (live %g)", shell_cfg_get(VRS_GAME_HZ));
+    /* foveation: SwiftShader has no VK_EXT_fragment_density_map, so the eye swapchain is not foveated and the setting
+     * is N/A here (its buttons disabled); the live path (xrUpdateSwapchainFB) is the unit-tested vrs_apply_live */
+    click("seg:foveation:3");
+    {
+        FxSwapchain *sc = fx_swapchain(shell_eye_swapchain(0));
+        CHECK(shell_cfg_get(VRS_FOVEATION) == 2.0f && sc && sc->foveation_level == -1,
+              "panel: foveation N/A without FDM: unchanged (%g, level %d)", shell_cfg_get(VRS_FOVEATION), sc ? sc->foveation_level : -9);
+    }
+    /* Performance: XR_EXT_performance_settings is not offered by the fake runtime either: N/A, nothing written */
+    /* Save: blackvr.ini edited in place */
+    click("btn:Save");
+    n = 0;
+    if ((f = fopen(path, "rb"))) { n = fread(buf, 1, sizeof(buf) - 1, f); fclose(f); }
+    buf[n] = 0;
+    CHECK(strstr(buf, "# my settings\n") == buf, "save: the comment kept");
+    CHECK(strstr(buf, "\nturn = smooth            ; snap | smooth | off\n") != NULL, "save: turn changed in place, comment kept");
+    CHECK(strstr(buf, "\nsome_future_key = 7\n") && strstr(buf, "\nenv RECOMP_BLACK_HZ=60\n") && strstr(buf, "\nresolution_scale = 0.8\n"),
+          "save: unknown keys, env lines and untouched settings kept");
+    CHECK(strstr(buf, "\nsnap_degrees = 35\n") && strstr(buf, "\ngame_hz = 30\n"), "save: new values appended");
+    CHECK(!strstr(buf, "world_scale") && !strstr(buf, "foveation") && !strstr(buf, "BLACKVR_PERF"),
+          "save: settings not changed in the panel are not written");
+    printf("panel: saved blackvr.ini:\n%s", buf);
+    shell_panel(&sp);
+    CHECK(strstr(sp.status, "Saved") != NULL, "save: status '%s'", sp.status);
+    capture_panel("Graphics tab after Save", "panel_saved.png");
+    click("tab:Gestures");
+    capture_panel("Gestures tab", "panel_gestures.png");
+    click("tab:Info");
+    pframe();
+    capture_panel("Info tab", "panel_info.png");
+
+    /* B closes it; that B never reaches the game; closed, it costs nothing */
+    s_pin.b = 1;
+    pframe();
+    shell_panel(&sp);
+    CHECK(!sp.open, "panel: B closes it");
+    CHECK(vr_get_pad(&pad) && !(pad.buttons & VR_PAD_B), "panel: the B that closed it is not the game's");
+    pframe();
+    CHECK(vr_get_pad(&pad) && !(pad.buttons & VR_PAD_B), "panel: ... while it is held");
+    s_pin.b = 0;
+    pframe();
+    CHECK(quad_of(sp.panel, NULL) == NULL && quad_of(sp.laser, NULL) == NULL, "panel: no layers when closed");
+    acq = fx_swapchain(sp.panel)->acquires;
+    for (i = 0; i < 5; i++) pframe();
+    CHECK(fx_swapchain(sp.panel)->acquires == acq, "panel: nothing drawn when closed");
+    s_pin.b = 1; pframe();
+    CHECK(vr_get_pad(&pad) && (pad.buttons & VR_PAD_B), "panel: a new B press is the game's again");
+    s_pin.b = 0; pframe();
+
+    /* reopen, change, Cancel: the change is undone; Menu closes */
+    s_pin.lclick = 1; pframe();
+    s_pin.lclick = 0; pframe();
+    shell_panel(&sp);
+    CHECK(sp.open, "panel: reopened");
+    pframe();
+    click("tab:Comfort");
+    click("seg:turn:2");
+    CHECK(shell_cfg_get(VRS_TURN) == 2.0f, "panel: turning off (live)");
+    click("btn:Cancel");
+    CHECK(shell_cfg_get(VRS_TURN) == 1.0f, "panel: Cancel restores smooth (%g)", shell_cfg_get(VRS_TURN));
+    s_pin.menu = 1; pframe();
+    shell_panel(&sp);
+    CHECK(!sp.open, "panel: Menu closes it");
+    CHECK(vr_get_pad(&pad) && !(pad.buttons & VR_PAD_START), "panel: that Menu is not START for the game");
+    s_pin.menu = 0; pframe();
+
+    fx_input_bool = NULL;
+    fx_input_float = NULL;
+    fx_input_vec2 = NULL;
+    fx_hand_pose = NULL;
+    remove(path);
+    rmdir(dir);
+}
+
 static int run(int multiview)
 {
     const uint32_t EW = 384, EH = 336;
@@ -1611,6 +1965,7 @@ static int run(int multiview)
                (unsigned long long)st.draws, (unsigned long long)st.stereo_draws, (unsigned long long)st.hud_draws,
                (unsigned long long)st.passes, (unsigned long long)st.pipelines);
     }
+    if (multiview) test_panel();
     free(img);
     vr_renderer_shutdown();
     kvk_shutdown();

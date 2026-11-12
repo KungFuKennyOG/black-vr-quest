@@ -534,8 +534,14 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession s, const XrFrameEndInfo *ei)
                 f.proj_image[v] = sc ? sc->last_released : 0;
             }
             f.proj.views = NULL;
-        } else if (l->type == XR_TYPE_COMPOSITION_LAYER_QUAD && f.nquads < 2) {
-            f.quads[f.nquads++] = *(const XrCompositionLayerQuad *)l;
+        } else if (l->type == XR_TYPE_COMPOSITION_LAYER_QUAD && f.nquads < 4) {
+            const XrCompositionLayerQuad *q = (const XrCompositionLayerQuad *)l;
+            FxSwapchain *sc = fx_swapchain(q->subImage.swapchain);
+            /* a quad layer must name a swapchain that has released an image (OpenXR: XR_ERROR_LAYER_INVALID) */
+            if (!sc || !sc->ever_released) { printf("FAIL: quad layer %u names a swapchain with no released image\n", i); return XR_ERROR_LAYER_INVALID; }
+            f.quad_image[f.nquads] = sc->last_released;
+            f.quad_layer_index[f.nquads] = (int)i;
+            f.quads[f.nquads++] = *q;
         }
     }
     fx_last_end = f;

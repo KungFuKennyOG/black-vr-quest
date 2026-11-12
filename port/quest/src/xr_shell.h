@@ -94,6 +94,7 @@ typedef struct {
      * rendering of the eye swapchain at blackvr.ini's level (xrs_foveation_apply) */
     int has_foveation;
     int foveation_applied;          /* the level the eye swapchain(s) got, 0 none */
+    int foveation_swapchain;        /* the eye swapchain(s) were created foveated: a new level applies live */
     PFN_xrCreateFoveationProfileFB xrCreateFoveationProfileFB;
     PFN_xrDestroyFoveationProfileFB xrDestroyFoveationProfileFB;
     PFN_xrUpdateSwapchainFB xrUpdateSwapchainFB;
@@ -153,7 +154,43 @@ typedef struct {
     /* device preflight (xr_preflight.c, bvr_diag.c; port/notes/device-preflight.md) */
     int preflight_on;               /* BLACKVR_PREFLIGHT=0 (a blackvr.ini env line) turns the checks off */
     volatile int pf_panel;          /* XRS_PANEL_*: a solid quad over the test pattern, until the renderer runs */
+
+    /* the in-headset settings panel (xr_panel.c; port/notes/settings-panel.md); NULL: none in this build */
+    const struct XrsPanelOps *panel;
 } XrShell;
+
+/* The settings panel's hooks into the XR thread's frame (xr_session.c calls them; all on the XR thread). */
+typedef struct XrsPanelOps {
+    /* after the controllers are read, before vrb_set_input: *touch becomes what the game may see (neutral while the
+     * panel is open). Returns 1 while open. */
+    int  (*input)(XrShell *s, VrTouchState *touch, const VrPose aim[2], const int valid[2], double dt);
+    void (*draw)(XrShell *s);                                  /* after xrBeginFrame: one UI frame, when open */
+    /* under the queue lock, before xrEndFrame: the panel's layers (drawn over all others), returns the count */
+    uint32_t (*layers)(XrShell *s, const XrCompositionLayerBaseHeader **out, uint32_t cap);
+    void (*destroy)(XrShell *s);                               /* before the device goes */
+} XrsPanelOps;
+/* vr_settings_menu.c: the settings state of both front ends (the native page, the floating panel) */
+void vrsm_attach(XrShell *s);          /* after blackvr.ini was read: "as started" and "saved" */
+void vrsm_caps(XrShell *s);
+void vrsm_begin_edit(XrShell *s);      /* edit = the running config, restart settings as saved */
+unsigned vrsm_apply_live(XrShell *s);  /* edit -> the running config; OpenXR side effects queued for the XR thread */
+void vrsm_xr_frame(XrShell *s);        /* XR thread, every frame: runs what was queued */
+int  vrsm_save(XrShell *s);
+void vrsm_ini_path(XrShell *s, char *p, size_t cap);
+void vrsm_sampler(int want);           /* the per-thread CPU sampler, while a settings page is shown */
+void vrsm_info_update(XrShell *s);
+/* xr_panel.c: the panel for this shell; call after blackvr.ini was read (it keeps that config as "as started") */
+const XrsPanelOps *xrs_panel_attach(XrShell *s);
+typedef struct {
+    int open, inited, released;
+    XrSwapchain panel, laser;
+    VrPose quad_pose;
+    float width_m, height_m;
+    int mouse_valid;
+    float mouse_x, mouse_y, laser_len;
+    char status[240];
+} XrsPanelTestState;
+int xrs_panel_test_state(XrsPanelTestState *st);   /* tests/vr_glue */
 
 enum { XRS_PANEL_NONE = 0, XRS_PANEL_FATAL = 1, XRS_PANEL_GAME_EXIT = 2 };
 
@@ -169,6 +206,7 @@ int  xrs_swapchain_create(XrShell *s, XrsSwapchain *sc, uint32_t w, uint32_t h, 
 /* as xrs_swapchain_create, with an extra structure chained to XrSwapchainCreateInfo (NULL: none) */
 int  xrs_swapchain_create_ex(XrShell *s, XrsSwapchain *sc, uint32_t w, uint32_t h, uint32_t layers, const void *next);
 void xrs_vulkan_destroy(XrShell *s);
+void xrs_swapchain_destroy(XrShell *s, XrsSwapchain *sc);
 
 /* xr_session.c */
 int  xrs_instance_create(XrShell *s);
@@ -185,6 +223,12 @@ int  xrs_locate_views(XrShell *s, XrTime t, XrPosef pose[VR_EYE_COUNT], XrFovf f
 int  xrs_locate_head(XrShell *s, XrTime t, XrPosef *head);
 int  xrs_swapchain_acquire(XrShell *s, XrsSwapchain *sc, uint32_t *index);
 void xrs_swapchain_release(XrShell *s, XrsSwapchain *sc);
+/* live settings (the settings panel): the display rate for cfg.refresh_hz (preflight_line: also the PREFLIGHT display
+ * line, at session start), cfg.foveation on the eye swapchain(s), the CPU/GPU performance levels for a BLACKVR_PERF
+ * value (NULL: sustained high) */
+void xrs_refresh_request(XrShell *s, int preflight_line);
+int  xrs_foveation_update(XrShell *s);
+void xrs_perf_apply(XrShell *s, const char *mode);
 
 /* xr_session.c: the last failed OpenXR/Vulkan call of the startup (XRCHECK / VKCHECK), for the preflight lines */
 void xrs_note_failure(const char *call, int code, int is_vk, const char *file, int line);
@@ -216,5 +260,9 @@ void vrb_touch_debug(VrPadState *pad);   /* latest pad for the test pattern */
 void vrb_set_hand_velocity(const VrVec3 lin[2], const int valid[2]);
 int  xrs_now(XrShell *s, XrTime *t);
 void vrb_head_for_testpattern(VrPose hand_aim[2], int valid[2], float trigger[2]);
+/* the settings panel: the newest head pose (stage), and whether the controls are in their menu mapping (paused, the
+ * front end, no game; not gameplay, not a cutscene) */
+void vrb_head_now(VrPose *head);
+int  vrb_menu_context(void);
 
 #endif /* XR_SHELL_H */

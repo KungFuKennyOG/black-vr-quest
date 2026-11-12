@@ -9,6 +9,7 @@
 #include "xr_shell.h"
 #include "fake_openxr.h"
 #include "shell_access.h"
+#include "vr_settings.h"
 
 XrShell g_xr;
 
@@ -41,6 +42,7 @@ int shell_setup(int multiview, float units_per_metre, uint32_t eye_w, uint32_t e
     s->cfg.multiview = multiview;
     s->cfg.game.units_per_metre = units_per_metre;
     vrb_init(s);
+    s->panel = xrs_panel_attach(s);          /* xr_main.c attaches the settings panel after blackvr.ini */
     fx_queue_lock = &s->queue_lock;
     /* what xrs_instance_create would have found */
     s->instance = (XrInstance)(uintptr_t)1;
@@ -93,3 +95,22 @@ XrSpace shell_world_space(void) { return g_xr.world_space; }
 int shell_config_line(const char *line) { return vr_config_line(&g_xr.cfg, line); }
 void shell_set_gun_latch(int on) { g_xr.cfg.gun_latch = on; }
 int shell_gun_latch(void) { return g_xr.cfg.gun_latch; }
+
+void shell_panel(ShellPanel *out)
+{
+    XrsPanelTestState st;
+    xrs_panel_test_state(&st);
+    memset(out, 0, sizeof(*out));
+    out->open = st.open; out->inited = st.inited; out->released = st.released;
+    out->panel = st.panel; out->laser = st.laser;
+    out->quad_pose.orientation.x = st.quad_pose.orientation.x; out->quad_pose.orientation.y = st.quad_pose.orientation.y;
+    out->quad_pose.orientation.z = st.quad_pose.orientation.z; out->quad_pose.orientation.w = st.quad_pose.orientation.w;
+    out->quad_pose.position.x = st.quad_pose.position.x; out->quad_pose.position.y = st.quad_pose.position.y;
+    out->quad_pose.position.z = st.quad_pose.position.z;
+    out->width_m = st.width_m; out->height_m = st.height_m;
+    out->mouse_valid = st.mouse_valid; out->mouse_x = st.mouse_x; out->mouse_y = st.mouse_y; out->laser_len = st.laser_len;
+    snprintf(out->status, sizeof(out->status), "%s", st.status);
+}
+void shell_set_game_root(const char *dir) { snprintf(g_xr.game_root, sizeof(g_xr.game_root), "%s", dir); }
+float shell_cfg_get(int setting) { return vrs_get(&g_xr.cfg, setting); }
+void shell_set_present_mode(int mode) { vr_set_present_mode(mode); }

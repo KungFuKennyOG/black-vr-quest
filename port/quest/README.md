@@ -106,7 +106,7 @@ gives them (any of the four layouts, or your own from the Controls page). Right-
 | Menu (left) tap / hold 1 s | pause / objectives |
 | Raise a scoped weapon to your eye | look through the scope (`scope_raise`; other weapons never zoom) |
 | Both stick clicks (hold 1 s) | recentre the view and re-measure your standing height (or the Meta button long-press) |
-| Menus | right stick and the d-pad navigate; A confirms, B goes back, Menu = Start |
+| Menus | right stick and the d-pad navigate; A confirms, B goes back, Menu = Start; VR settings: Options -> VR SETTINGS (section 6) |
 
 You aim with the right controller. The game's own shot crosses the controller's ray 10 m
 ahead (`aim_converge`), and the first-person weapon is moved into your hand. `aim = head`
@@ -128,6 +128,27 @@ so hip-fired shots are as accurate as the game ever makes them. All settings are
   and reprojects every frame to your current head pose, so head rotation stays smooth when the
   game drops frames. Moving objects animate at the game's rate.
 
+## 6. Settings in the headset
+
+**Options -> VR SETTINGS.** BLACK's own Options menu (front end, and the pause menu's Options) has one more button,
+**VR SETTINGS**, under the stock ones. It opens a page in the game's own style (its font, selection bar, sounds and
+legend): GRAPHICS, COMFORT, GESTURES, INFO, then RECALIBRATE HEIGHT and RESTORE DEFAULTS. In a section, the stick
+moves up/down, **left/right** (or **A**) changes the value, **B** goes back. A value marked "(RESTART)" applies at
+the next start, "N/A" means this headset/runtime lacks what it drives; everything else applies at once. Leaving the
+page saves `blackvr.ini` in the game folder, changing only the lines of the settings you changed (comments, other
+keys and `env` lines stay as they are).
+
+| Section | Settings |
+|---|---|
+| Graphics | resolution scale (0.6–1.4, restart), foveation (off/low/medium/high/high-top, live), refresh rate (auto/72/80/90/120, live), game rate 30/60 (restart), performance sustained/boost (live), effects debug tint (restart) |
+| Comfort | turning snap/smooth/off, snap angle, smooth turn speed, move direction (head / gun hand / off hand), left-handed, world scale (all live) |
+| Gestures | swing to melee + swing speed, duck to crouch + duck depth, raise to scope + distance, two-handed aim (all live) |
+| Info | game and XR loop fps, display rate, eye image size, the busiest threads, GPU, build |
+
+A floating settings panel is still available as a fallback (`settings_menu = panel` or `both` in `blackvr.ini`):
+in any menu, click the left thumbstick; point with the gun hand, trigger clicks, B or Menu closes.
+port/notes/settings-panel.md has the details.
+
 ## What works and what is untested
 
 | | Status |
@@ -139,6 +160,8 @@ so hip-fired shots are as accurate as the game ever makes them. All settings are
 | Renderer glue: Kelvin Vulkan backend on the shell's device, per-eye late latch, HUD quad layer, flat modes on the quad layer | **integration-tested** on SwiftShader with a fake OpenXR runtime (`tests/vr_glue`, port/notes/vr-glue.md) |
 | Game on the headset (needs the ARM64 runtime stream) | **not yet possible** |
 | Game camera in stereo, hand aiming, weapon in hand, disabled effects | implemented against documented hook points; **untested with the real game** |
+| VR SETTINGS page in the game's Options menu (live apply, ini save) | **run in the headless game harness** (front end; port/notes/settings-panel.md), model **unit-tested**; not run on a headset |
+| Floating settings panel (fallback) | **unit-tested** and **integration-tested** (`tests/vr_glue`); not run on a headset |
 
 On the first headset run, check: the test scene's floor is at your real floor (stage space;
 in local space it sits 1.6 m below your head), the yellow pillar is ahead of you, the green

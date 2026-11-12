@@ -676,8 +676,9 @@ static void black_android_paths(int argc, char **argv)
 /* The launcher (launcher/src/core/GameSession.cpp gameEnvironment) sets these
  * for every Windows/Linux run; on the Quest nothing does, so the same defaults
  * apply here. Anything blackvr.ini set first wins (setenv without overwrite).
- * Movies are skipped by default: the runtime's player is Media Foundation
- * only, and a disc dump without videos/ has nothing to play. */
+ * Movies: BLACK decodes its own XMV movies in guest code (src/black_xmv_*.inc speed it up), so they play on
+ * the Quest when the dump has them (confirmed on a Quest 3, 2026-11-12). A dump without videos/ skips every
+ * movie instead, as before. */
 static void black_android_env_defaults(void)
 {
     static const char *const defaults[][2] = {
@@ -693,10 +694,15 @@ static void black_android_env_defaults(void)
         { "RECOMP_LANGUAGE", "en-US" },
         { "RECOMP_BLACK_60HZ", "1" },
         { "RECOMP_BLACK_SKIP_STARTUP_VIDEOS", "1" },
-        { "RECOMP_BLACK_SKIP_MOVIES", "1" },
     };
     char path[700];
     size_t i;
+    struct stat vst;
+    snprintf(path, sizeof(path), "%s/videos", black_android_game_dir);
+    if (stat(path, &vst) != 0 || !S_ISDIR(vst.st_mode)) {
+        fprintf(stderr, "[MOVIE] %s missing: movies are skipped (a full disc dump includes it)\n", path);
+        setenv("RECOMP_BLACK_SKIP_MOVIES", "1", 0);
+    }
     for (i = 0; i < sizeof(defaults) / sizeof(defaults[0]); i++)
         setenv(defaults[i][0], defaults[i][1], 0);
     snprintf(path, sizeof(path), "%s/video.ini", black_android_save_dir);
@@ -1203,6 +1209,20 @@ static void *black_android_progress_watch(void *arg)
                                 (unsigned long long)kc[2], (double)(kc[0] - beat_words) / dt, (unsigned long long)kc[3],
                                 put, get, black_android_rss_mb());
             black_android_thread_line(dt);
+            {   /* the game's in-level throttle (recomp_manual.c black_throttle_skip): how often it asked to sleep */
+                extern volatile unsigned black_throttle_hits[3];
+                static unsigned prev6, prev16, prev1;
+                const unsigned h6 = black_throttle_hits[0], h16 = black_throttle_hits[1], h1 = black_throttle_hits[2];
+                const char *mode = getenv("RECOMP_BLACK_THROTTLE");
+                black_vr_log(ANDROID_LOG_INFO, "HEARTBEAT throttle: Sleep(6) %.1f/s, paused Sleep(16) %.1f/s, "
+                             "Sleep(1) yield %.1f/s (%s)",
+                             (double)(h6 - prev6) / dt, (double)(h16 - prev16) / dt, (double)(h1 - prev1) / dt,
+                             !mode || !*mode || *mode == '1' ? "kept" : !strcmp(mode, "paused") ? "all skipped"
+                             : *mode == '0' ? "6 ms and 1 ms skipped" : "kept");
+                prev6 = h6;
+                prev16 = h16;
+                prev1 = h1;
+            }
             beat_frames = frames;
             beat_xr = d.xr_frames;
             beat_icalls = icalls;

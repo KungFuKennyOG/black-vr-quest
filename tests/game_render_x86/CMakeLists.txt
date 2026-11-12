@@ -185,6 +185,7 @@ endforeach()
 add_library(grx_shell STATIC
     ${QUEST}/src/xr_session.c ${QUEST}/src/xr_vulkan.c ${QUEST}/src/vr_bridge.c ${QUEST}/src/vr_renderer_kvk.c
     ${QUEST}/src/bvr_diag.c ${QUEST}/src/xr_preflight.c       # the device preflight (port/notes/device-preflight.md)
+    ${QUEST}/src/vr_settings_menu.c                           # VR SETTINGS in the game's Options (settings-panel.md)
     ${GLUE_TEST}/fake_openxr.c ${GRX}/grx_shell.c ${SHADER_INCS})
 target_include_directories(grx_shell PRIVATE
     ${GLUE_TEST}/stubs ${GLUE_TEST} ${QUEST}/src ${QUEST} ${SHADER_OUT} ${OPENXR_SDK_DIR}/include ${KEL}/vk ${GRX})

@@ -52,7 +52,7 @@ static const char k_default_ini[] =
     "# BLACK VR settings. Lines are key = value; # starts a comment.\n"
     "refresh_hz = auto        ; auto (120 for game_hz 60, 90 for 30) or 72, 80, 90, 120\n"
     "resolution_scale = 0.8   ; eye image size vs the headset's recommendation\n"
-    "foveation = medium       ; off | low | medium | high (fixed foveated rendering)\n"
+    "foveation = medium       ; off | low | medium | high | hightop (fixed foveated rendering)\n"
     "game_hz = 60             ; 60 (smoother, twice the CPU) | 30 (the game's own rate, steadiest)\n"
     "raster_workers = 1       ; 0..4 CPU vertex/raster threads beside the GPU thread\n"
     "raster_spin_us = 50      ; 0..5000: how long an idle raster thread spins before sleeping\n"
@@ -83,7 +83,8 @@ static const char k_default_ini[] =
     "hud_distance = 2.0       ; metres: the head-locked HUD\n"
     "hud_width = 2.4          ; metres (4:3)\n"
     "gun_latch = on           ; on | off: the weapon follows the controller at display time\n"
-    "# env RECOMP_BLACK_HZ=60\n";
+    "# env RECOMP_BLACK_HZ=60\n"
+    "# In the headset: Options -> VR SETTINGS (settings_menu = panel: the floating panel instead)\n";
 
 static const char k_where_txt[] =
     "BLACK VR - put your own BLACK (original Xbox, NTSC-U) disc files here:\n\n"
@@ -329,6 +330,7 @@ void android_main(struct android_app *app)
     find_game_root(s);
     load_config(s);
     export_config(s);
+    s->panel = xrs_panel_attach(s);          /* the in-headset settings panel (port/notes/settings-panel.md) */
     {
         const char *pf = getenv("BLACKVR_PREFLIGHT");
         s->preflight_on = !(pf && *pf == '0');

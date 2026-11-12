@@ -1,4 +1,4 @@
-# Native tests for the Quest XR shell math, input mapping and the BLACK_VR game hooks.
+# Native tests for the Quest XR shell math, input mapping, the Quest button prompts and the BLACK_VR game hooks.
 #   cmake -S tests/xr_shell -B build-xr-shell && cmake --build build-xr-shell && ctest --test-dir build-xr-shell
 # No game files, OpenXR runtime or GPU needed.
 cmake_minimum_required(VERSION 3.20)
@@ -10,7 +10,7 @@ add_custom_command(OUTPUT "${extracted}"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/extract.py" "${extracted}"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../src/recomp_manual.c" "${CMAKE_CURRENT_SOURCE_DIR}/../../src/black_vr.inc"
             "${CMAKE_CURRENT_SOURCE_DIR}/extract.py")
-foreach(t math input hooks)
+foreach(t math input hooks settings prompts)
     add_executable(xr-shell-${t} test_${t}.c)
     target_include_directories(xr-shell-${t} PRIVATE "${QUEST}" "${QUEST}/src" "${CMAKE_CURRENT_BINARY_DIR}")
     target_link_libraries(xr-shell-${t} PRIVATE m)
@@ -22,7 +22,7 @@ foreach(t math input hooks)
 endforeach()
 target_sources(xr-shell-hooks PRIVATE "${extracted}")
 enable_testing()
-foreach(t math input hooks)
+foreach(t math input hooks settings prompts)
     add_test(NAME xr-shell-${t} COMMAND xr-shell-${t})
 endforeach()
 # The same hooks against a game whose RenderWare right row is the screen's right:

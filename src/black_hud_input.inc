@@ -57,7 +57,7 @@ static RECOMP_TLS BlackHintCache black_hint_caches[2];
 
 static int black_hint_device(void)
 {
-    return black_msg_in ? (int)PC_DEVICE_CONTROLLER : (int)pc_input_prompt_device();
+    return black_msg_in ? (int)PC_DEVICE_CONTROLLER : BLACK_PROMPT_DEVICE();
 }
 /* Native control-name localization must not borrow frontend [ENTER]/[ESC]
  * replacements, including when the OHCI thread changes device during formatting. */
@@ -296,6 +296,10 @@ static int black_hint_format(const BlackHintField *field, int device, uint16_t *
             memcpy((void *)((uintptr_t)g_xbox_mem_offset+text),field->raw,(length+1u)*2u);
             if (device==PC_DEVICE_KEYBOARD_MOUSE)
                 pc_input_expand_prompt((uint16_t *)((uintptr_t)g_xbox_mem_offset+text),field->capacity,field->confirm_only);
+#ifdef BLACK_VR
+            else if (black_prompt_is_vr(device))
+                black_vr_expand_prompt((uint16_t *)((uintptr_t)g_xbox_mem_offset+text),field->capacity,field->confirm_only,device);
+#endif
             /* At most 199 source units, each native replacement converted with limit32.
              * Even 199*32+1 UTF-16 units fits this separate6400-unit allocation. */
             g_esp=stack-8u; GUEST32(g_esp)=0x0012B4EFu; GUEST32(g_esp+4u)=text;
@@ -405,6 +409,37 @@ static void black_pickup_refresh(uint32_t hud, int device)
         memset(label,0,sizeof(label));
         have_glyph=black_pickup_glyph(&control,&glyph);
         if (!have_glyph) { control=text->control; glyph=text->glyph; }
+#ifdef BLACK_VR
+        if (black_prompt_is_vr(device)) {
+            /* VR: Use's Quest glyph (UTF-16); the cache keeps "VR<device>" as its label */
+            uint16_t vr_label[48];
+            unsigned vr_length=0;
+            if (!have_glyph || !black_vr_use_label(device,vr_label,48u)) return;
+            while (vr_label[vr_length]) ++vr_length;
+            snprintf(label,sizeof(label),"VR%d",device);
+            if (text->device==device && text->control==control && !strcmp(text->label,label)) return;
+            memcpy(native,text->native,sizeof(native));
+            length=black_hint_length(native,BLACK_HINT_BODY);
+            if (length==BLACK_HINT_BODY || text->position>=length ||
+                native[text->position]!=text->glyph) return;
+            native[text->position]=glyph;
+            memcpy(formatted,native,sizeof(formatted));
+            if (length-1u+vr_length<BLACK_HINT_BODY) {
+                memcpy(formatted+text->position,vr_label,vr_length*sizeof(uint16_t));
+                memcpy(formatted+text->position+vr_length,native+text->position+1u,
+                       (length-text->position)*sizeof(uint16_t)); /* includes NUL */
+                length=length-1u+vr_length;
+            }
+            if (!black_pickup_matches(hud,text)) return;
+            memcpy((void *)((uintptr_t)g_xbox_mem_offset+hud+0x27F0u),formatted,(length+1u)*2u);
+            memcpy(text->native,native,sizeof(native));
+            memcpy(text->rendered,formatted,sizeof(formatted));
+            memcpy(text->label,label,sizeof(label));
+            text->glyph=glyph; text->control=control; text->device=device;
+            if (bvp_tracing()) fprintf(stderr,"[BLACK_VR] prompts: pickup caption: Use glyph spliced at %u\n",text->position);
+            return;
+        }
+#endif
         have_label=have_glyph && pc_input_prompt_text(13,label,sizeof(label));
         label_length=0;
         if (have_label) {

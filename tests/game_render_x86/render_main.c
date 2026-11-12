@@ -235,8 +235,8 @@ static int hand_velocity(int hand, int grip, XrTime t, XrVector3f *v)
 /* ---- input script --------------------------------------------------------------------------------------------------- */
 /* A press is held until both `hold` seconds have passed and the backend has drawn 4 more frames, so a slow XR thread
  * (it reads frames back) and a slow game frame (SwiftShader) both see it; then it is released. */
-typedef struct Press { double t, hold; char button[16]; int captured_before, logged, done; uint64_t frame0; double t0; } Press;
-static Press s_press[64];
+typedef struct Press { double t, hold; char button[16]; int captured_before, logged, done, exact; uint64_t frame0; double t0; } Press;
+static Press s_press[256];
 static int s_npress;
 static int s_exact_hold;   /* GRX_EXACT_HOLD=1: release after exactly `hold` seconds (the VR controls' taps wait
                             * for the game's input updates themselves) */
@@ -276,7 +276,7 @@ static int button_down(const char *name)
                 fprintf(stderr, "[GRX] t=%.1fs: input %s pressed (script +%.0fs after the first frame, backend frame %llu)\n", el(),
                         name, s_press[i].t, (unsigned long long)st.frames);
             }
-            if (t - s_press[i].t0 >= s_press[i].hold && (s_exact_hold || st.frames >= s_press[i].frame0 + 4)) {
+            if (t - s_press[i].t0 >= s_press[i].hold && (s_exact_hold || s_press[i].exact || st.frames >= s_press[i].frame0 + 4)) {
                 s_press[i].done = 1;
                 fprintf(stderr, "[GRX] t=%.1fs: input %s released (backend frame %llu)\n", el(), name, (unsigned long long)st.frames);
                 return 0;
@@ -1037,17 +1037,21 @@ int main(int argc, char **argv)
                 s_cap.want = 1;
             }
         {
-            /* GRX_INPUT at run time: a file <frames>/press with "button" per line adds presses now */
+            /* GRX_INPUT at run time: a file <frames>/press with "button" or "button:hold" per line adds presses now */
             char pp[1200], line[64];
             FILE *pf;
             snprintf(pp, sizeof(pp), "%s/press", s_frames_dir);
             if (s_first_frame_t >= 0 && (pf = fopen(pp, "r")) != NULL) {
-                while (fgets(line, sizeof(line), pf) && s_npress < 64) {
+                while (fgets(line, sizeof(line), pf) && s_npress < 256) {
                     char b[16] = "";
-                    if (sscanf(line, "%15[a-z]", b) == 1) {
+                    double hold = 0.0;
+                    /* "button" or "button:hold" (released after exactly `hold` seconds) */
+                    const int got = sscanf(line, "%15[a-z]:%lf", b, &hold);
+                    if (got >= 1) {
                         Press *np = &s_press[s_npress++];
                         memset(np, 0, sizeof(*np));
-                        np->t = now_s() - s_first_frame_t; np->hold = 0.5; np->captured_before = 1;
+                        np->t = now_s() - s_first_frame_t; np->hold = got == 2 && hold > 0.0 ? hold : 0.5; np->captured_before = 1;
+                        np->exact = got == 2 && hold > 0.0;
                         snprintf(np->button, sizeof(np->button), "%s", b);
                     }
                 }

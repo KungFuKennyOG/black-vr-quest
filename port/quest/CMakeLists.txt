@@ -62,7 +62,10 @@ foreach(stage vert frag)
         VERBATIM)
     list(APPEND SHADER_INCS "${inc}")
 endforeach()
-add_custom_target(blackvr_shaders DEPENDS ${SHADER_INCS})
+# the in-headset settings panel: Dear ImGui (third_party/imgui), its shaders and font (port/notes/settings-panel.md)
+set(PANEL_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/panel")
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/settings_panel.cmake")
+add_custom_target(blackvr_shaders DEPENDS ${SHADER_INCS} ${PANEL_GEN_INCS})
 
 # ---- native_app_glue ----------------------------------------------------------------
 add_library(native_app_glue STATIC "${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c")
@@ -90,9 +93,13 @@ add_library(blackvr SHARED
     src/vr_bridge.c
     src/bvr_diag.c          # device preflight, process checks (port/notes/device-preflight.md)
     src/xr_preflight.c      # device preflight, Vulkan / OpenXR / AAudio / ActivityManager
+    src/vr_settings_menu.c  # the VR settings state: the game's VR SETTINGS page (vr_menu_*) and the panel
+    src/xr_panel.c          # the floating settings panel (fallback): layers, input
+    src/vr_panel_ui.cpp     # the settings panel's Dear ImGui UI and its Vulkan drawing
 )
+set_source_files_properties(src/vr_panel_ui.cpp PROPERTIES COMPILE_OPTIONS "-fno-exceptions;-fno-rtti;-fvisibility=hidden")
 add_dependencies(blackvr blackvr_shaders)
-target_include_directories(blackvr PRIVATE src "${CMAKE_CURRENT_SOURCE_DIR}" "${SHADER_OUT}")
+target_include_directories(blackvr PRIVATE src "${CMAKE_CURRENT_SOURCE_DIR}" "${SHADER_OUT}" "${PANEL_GEN_DIR}")
 target_compile_options(blackvr PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -O2 -fno-strict-aliasing)
 target_compile_definitions(blackvr PRIVATE XR_USE_PLATFORM_ANDROID XR_USE_GRAPHICS_API_VULKAN VK_USE_PLATFORM_ANDROID_KHR)
 # ANativeActivity_onCreate must stay exported; 16 KB pages for Android 15+ devices.
@@ -101,7 +108,7 @@ target_compile_definitions(blackvr PRIVATE XR_USE_PLATFORM_ANDROID XR_USE_GRAPHI
 # exported, so the crash reporter still names sub_XXXXXXXX (dladdr). Nothing interposes on them. port/notes/perf.md 9.
 target_link_options(blackvr PRIVATE -u ANativeActivity_onCreate -Wl,-z,max-page-size=16384 -Wl,--no-undefined
                     -Wl,-Bsymbolic-functions)
-target_link_libraries(blackvr PRIVATE native_app_glue openxr_loader vulkan android log aaudio m dl)
+target_link_libraries(blackvr PRIVATE native_app_glue openxr_loader blackvr_imgui vulkan android log aaudio m dl)
 # For the preflight banner and its XBE check: the version, and the XBE the recompiled code was generated from (a
 # --with-game APK only; the copy on the headset is compared with it: size and the first 16 signature bytes).
 if(EXISTS "${BLACK_ROOT}/VERSION")

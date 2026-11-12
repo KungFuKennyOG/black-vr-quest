@@ -634,11 +634,37 @@ void sub_000DF4B0(void)
 
 /* The game's per-frame Sleep(1) (every third frame) is a yield for a single-core console; skipped at a stepped rate of
  * 120 Hz or more, where it is a tenth of a frame. RECOMP_BLACK_IDLE_YIELD=1 keeps it. */
+static int black_throttle_mode(void)
+{
+    static int mode = -1; /* 0 keep, 1 skip Sleep(6) and the Sleep(1) yield, 2 also the paused Sleep(16) */
+    if (mode < 0) {
+        const char *e = getenv("RECOMP_BLACK_THROTTLE");
+        mode = !e || !*e || *e == '1' ? 0 : !strcmp(e, "paused") ? 2 : *e == '0' ? 1 : 0;
+    }
+    return mode;
+}
+
+/* Hits per kind for the HEARTBEAT line on Android: [0] Sleep(6), [1] Sleep(16) (paused), [2] Sleep(1) yield. */
+volatile unsigned black_throttle_hits[3];
+
 int black_idle_yield_skip(void)
 {
     static int keep = -1;
     if (keep < 0) { const char *e = getenv("RECOMP_BLACK_IDLE_YIELD"); keep = e && *e && *e != '0'; }
-    return !keep && black_step_halved && black_hz >= 120;
+    black_throttle_hits[2]++;
+    return !keep && ((black_step_halved && black_hz >= 120) || black_throttle_mode() >= 1);
+}
+
+/* The in-level throttle in sub_001F9130: Sleep(6) per frame (Sleep(16) when paused) while a level-section streamer
+ * (+0x49D0 / +0x5250) is mid-load, outside {1 idle, 0x1C resident, 0x37 released} (scripts/generate.py). On the
+ * single-core console that handed the CPU to the loader; here the loader's reads run on the guest I/O worker, a host
+ * thread on another core, and 6 ms is 36% of a 60 Hz frame. RECOMP_BLACK_THROTTLE=0 skips Sleep(6) and the every-third
+ * Sleep(1) yield above, =paused also the paused Sleep(16); unset or 1 keeps them (the original behaviour, for the A/B
+ * test on the device). Every request is counted either way. */
+int black_throttle_skip(int ms)
+{
+    black_throttle_hits[ms > 6]++;
+    return ms > 6 ? black_throttle_mode() == 2 : black_throttle_mode() >= 1;
 }
 
 #if !defined(_WIN32)
@@ -5134,9 +5160,19 @@ void sub_001BD3F0(void)
 
 }
 
+#ifdef BLACK_VR
+#include "black_vr_prompts.inc"
+#define BLACK_PROMPT_DEVICE() black_prompt_device()
+#else
+#define BLACK_PROMPT_DEVICE() (int)pc_input_prompt_device()   /* the same tokens as before */
+#endif
 #include "black_hud_input.inc"
 
+#ifdef BLACK_VR
+void sub_001314E0(void) { black_vr_prompts_fonts(); black_hint_tick(); }
+#else
 void sub_001314E0(void) { black_hint_tick(); }
+#endif
 
 void sub_00113BF0(void)
 {
@@ -5147,13 +5183,20 @@ void sub_00113BF0(void)
     int device;
     pc_input_init();
     _mm_setcsr(caller_csr);
-    device = (int)pc_input_prompt_device();
+    device = BLACK_PROMPT_DEVICE();
     if (black_pc_ram_span(stack, 8u)) {
         const uint32_t caller = GUEST32(stack);
         buffer = GUEST32(stack + 4u);
+#ifdef BLACK_VR
+        black_vr_prompt_test(caller, buffer);
+#endif
         hint = black_hint_capture(caller, buffer, device);
     }
+#ifdef BLACK_VR
+    if ((device == PC_DEVICE_KEYBOARD_MOUSE || black_prompt_is_vr(device)) && black_pc_ram_span(stack, 8u)) {
+#else
     if (device == PC_DEVICE_KEYBOARD_MOUSE && black_pc_ram_span(stack, 8u)) {
+#endif
         const uint32_t caller = GUEST32(stack);
         uint32_t capacity = 0;
         int confirm_only = 0;
@@ -5164,6 +5207,12 @@ void sub_00113BF0(void)
         case 0x0012B4E0u: capacity = 64u; confirm_only = 1; break;   /* "\r\n\r\n<A> to continue" */
         default: break;
         }
+#ifdef BLACK_VR
+        if (capacity && black_pc_ram_span(buffer, capacity * 2u) && black_prompt_is_vr(device)) {
+            const int n = black_vr_expand_prompt((uint16_t *)((uintptr_t)g_xbox_mem_offset + buffer), capacity, confirm_only, device);
+            if (bvp_tracing()) fprintf(stderr, "[BLACK_VR] prompts: formatter %08X (capacity %u): %d token(s) named\n", caller, capacity, n);
+        } else
+#endif
         if (capacity && black_pc_ram_span(buffer, capacity * 2u))
             pc_input_expand_prompt((uint16_t *)((uintptr_t)g_xbox_mem_offset + buffer), capacity, confirm_only);
         _mm_setcsr(caller_csr);
@@ -5308,6 +5357,9 @@ static uint32_t black_pc_brand_guest(uint32_t source)
 }
 /* END BLACK_PC_BRANDING_RUNTIME */
 
+#ifdef BLACK_VR
+#include "black_vr_menu.inc"           /* VR SETTINGS in the game's Options menus */
+#endif
 #include "black_native_menu.inc"
 #include "black_localization.h"
 
@@ -5372,6 +5424,9 @@ void sub_001F3A80(void)
     const uint32_t hash = black_pc_ram_span(stack, 8u) ? GUEST32(stack + 4u) : 0u;
     size_t i;
     sub_001F3A80_gen();
+#ifdef BLACK_VR
+    if (black_vr_menu_text(hash, &g_eax)) return;   /* black_vr_menu.inc: the VR SETTINGS page's own texts */
+#endif
     black_pc_localized_trace(hash, g_eax);
     g_eax = black_pc_localized_fallback(manager, hash, g_eax);
     if (!g_eax) return;
@@ -5385,6 +5440,19 @@ void sub_001F3A80(void)
         g_eax = branded;
         _mm_setcsr(guest_csr);
     }
+#ifdef BLACK_VR
+    {
+        /* VR: the Controls page's names and "press start" (black_vr_prompts.inc); guest state preserved as above */
+        const unsigned int guest_csr = _mm_getcsr();
+        const uint32_t ecx = g_ecx, edx = g_edx, ebx = g_ebx, esi = g_esi, edi = g_edi;
+        const uint32_t esp = g_esp, ebp = g_ebp, seh_ebp = g_seh_ebp;
+        const uint32_t vr_text = black_hint_native_formatting ? g_eax : black_vr_localized(hash, g_eax);
+        g_ecx = ecx; g_edx = edx; g_ebx = ebx; g_esi = esi; g_edi = edi;
+        g_esp = esp; g_ebp = ebp; g_seh_ebp = seh_ebp;
+        g_eax = vr_text;
+        _mm_setcsr(guest_csr);
+    }
+#endif
     if (black_hint_native_formatting) return;
     for (i = 0; i < sizeof(black_menu_prompts) / sizeof(black_menu_prompts[0]); i++) {
         if (black_menu_prompts[i].hash != hash) continue;

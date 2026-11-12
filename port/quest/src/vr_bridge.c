@@ -435,6 +435,26 @@ void vrb_head_for_testpattern(VrPose hand_aim[2], int valid[2], float trigger[2]
     pthread_mutex_unlock(&g_lock);
 }
 
+void vrb_head_now(VrPose *head)
+{
+    pthread_mutex_lock(&g_lock);
+    *head = g_live.head;
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* The settings panel opens only here: the controls' menu mapping (vrb_set_input's in_game is 0: paused, the front
+ * end, loading, no game), and not a cutscene (FLAT_CINEMA). */
+int vrb_menu_context(void)
+{
+    const int mode = g_present_mode;
+    int in_game;
+    pthread_mutex_lock(&g_lock);
+    in_game = (mode == VR_PRESENT_STEREO || mode == VR_PRESENT_FLAT_SCOPE) && g_cam_time_ns &&
+              mono_ns() - g_cam_time_ns < 3000000000LL;
+    pthread_mutex_unlock(&g_lock);
+    return !in_game && mode != VR_PRESENT_FLAT_CINEMA;
+}
+
 int vrb_present_mode_now(void)
 {
     const int m = g_present_mode;

@@ -1099,8 +1099,15 @@ static void black_native_menu_tick(uint32_t ui)
 void sub_00124330(void)
 {
     const uint32_t ui = black_pc_ram_span(g_esp, 8u) ? GUEST32(g_esp + 4u) : 0u;
+#ifdef BLACK_VR
+    black_vr_prompts_frontend(ui);        /* black_vr_prompts.inc: the fonts' Quest glyphs, the Controls page */
+    black_vr_menu_frontend_pre(ui);       /* black_vr_menu.inc: VR SETTINGS in the Options pages (their clips) */
+#endif
     black_native_menu_tick(ui);
     sub_00124330_gen();
+#ifdef BLACK_VR
+    black_vr_menu_frontend(ui);           /* black_vr_menu.inc: VR SETTINGS in the Options pages (after the input) */
+#endif
 }
 
 /* The front end's idle check (al = 1: there was input this frame), called once a frame by sub_0020ECF0 while the page

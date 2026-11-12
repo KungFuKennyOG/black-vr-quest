@@ -24,4 +24,18 @@ XrSpace shell_world_space(void);
 int shell_config_line(const char *line);
 void shell_set_gun_latch(int on);
 int shell_gun_latch(void);
+/* the settings panel (port/notes/settings-panel.md) */
+typedef struct {
+    int open, inited, released;
+    XrSwapchain panel, laser;
+    XrPosef quad_pose;
+    float width_m, height_m;
+    int mouse_valid;
+    float mouse_x, mouse_y, laser_len;
+    char status[240];
+} ShellPanel;
+void shell_panel(ShellPanel *out);
+void shell_set_game_root(const char *dir);        /* where blackvr.ini is saved */
+float shell_cfg_get(int setting);                 /* vrs_get on the shell's live config (VRS_* of vr_settings.h) */
+void shell_set_present_mode(int mode);
 #endif
