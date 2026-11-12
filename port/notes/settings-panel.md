@@ -7,7 +7,7 @@ Status 2026-11-12:
   `/root/black/build-vrmenu-x86`): front end Options shows VR SETTINGS under the stock buttons; selecting it opens
   the VR SETTINGS page (sections), each section's rows change with left/right/A, B goes back, leaving saves
   blackvr.ini. Screenshots: `/root/black/build-vrmenu-x86/evidence/*.png` (listed below). The pause menu's Options
-  page (PauseMenuOptionXbox) is coded the same way; see "Pause menu" for its status.
+  page (PauseMenuOptionXbox) has no entry; see "Pause menu".
 - **Fallback: the floating Dear ImGui panel** (xr_panel.c, `settings_menu = panel` or `both`): a world-locked quad
   layer opened with the left stick click in a menu. Unit- and integration-tested (tests/vr_glue), described from
   "The floating panel" below.
@@ -35,8 +35,8 @@ front end ui = `[0x2D199C]`: +44C menu input (1 up .. 6 back), +454/+455 input o
   `black_vr_menu_frontend(ui)` after it (the update's input at ui+44C is final and the script has moved the
   focus); `recomp_manual.c` `sub_001F3A80`: `black_vr_menu_text()` answers our string keys right after the native
   fetch; the include before `black_native_menu.inc`. No generated function is newly overridden (no regeneration).
-- **Entry:** on `OptionsMenuXbox` (front end) and `PauseMenuOptionXbox` (pause), a copy of a stock button clip
-  (`duplicateMovieClip` through the host-to-script call) named `VRS_ENTRY`, placed 25 (27) units under the last
+- **Entry:** on `OptionsMenuXbox` (front end) only, a copy of a stock button clip
+  (`duplicateMovieClip` through the host-to-script call) named `VRS_ENTRY`, placed 25 units under the last
   stock button, its text field bound to `$VRS_1` ("VR SETTINGS"), made a script button object (movieClip,
   HighlightFrame, HighLight/UnHighLight copied from the first stock button) and linked into the focus ring
   (last stock -> ours -> first stock). Its action is "load this page"; when the confirm lands on it, the next
@@ -79,13 +79,13 @@ Not in the harness: the laser (the page is pad-driven), the Quest glyphs' final 
 stream's), sounds (no audio device on the host).
 
 ### Pause menu
-Coded with the same mechanism (`PauseMenuOptionXbox`: holder Main, the stock ToggleCrouch button copied, our
-button under MUSIC VOLUME, the "SELECT" legend prompt hidden in its place, the rows replacing the five stock rows,
-value column 245). **Not verified**: the harness reached level 1 and could not open the pause menu. At ~1 XR frame
-per second in gameplay on SwiftShader, any Menu press lasts a whole XR frame (about 1 s), which the VR controls read
-as "Menu held 1 s" = Back (objectives), so the pause page never came up (`action tap: back->13` in the log). On a
-headset (72+ Hz) a Menu tap pauses. If a build step fails on that page (a stock clip name differs), the page stays
-stock (`BLACKVR_MENU_TRACE=1` says which step); a half-made entry could show as an extra inert "VR SETTINGS" line.
+**Removed on 2026-11-12, by the user's choice.** The entry on `PauseMenuOptionXbox` (holder Main, the stock
+ToggleCrouch button copied, placed 27 units under MUSIC VOLUME, the "SELECT" legend prompt hidden) drew the button
+over the music volume bar: that page's volume rows are a label plus a bar, 64 units apart, so 27 lands on the bar
+(seen on the headset and reproduced in the harness). In the harness its VR SETTINGS page and GRAPHICS rows did open.
+To bring it back, restore the table entry in `src/black_vr_menu.inc` with a drop of about 66.5, the hidden SELECT
+prompt's slot. The harness could not pause before: a Menu press spanning one slow XR frame read as a 1 s hold
+(objectives). `vr_input_map.h` now times a hold from the frame the press is first seen, so a tap pauses there too.
 
 ## The floating panel (fallback: `settings_menu = panel | both`)
 

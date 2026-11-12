@@ -353,10 +353,11 @@ static inline void vr_map_actions(const VrInputConfig *c, VrInputRuntime *rt, co
         }
     }
 
-    /* Y: tap Suppressor / hold Fire mode;  Menu: tap Pause / hold Back */
+    /* Y: tap Suppressor / hold Fire mode;  Menu: tap Pause / hold Back. A hold is timed from the frame the press is
+     * first seen, so one long frame (a hitch, or the slow test harness) cannot turn a tap into a hold. */
     if (off_hi) {
         if (!rt->y_down) { rt->y_down = 1; rt->y_s = 0.0; rt->y_fired = 0; }
-        rt->y_s += dt;
+        else rt->y_s += dt;
         if (!rt->y_fired && rt->y_s >= VRI_Y_HOLD_S) { rt->y_fired = 1; vri_tap(rt, VRA_FIRE_MODE); }
     } else if (rt->y_down) {
         rt->y_down = 0;
@@ -364,7 +365,7 @@ static inline void vr_map_actions(const VrInputConfig *c, VrInputRuntime *rt, co
     }
     if (t->menu) {
         if (!rt->menu_down) { rt->menu_down = 1; rt->menu_s = 0.0; rt->menu_fired = 0; }
-        rt->menu_s += dt;
+        else rt->menu_s += dt;
         if (!rt->menu_fired && rt->menu_s >= VRI_MENU_HOLD_S) { rt->menu_fired = 1; vri_tap(rt, VRA_BACK); }
     } else if (rt->menu_down) {
         rt->menu_down = 0;
