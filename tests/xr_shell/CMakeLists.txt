@@ -10,7 +10,7 @@ add_custom_command(OUTPUT "${extracted}"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/extract.py" "${extracted}"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../src/recomp_manual.c" "${CMAKE_CURRENT_SOURCE_DIR}/../../src/black_vr.inc"
             "${CMAKE_CURRENT_SOURCE_DIR}/extract.py")
-foreach(t math input hooks settings prompts)
+foreach(t math input hooks settings prompts arms)
     add_executable(xr-shell-${t} test_${t}.c)
     target_include_directories(xr-shell-${t} PRIVATE "${QUEST}" "${QUEST}/src" "${CMAKE_CURRENT_BINARY_DIR}")
     target_link_libraries(xr-shell-${t} PRIVATE m)
@@ -22,7 +22,7 @@ foreach(t math input hooks settings prompts)
 endforeach()
 target_sources(xr-shell-hooks PRIVATE "${extracted}")
 enable_testing()
-foreach(t math input hooks settings prompts)
+foreach(t math input hooks settings prompts arms)
     add_test(NAME xr-shell-${t} COMMAND xr-shell-${t})
 endforeach()
 # The same hooks against a game whose RenderWare right row is the screen's right:

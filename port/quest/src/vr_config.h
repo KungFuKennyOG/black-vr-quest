@@ -42,6 +42,9 @@
  *   bob_filter        = 1
  *   hud_distance      = 2.0       ; metres: the head-locked HUD / virtual screen
  *   hud_width         = 2.4       ; metres (4:3)
+ *   arms              = hands     ; hands: the first-person arms end at the wrists (VR) | full: the game's arms
+ *   left_hand         = grip      ; grip: the game's off hand shows only while the off hand grips the gun (two-handed)
+ *                                 ; | always | never (port/notes/arms.md)
  *   haptic_fire       = 0.7       ; 0..1: shot pulse on the gun hand's controller (0 = off; the game's own rumble stays)
  *   gun_latch         = on        ; on | off: the first-person weapon follows the hand pose latched at display
  *                                 ; time, not the game frame's (port/notes/gun-latch.md); env
@@ -71,6 +74,8 @@ enum { VR_FOVEATION_OFF = 0, VR_FOVEATION_LOW = 1, VR_FOVEATION_MEDIUM = 2, VR_F
        VR_FOVEATION_HIGH_TOP = 4 };
 #define VR_FOVEATION_HIGH_TOP_OFFSET_DEG 10.0f
 
+enum { VR_LEFT_HAND_GRIP = 0, VR_LEFT_HAND_ALWAYS = 1, VR_LEFT_HAND_NEVER = 2 };
+
 typedef struct {
     float refresh_hz;
     float resolution_scale;
@@ -78,6 +83,8 @@ typedef struct {
     int   locomotion;
     float hud_distance_m, hud_width_m;   /* head-locked HUD quad layer (vr-glue) */
     float haptic_fire;       /* 0..1: strength of the shot pulse on the gun hand (0 off) */
+    int   arms_cut;          /* 1: first-person arms end at the wrists (arms = hands) */
+    int   left_hand;         /* VR_LEFT_HAND_* */
     int   foveation;         /* VR_FOVEATION_* */
     int   game_hz;           /* 30 | 60 -> RECOMP_BLACK_HZ / RECOMP_BLACK_60HZ */
     int   raster_workers;    /* -> RECOMP_KELVIN_THREADS = workers + 1 */
@@ -118,6 +125,8 @@ static inline void vr_config_defaults(VrShellConfig *c)
     c->hud_distance_m = 2.0f;
     c->hud_width_m = 2.4f;
     c->haptic_fire = 0.7f;
+    c->arms_cut = 1;
+    c->left_hand = VR_LEFT_HAND_GRIP;
     c->gun_latch = 1;
     vr_input_default_config(&c->input);
     vrg_default_config(&c->gest);
@@ -216,6 +225,19 @@ static inline int vr_config_line(VrShellConfig *c, const char *line_in)
     }
     if (!strcmp(key, "hud_distance")) { if (!vr_cfg_float(val, 0.5f, 10.0f, &f)) return 0; c->hud_distance_m = f; return 1; }
     if (!strcmp(key, "hud_width")) { if (!vr_cfg_float(val, 0.3f, 10.0f, &f)) return 0; c->hud_width_m = f; return 1; }
+    if (!strcmp(key, "arms")) {
+        if (!strcmp(val, "hands") || !strcmp(val, "cut")) c->arms_cut = 1;
+        else if (!strcmp(val, "full")) c->arms_cut = 0;
+        else return 0;
+        return 1;
+    }
+    if (!strcmp(key, "left_hand")) {
+        if (!strcmp(val, "grip")) c->left_hand = VR_LEFT_HAND_GRIP;
+        else if (!strcmp(val, "always")) c->left_hand = VR_LEFT_HAND_ALWAYS;
+        else if (!strcmp(val, "never")) c->left_hand = VR_LEFT_HAND_NEVER;
+        else return 0;
+        return 1;
+    }
     if (!strcmp(key, "haptic_fire")) { if (!vr_cfg_float(val, 0.0f, 1.0f, &f)) return 0; c->haptic_fire = f; return 1; }
     if (!strcmp(key, "gun_latch")) return vr_cfg_bool(val, &c->gun_latch);
     if (!strcmp(key, "settings_menu")) {

@@ -1086,9 +1086,96 @@ static void black_viewmodel_scale(uint32_t original_window_bits, uint32_t wide_w
     memcpy(&black_vm_scale_bits, &scale, 4);
 }
 
+/* RECOMP_BLACK_FPSCAN=<n> (debug): on the n-th first-person submission, look for arrays of 4x4 matrices reachable
+ * from the actor (two pointer levels) and print them, plus the inventory table's weapon IDs. */
+static int black_fpscan_affine(uint32_t va)
+{
+    float m[16];
+    unsigned i;
+    if (!black_pc_ram_span(va, 64u)) return 0;
+    memcpy(m, (const void *)((uintptr_t)g_xbox_mem_offset + va), 64);
+    for (i = 0; i < 16; i++) if (!(m[i] == m[i]) || m[i] > 1e5f || m[i] < -1e5f) return 0;
+    if (m[3] != 0.0f || m[7] != 0.0f || m[11] != 0.0f || !(m[15] > 0.999f && m[15] < 1.001f)) return 0;
+    {
+        float l0 = m[0]*m[0]+m[1]*m[1]+m[2]*m[2], l1 = m[4]*m[4]+m[5]*m[5]+m[6]*m[6], l2 = m[8]*m[8]+m[9]*m[9]+m[10]*m[10];
+        if (l0 < 1e-6f || l1 < 1e-6f || l2 < 1e-6f) return 0;
+    }
+    return 1;
+}
+
+static unsigned black_fpscan_run(uint32_t va, unsigned stride)
+{
+    unsigned n = 0;
+    while (n < 200u && black_fpscan_affine(va + n * stride)) n++;
+    return n;
+}
+
+static void black_fpscan(uint32_t actor)
+{
+    static int target = -1, count;
+    uint32_t seen[512];
+    unsigned nseen = 0, i, j;
+    if (target < 0) { const char *e = getenv("RECOMP_BLACK_FPSCAN"); target = e ? atoi(e) : 0; }
+    if (target <= 0 || ++count != target || !black_pc_ram_span(actor, 0x4A0u)) return;
+    fprintf(stderr, "[FPSCAN] actor %08X (submission %d)\n", actor, count);
+    for (i = 0; i < 0x4A0u; i += 4) {
+        const uint32_t p1 = GUEST32(actor + i);
+        if (!black_pc_ram_span(p1, 0x400u)) continue;
+        for (j = 0; j < 0x400u; j += 4) {
+            const uint32_t p2 = j == 0 ? p1 : GUEST32(p1 + j);
+            unsigned k, n, dup = 0;
+            if (j && !black_pc_ram_span(p2, 64u)) continue;
+            for (k = 0; k < nseen; k++) if (seen[k] == p2) dup = 1;
+            if (dup) continue;
+            if (nseen < 512u) seen[nseen++] = p2;
+            n = black_fpscan_run(p2, 64u);
+            if (n >= 8u) fprintf(stderr, "[FPSCAN] actor+%03X -> %08X +%03X -> %08X: %u matrices (stride 64)\n", i, p1, j, p2, n);
+            else {
+                unsigned off;
+                for (off = 16; off < 0x200u; off += 16) {
+                    unsigned m = black_fpscan_run(p2 + off, 64u);
+                    if (m >= 20u) { fprintf(stderr, "[FPSCAN] actor+%03X -> %08X +%03X -> %08X +%03X: %u matrices\n", i, p1, j, p2, off, m); break; }
+                }
+            }
+        }
+    }
+    if (black_pc_ram_span(0x2D12D0u, 4u)) {
+        const uint32_t inv = GUEST32(0x2D12D0u);
+        if (black_pc_ram_span(inv, 4u) && black_pc_ram_span(GUEST32(inv), 8u)) {
+            const uint32_t h = GUEST32(inv);
+            const unsigned n = ((const uint8_t *)(uintptr_t)g_xbox_mem_offset)[h + 1u];
+            const uint32_t e = GUEST32(h + 4u);
+            for (i = 0; i < n && black_pc_ram_span(e + i * 32u, 32u); i++)
+                fprintf(stderr, "[FPSCAN] inventory %u: id %08X%08X config %08X words %08X %08X %08X %08X %08X\n", i,
+                        GUEST32(e + i * 32u + 4u), GUEST32(e + i * 32u), GUEST32(e + i * 32u + 8u), GUEST32(e + i * 32u + 12u),
+                        GUEST32(e + i * 32u + 16u), GUEST32(e + i * 32u + 20u), GUEST32(e + i * 32u + 24u), GUEST32(e + i * 32u + 28u));
+            for (i = 0; i < n && black_pc_ram_span(e + i * 32u, 32u); i++) {
+                const uint32_t cfg = GUEST32(e + i * 32u + 8u);
+                unsigned o;
+                if (!black_pc_ram_span(cfg, 0x110u)) continue;
+                for (o = 0; o < 0x110u; o += 4) {
+                    const uint32_t sp = GUEST32(cfg + o);
+                    char buf[33];
+                    unsigned k;
+                    if (!black_pc_ram_span(sp, 32u)) continue;
+                    for (k = 0; k < 32u; k++) {
+                        const char c = (char)((const uint8_t *)(uintptr_t)g_xbox_mem_offset)[sp + k];
+                        if (!c || c < 32 || c > 126) break;
+                        buf[k] = c;
+                    }
+                    buf[k] = 0;
+                    if (k >= 4u && ((const uint8_t *)(uintptr_t)g_xbox_mem_offset)[sp + k] == 0)
+                        fprintf(stderr, "[FPSCAN] inventory %u config+%03X -> \"%s\"\n", i, o, buf);
+                }
+            }
+        }
+    }
+}
+
 void black_viewmodel_owner(uint32_t actor)
 {
     black_vm_owner = black_pc_ram_span(actor, 0x4A0u) ? actor : 0u;
+    if (black_vm_owner) black_fpscan(actor);
 }
 
 uint32_t black_viewmodel_draw_begin(uint32_t material_parameters)
@@ -3351,6 +3438,8 @@ done:
  * loadout, then 1DEC70 loads and constructs its ordinary weapon/animations.
  * Select an existing SVD table token before those native steps; never patch a
  * live descriptor or pretend that this was a natural pickup. */
+/* RECOMP_BLACK_TEST_WEAPON: "svd" (the original lab weapon) or a 16-hex-digit inventory ID (hi then lo word) */
+static uint32_t black_test_weapon_hi = 0x54461524u, black_test_weapon_lo = 0xB8230000u;
 static int black_test_weapon_loadout_valid(uint32_t record)
 {
     const uint8_t *memory = (const uint8_t *)(uintptr_t)g_xbox_mem_offset;
@@ -3370,7 +3459,7 @@ static int black_test_weapon_loadout_valid(uint32_t record)
     if (!count || count > 127u || !black_pc_ram_span(entries, count * 32u)) return 0;
     for (i = 0; i < count; ++i) {
         const uint32_t entry = entries + i * 32u;
-        if (GUEST32(entry) == 0xB8230000u && GUEST32(entry + 4u) == 0x54461524u) {
+        if (GUEST32(entry) == black_test_weapon_lo && GUEST32(entry + 4u) == black_test_weapon_hi) {
             const uint32_t config = GUEST32(entry + 8u);
             /* 1B7800 uses clip count at +60 and ammo category at +64. */
             if (!black_pc_ram_span(config, 0x65u) || !GUEST32(config + 0x60u) ||
@@ -3395,16 +3484,23 @@ void black_test_weapon_loadout(uint32_t record)
     if (enabled < 0) {
         const char *value = getenv("RECOMP_BLACK_TEST_WEAPON");
         enabled = value && !strcmp(value, "svd");
+        if (value && !enabled && strlen(value) == 16u) {
+            char hi[9], lo[9];
+            memcpy(hi, value, 8); hi[8] = 0; memcpy(lo, value + 8, 8); lo[8] = 0;
+            black_test_weapon_hi = (uint32_t)strtoul(hi, NULL, 16);
+            black_test_weapon_lo = (uint32_t)strtoul(lo, NULL, 16);
+            enabled = 1;
+        }
     }
     if (enabled) {
         const int valid = black_test_weapon_loadout_valid(record);
         if (valid) {
-            GUEST32(record) = 0xB8230000u;
-            GUEST32(record + 4u) = 0x54461524u;
+            GUEST32(record) = black_test_weapon_lo;
+            GUEST32(record + 4u) = black_test_weapon_hi;
         }
         if (records++ < 8u)
-            fprintf(stderr, "[BLACK_TEST_WEAPON] record=%08X accepted=%d token=54461524B8230000 native_initialization=1\n",
-                    record, valid);
+            fprintf(stderr, "[BLACK_TEST_WEAPON] record=%08X accepted=%d token=%08X%08X native_initialization=1\n",
+                    record, valid, black_test_weapon_hi, black_test_weapon_lo);
     }
     fesetenv(&environment);
     _mm_setcsr(csr);

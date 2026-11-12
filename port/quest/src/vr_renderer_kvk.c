@@ -50,6 +50,7 @@
 #include "kvk_device.h"
 #include "kvk_stereo.h"
 #include "kvk_vr_hooks.h"
+#include "vr_arms.h"
 #include "vr_bridge.h"
 #include "vr_math.h"
 
@@ -336,6 +337,126 @@ bool kvk_vr_viewmodel_draw(const float *constants, const uint32_t pos_consts[6])
     }
     pthread_mutex_unlock(&g_ring_lock);
     return hit;
+}
+
+/* ---- first-person arms (vr_arms.h, port/notes/arms.md) -------------------------------------------------------
+ * The weapon's vertex data lies inside its loaded MODEL resource (docs/file-formats/models.md): the model root P sits
+ * before it, marked by the GtID MODEL (0x95820AD4B8000000 at P+10) and version 0x23 (P+18). P+5C is the bone count,
+ * P+60 the bone-name pointer table and P+54 the bone matrices (inverse bind). The loader may have relocated these
+ * offsets to guest addresses, so both forms are accepted. Results are cached per vertex pointer. Guest memory is read
+ * only inside the mapped windows (as black_pc_ram_span). */
+extern ptrdiff_t g_xbox_mem_offset __attribute__((weak));
+void *xbox_GetMemoryBase(void) __attribute__((weak));
+size_t xbox_GetMappedSize(void) __attribute__((weak));
+void *xbox_GetPhysicalMemoryBase(void) __attribute__((weak));
+
+#define ARMS_CONTIG_BASE 0x80000000u
+#define ARMS_CONTIG_SIZE (64u * 1024u * 1024u)
+#define ARMS_SCAN_BYTES  (256u * 1024u)
+#define ARMS_CACHE       8
+
+static int arms_span(uint64_t va, uint64_t bytes)
+{
+    const uint64_t end = va + bytes;
+    if (!&g_xbox_mem_offset || !xbox_GetMemoryBase || !xbox_GetMappedSize) return 0;
+    if (va >= 0x10000u && xbox_GetMemoryBase() != NULL && end <= (uint64_t)xbox_GetMappedSize()) return 1;
+    return va >= ARMS_CONTIG_BASE && end <= (uint64_t)ARMS_CONTIG_BASE + ARMS_CONTIG_SIZE && xbox_GetPhysicalMemoryBase &&
+           xbox_GetPhysicalMemoryBase() != NULL;
+}
+
+static uint32_t arms_u32(uint64_t va)
+{
+    uint32_t v;
+    memcpy(&v, (const void *)((uintptr_t)g_xbox_mem_offset + (uintptr_t)va), 4);
+    return v;
+}
+
+/* A field of the model root: an offset relative to P, or (relocated) a guest address. 0 if neither is readable. */
+static uint64_t arms_ptr(uint64_t P, uint32_t field, uint32_t bytes)
+{
+    const uint32_t v = arms_u32(P + field);
+    if (v < 0x00400000u && arms_span(P + v, bytes)) return P + v;
+    if (arms_span(v, bytes)) return v;
+    return 0;
+}
+
+typedef struct {
+    const void *vdata;          /* key: the draw's vertex data */
+    int ok;                     /* 1: rig valid, 0: not a known model (do nothing) */
+    uint64_t P;                 /* the model root (rechecked each use: memory is reused across levels) */
+    unsigned retry;             /* a miss is retried after this many uses */
+    VrArmRig rig;
+} ArmsEntry;
+
+static ArmsEntry g_arms[ARMS_CACHE];
+static unsigned g_arms_next;
+static unsigned g_arms_log;
+
+static int arms_load(ArmsEntry *e, const void *vdata)
+{
+    const uint64_t va = (uint64_t)((uintptr_t)vdata - (uintptr_t)g_xbox_mem_offset);
+    uint64_t P = 0, o;
+    const char *names[VRA_MAX_BONES];
+    float mats[VRA_MAX_BONES][16];
+    char store[VRA_MAX_BONES][32];
+    uint32_t n, k;
+    uint64_t ntab, mtab;
+    if (!arms_span(va, 4)) return 0;
+    for (o = 0; o + 0x70 <= ARMS_SCAN_BYTES && o <= va; o += 4) {
+        const uint64_t c = (va - o) & ~3ull;
+        if (!arms_span(c, 0x70)) break;
+        if (arms_u32(c + 0x10) == 0xB8000000u && arms_u32(c + 0x14) == 0x95820AD4u && arms_u32(c + 0x18) == 0x23u) { P = c; break; }
+    }
+    if (!P) return 0;
+    n = arms_u32(P + 0x5C);
+    if (n == 0 || n > VRA_MAX_BONES) return 0;
+    ntab = arms_ptr(P, 0x60, n * 4u);
+    mtab = arms_ptr(P, 0x54, n * 64u);
+    if (!ntab || !mtab) return 0;
+    for (k = 0; k < n; k++) {
+        const uint32_t v = arms_u32(ntab + 4u * k);
+        uint64_t sp = v < 0x00400000u && arms_span(P + v, 32) ? P + v : (arms_span(v, 32) ? v : 0);
+        unsigned i;
+        if (!sp) return 0;
+        for (i = 0; i < 31; i++) {
+            const char ch = *(const char *)((uintptr_t)g_xbox_mem_offset + (uintptr_t)sp + i);
+            if (!ch) break;
+            if (ch < 32 || ch > 126) return 0;
+            store[k][i] = ch;
+        }
+        store[k][i] = 0;
+        names[k] = store[k];
+        memcpy(mats[k], (const void *)((uintptr_t)g_xbox_mem_offset + (uintptr_t)(mtab + 64u * k)), 64);
+    }
+    if (!vra_build_rig(&e->rig, names, (const float (*)[16])mats, (int)n)) return 0;
+    e->P = P;
+    if (g_arms_log++ < 16)
+        GLOG("arms: model at %08llX, %u bones, wrists %d/%d", (unsigned long long)P, n, e->rig.wrist[0], e->rig.wrist[1]);
+    return 1;
+}
+
+bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
+{
+    ArmsEntry *e = NULL;
+    int cut, show_off, i;
+    if (!g_on || !constants || !vertex_data || !&g_xbox_mem_offset) return false;
+    vr_arms_state(&cut, &show_off);
+    if (!cut && show_off) return false;                 /* the game's arms, unchanged */
+    for (i = 0; i < ARMS_CACHE; i++) if (g_arms[i].vdata == vertex_data) { e = &g_arms[i]; break; }
+    if (e && e->ok && !(arms_span(e->P, 0x70) && arms_u32(e->P + 0x10) == 0xB8000000u &&
+                        arms_u32(e->P + 0x14) == 0x95820AD4u && arms_u32(e->P + 0x5C) == (uint32_t)e->rig.n))
+        e->ok = 0, e->retry = 0;                        /* the memory now holds something else: look again */
+    if (e && !e->ok && e->retry-- == 0) { e->ok = arms_load(e, vertex_data); e->retry = 120; }
+    if (!e) {
+        e = &g_arms[g_arms_next++ % ARMS_CACHE];
+        memset(e, 0, sizeof(*e));
+        e->vdata = vertex_data;
+        e->ok = arms_load(e, vertex_data);
+        e->retry = 120;
+    }
+    if (!e->ok) return false;
+    /* the model's right arm holds the gun (the gun hand, whichever controller it is on); its left is the off hand */
+    return vra_apply(&e->rig, constants, cut, show_off, 1) > 0;
 }
 
 /* The hand delta in stage space, D = hand_late * inverse(hand_game), and whether it is applied: gun_latch on, both

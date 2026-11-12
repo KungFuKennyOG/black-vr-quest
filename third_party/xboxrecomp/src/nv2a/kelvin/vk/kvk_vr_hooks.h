@@ -61,6 +61,9 @@ void kvk_vr_frame_done(void);
 bool kvk_vr_viewmodel_draw(const float *constants, const uint32_t pos_consts[6]);
 bool kvk_vr_viewmodel_hook(KvkStereoFrame *out, const KvkStereoConfig *cfg, int phase);
 uint32_t kvk_vr_viewmodel_tint(void);
+/* First-person arms: a weapon draw's 192 vertex constants (a copy, editable) and its vertex data (attribute 0, element
+ * 0). Returns true when it changed them (the copy is then uploaded instead). */
+bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data);
 
 /* ---- both-eye capture (port/notes/renderer.md section 12) ------------------------------------------------------
  * kvk_vr_capture_wanted(): asked once per STEREO frame at its composition; nonzero: this frame's two eye pictures

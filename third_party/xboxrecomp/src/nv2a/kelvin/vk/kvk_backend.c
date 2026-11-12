@@ -2934,6 +2934,54 @@ static void draw_now(const KGpuDraw *d)
         vm = kvk_vr_viewmodel_draw(d->gvs->constants, ve->pos_consts);
     if (stereo && !is_main(ref->gw, ref->gh)) G.st.offscreen_stereo_draws++;
     if (s_vmlog > 0 && V.st.valid) vm_log_draw(d, ve, stereo, vm, cs, zs);
+    /* RECOMP_KVK_VMATTR=<n> (debug): the first n weapon draws' vertex attributes and a checksum of their data */
+    if (vm && d->gvs) {
+        static int left = -1;
+        if (left < 0) { const char *e = getenv("RECOMP_KVK_VMATTR"); left = e ? atoi(e) : 0; }
+        if (left > 0) {
+            int a;
+            left--;
+            LOG("VMATTR f %llu ic %u vs %08X", (unsigned long long)G.st.frames, d->icount, d->gvs->hash);
+            if (left == 7) {   /* once: constants, a4 value histogram per draw, the program's relative reads */
+                const float *k = d->gvs->constants;
+                int r;
+                for (r = 0; r < 192; r++)
+                    if (k[r*4] != 0.0f || k[r*4+1] != 0.0f || k[r*4+2] != 0.0f || k[r*4+3] != 0.0f)
+                        LOG("VMCONST c%d %.5g %.5g %.5g %.5g", r, k[r*4], k[r*4+1], k[r*4+2], k[r*4+3]);
+            }
+            if (left >= 6) {
+                const KGpuAttrSrc *a4 = &d->gvs->attr[4], *a1 = &d->gvs->attr[1];
+                unsigned hist[512];
+                int64_t o;
+                char line[2048];
+                int n = 0, v;
+                memset(hist, 0, sizeof(hist));
+                if (a4->fmt == 5 && a4->data)
+                    for (o = a4->lo; o + 8 <= a4->hi; o += a4->stride) {
+                        const int16_t *q = (const int16_t *)(a4->data + o);
+                        int j;
+                        for (j = 0; j < 4; j++) { v = q[j] + 256; if (v >= 0 && v < 512) hist[v]++; }
+                    }
+                for (v = 0; v < 512 && n < 2000; v++) if (hist[v]) n += snprintf(line + n, sizeof(line) - n, " %d:%u", v - 256, hist[v]);
+                LOG("VMA4 ic %u values%s", d->icount, line);
+                if (a1->data) {
+                    const uint8_t *q = a1->data + a1->lo;
+                    LOG("VMA1 first vertices %u %u %u %u | %u %u %u %u | a4 %d %d %d %d", q[0], q[1], q[2], q[3], q[36], q[37], q[38], q[39],
+                        ((const int16_t *)(a4->data + a4->lo))[0], ((const int16_t *)(a4->data + a4->lo))[1],
+                        ((const int16_t *)(a4->data + a4->lo))[2], ((const int16_t *)(a4->data + a4->lo))[3]);
+                }
+            }
+            for (a = 0; a < 16; a++) {
+                const KGpuAttrSrc *at = &d->gvs->attr[a];
+                uint32_t sum = 0;
+                int64_t i;
+                if (!at->fmt || !at->data) continue;
+                for (i = at->lo; i < at->hi && i < at->lo + 4096; i++) sum = sum * 31u + at->data[i];
+                LOG("VMATTR   a%d fmt %u n %u stride %u data %p lo %lld hi %lld sum %08X", a, at->fmt, at->count, at->stride,
+                    (const void *)at->data, (long long)at->lo, (long long)at->hi, sum);
+            }
+        }
+    }
     /* RECOMP_KVK_SPRITELOG: blended draws into other targets of a stereo frame (effects drawn offscreen) */
     if (G.layers > 1 && V.st.valid && ps->blend && !is_main(ref->gw, ref->gh) && spritelog() && stereo_world_pass())
         LOG("SPRITE f %llu offscreen %ux%u va %08X vs %08X ic %u %s z t%d w%d f%d blend %d %d %d", (unsigned long long)G.st.frames,
@@ -3143,7 +3191,16 @@ static void draw_now(const KGpuDraw *d)
         }
         vsg[12] = viewmodel_scale(gv->hash);
         offs[1] = (uint32_t)upload_dedup(vsg, sizeof(vsg), s_last_vsg_val, &s_last_vsg.chunk, &s_last_vsg.off, &s_last_vsg.have);
-        offs[2] = (uint32_t)upload_dedup(gv->constants, 192 * 16, s_last_c_val, &s_last_c.chunk, &s_last_c.off, &s_last_c.have);
+        {
+            /* VR first-person arms: the weapon's bone palette, edited in a copy (kvk_vr_viewmodel_bones) */
+            const float *cv = gv->constants;
+            float vmk[192 * 4];
+            if (vm) {
+                memcpy(vmk, gv->constants, sizeof(vmk));
+                if (kvk_vr_viewmodel_bones(vmk, gv->attr[0].data)) cv = vmk;
+            }
+            offs[2] = (uint32_t)upload_dedup(cv, 192 * 16, s_last_c_val, &s_last_c.chunk, &s_last_c.off, &s_last_c.have);
+        }
         {
             uint8_t *q = ring_take(sizeof(acb), ualign(), &off);
             memcpy(q, acb, sizeof(acb));

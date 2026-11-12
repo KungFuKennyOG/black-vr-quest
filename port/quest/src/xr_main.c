@@ -82,6 +82,8 @@ static const char k_default_ini[] =
     "bob_filter = 1\n"
     "hud_distance = 2.0       ; metres: the head-locked HUD\n"
     "hud_width = 2.4          ; metres (4:3)\n"
+    "arms = hands             ; hands: the arms end at the wrists | full: the game's whole arms\n"
+    "left_hand = grip         ; grip: the off hand shows while it grips the gun | always | never\n"
     "haptic_fire = 0.7        ; 0..1: shot pulse on the gun hand (0 = off); the game's own rumble (hits) stays\n"
     "gun_latch = on           ; on | off: the weapon follows the controller at display time\n"
     "# env RECOMP_BLACK_HZ=60\n"

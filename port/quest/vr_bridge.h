@@ -424,6 +424,10 @@ typedef struct {
 } VrGunLatchConfig;
 const VrGunLatchConfig *vr_gun_latch_config(void);
 
+/* First-person arms (render thread; port/notes/arms.md): cut = blackvr.ini arms (hands), show_off = whether the game's
+ * off hand is drawn now (left_hand: grip -> while the two-handed grip is engaged, always, never). */
+void vr_arms_state(int *cut, int *show_off);
+
 /* --- Both-eye capture (debug; port/notes/renderer.md section 12) -------------
  * A request (both thumbsticks held VR_CAPTURE_HOLD_S -- past the 1 s recentre
  * chord --, every BLACKVR_CAPTURE_EVERY seconds, or vr_capture_request())

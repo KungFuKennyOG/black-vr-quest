@@ -740,6 +740,14 @@ void vr_set_render_gun(const VrGameGun *gun)
 
 const VrRenderGun *vr_render_gun(void) { return &g_rgun; }
 
+void vr_arms_state(int *cut, int *show_off)
+{
+    const int mode = g_xr.cfg.left_hand;
+    *cut = g_xr.cfg.arms_cut;
+    *show_off = mode == VR_LEFT_HAND_ALWAYS ? 1 : mode == VR_LEFT_HAND_NEVER ? 0
+              : __atomic_load_n(&g_two.engaged, __ATOMIC_RELAXED) != 0;
+}
+
 const VrGunLatchConfig *vr_gun_latch_config(void)
 {
     static VrGunLatchConfig c;

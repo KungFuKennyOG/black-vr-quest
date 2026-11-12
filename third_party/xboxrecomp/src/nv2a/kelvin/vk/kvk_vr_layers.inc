@@ -36,6 +36,11 @@ __attribute__((weak)) bool kvk_vr_viewmodel_hook(KvkStereoFrame *out, const KvkS
     return false;
 }
 __attribute__((weak)) uint32_t kvk_vr_viewmodel_tint(void) { return 0; }
+__attribute__((weak)) bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
+{
+    (void)constants; (void)vertex_data;
+    return false;
+}
 __attribute__((weak)) int vr_acquire_flat_target(VrEyeTarget *out) { (void)out; return 0; }
 __attribute__((weak)) void vr_release_flat_target(void) {}
 __attribute__((weak)) int vr_acquire_hud_target(VrEyeTarget *out) { (void)out; return 0; }
