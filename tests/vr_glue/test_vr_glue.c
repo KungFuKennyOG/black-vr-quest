@@ -1811,6 +1811,30 @@ static int run(int multiview)
         CHECK(shell_config_line("gun_latch = off") && shell_gun_latch() == 0 && shell_config_line("gun_latch = on") &&
               shell_gun_latch() == 1 && !shell_config_line("gun_latch = maybe") && shell_gun_latch() == 1,
               "gun_latch = on | off parses (and nothing else)");
+        /* haptic_fire: the game's shot pulse (vr_game_haptic) is scaled by it, per hand, and taken once */
+        {
+            float st = -1.0f;
+            uint32_t ms = 77;
+            CHECK(shell_haptic_fire() == 0.7f, "haptic_fire defaults to 0.7");
+            CHECK(shell_config_line("haptic_fire = 0.5") && shell_haptic_fire() == 0.5f && !shell_config_line("haptic_fire = 1.5") &&
+                  !shell_config_line("haptic_fire = loud") && shell_haptic_fire() == 0.5f, "haptic_fire parses 0..1 (and nothing else)");
+            vr_game_haptic(1, 1.0f, 40u);
+            vr_game_haptic(1, 0.2f, 10u);                    /* a weaker, shorter one does not lower the pending pulse */
+            shell_take_pulse(1, &st, &ms);
+            CHECK(st == 0.5f && ms == 40u, "pulse: scaled by haptic_fire (%.2f), strongest/longest kept (%u ms)", st, ms);
+            shell_take_pulse(1, &st, &ms);
+            CHECK(st == 0.0f && ms == 0u, "pulse: taken once");
+            vr_game_haptic(0, 1.0f, 40u);
+            shell_take_pulse(1, &st, &ms);
+            CHECK(st == 0.0f, "pulse: the other hand is untouched");
+            shell_take_pulse(0, &st, &ms);
+            CHECK(st == 0.5f, "pulse: left hand got its own");
+            CHECK(shell_config_line("haptic_fire = 0"), "haptic_fire = 0 parses");
+            vr_game_haptic(1, 1.0f, 40u);
+            shell_take_pulse(1, &st, &ms);
+            CHECK(st == 0.0f, "haptic_fire = 0: no pulse");
+            shell_config_line("haptic_fire = 0.7");
+        }
         CHECK(vr_gun_latch_config()->enabled == 1 && vr_gun_latch_config()->debug_tint == (tinting ? 0x80FFFF00u : 0u),
               "gun latch config: on, debug tint %08X", vr_gun_latch_config()->debug_tint);
         gun_setup();

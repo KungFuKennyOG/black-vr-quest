@@ -557,6 +557,9 @@ static void black_vr_upload_at(uint32_t upload, int reg)
 }
 
 static void black_vr_upload(uint32_t upload) { black_vr_upload_at(upload, 10); }
+
+/* The player's muzzle flash is being drawn (a shot): a short haptic pulse on the gun hand's controller. */
+static void black_vr_shot_pulse(void) { vr_game_haptic(vr_game_config()->aim_hand & 1, 1.0f, 40u); }
 /* ---- the world pass (1EE820 draws the world through the world camera) ------------------------ */
 
 /* Tells the renderer where in the push buffer the world camera's draws begin and end, the way

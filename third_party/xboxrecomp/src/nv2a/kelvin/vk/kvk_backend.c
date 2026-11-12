@@ -3234,7 +3234,19 @@ static void draw_now(const KGpuDraw *d)
         ib_first = (uint32_t)(ib_off / (short_idx ? 2u : 4u));
     }
     vkCmdDrawIndexed(cmd(), d->icount, 1, ib_first, 0, 0);
-    if (vm && cs) draw_tint(&pd, &push_c, d->icount, ib_first, kvk_vr_viewmodel_tint());
+    if (vm && cs) {
+        /* RECOMP_KVK_VMSPLIT=1 (debug): each weapon draw of a frame gets its own tint, so the parts can be told apart */
+        static int split = -1, ord; static unsigned long long ord_frame = ~0ull;
+        uint32_t tint = kvk_vr_viewmodel_tint();
+        if (split < 0) { const char *e = getenv("RECOMP_KVK_VMSPLIT"); split = e && *e == '1'; }
+        if (split) {
+            static const uint32_t k_split[4] = { 0x80FF00FFu, 0x80FFFF00u, 0x8000FF00u, 0x800000FFu };
+            if (ord_frame != (unsigned long long)G.st.frames) { ord_frame = G.st.frames; ord = 0; }
+            if (!tint) tint = k_split[0];
+            tint = k_split[ord++ & 3];
+        }
+        draw_tint(&pd, &push_c, d->icount, ib_first, tint);
+    }
     /* BLACKVR_SPRITE_DEBUG=1: corrected screen-space effects green, blended non-perspective world-pass draws left as
      * they are red (full-screen passes among them; the HUD is never tinted) */
     if (cs && is_main(cs->gw, cs->gh) && (sprite || np_tint) && sprite_debug()) draw_tint(&pd, &push_c, d->icount, ib_first, sprite ? 0x6000FF00u : 0x600000FFu);

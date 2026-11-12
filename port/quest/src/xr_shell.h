@@ -253,6 +253,7 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim[2], c
 void vrb_recentre_from(const VrPose *head);
 int  vrb_take_recentre_request(void);
 void vrb_get_rumble(float *left, float *right);
+void vrb_take_pulse(int hand, float *strength, uint32_t *ms);
 int  vrb_present_mode_now(void);
 void vrb_renderer_claim(XrShell *s);     /* the renderer takes the swapchains from the test pattern */
 void vrb_touch_debug(VrPadState *pad);   /* latest pad for the test pattern */

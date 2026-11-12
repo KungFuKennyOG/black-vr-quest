@@ -232,6 +232,9 @@ const VrGameConfig *vr_game_config(void);
 
 /* Rumble from the game (XInput motor speeds 0..65535). */
 void vr_set_rumble(uint16_t left_motor, uint16_t right_motor);
+/* A short haptic pulse from the game (game thread): hand 0 left / 1 right, strength 0..1 (scaled by the ini's
+ * haptic_fire), milliseconds. Used for the player's shots (the muzzle flash draw). */
+void vr_game_haptic(int hand, float strength, uint32_t ms);
 /* Pad state for the runtime's XInput path; 0 when not connected. */
 int vr_get_pad(VrPadState *out);
 

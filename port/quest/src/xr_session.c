@@ -413,10 +413,15 @@ static void input_sync(XrShell *s, XrTime t, double dt)
         XrHapticActionInfo hi = { XR_TYPE_HAPTIC_ACTION_INFO };
         hi.action = s->act_haptic;
         hi.subactionPath = s->hand_path[h];
-        if (rumble[h] > 0.02f) {
+        float pulse = 0.0f;
+        uint32_t pulse_ms = 0;
+        float amp;
+        vrb_take_pulse(h, &pulse, &pulse_ms);
+        amp = pulse > rumble[h] ? pulse : rumble[h];   /* a shot pulse rides on top of the game's rumble */
+        if (amp > 0.02f) {
             XrHapticVibration vib = { XR_TYPE_HAPTIC_VIBRATION };
-            vib.amplitude = rumble[h] > 1.0f ? 1.0f : rumble[h];
-            vib.duration = 50000000;   /* 50 ms, refreshed every frame while held */
+            vib.amplitude = amp > 1.0f ? 1.0f : amp;
+            vib.duration = pulse_ms > 50u && pulse > 0.02f ? (XrDuration)pulse_ms * 1000000 : 50000000;   /* 50 ms, refreshed every frame while held */
             vib.frequency = XR_FREQUENCY_UNSPECIFIED;
             xrApplyHapticFeedback(s->session, &hi, (const XrHapticBaseHeader *)&vib);
             buzzing[h] = 1;

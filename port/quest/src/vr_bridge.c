@@ -33,6 +33,8 @@ static float g_trigger[2];
 static int g_have_origin, g_recentre_pending;
 static VrPose g_origin;
 static float g_rumble[2];
+static float g_pulse[2];          /* pending game haptic pulse (strength, already scaled), taken by the XR frame */
+static uint32_t g_pulse_ms[2];
 
 /* ---- latched frames (game thread) ------------------------------------------ */
 #define LATCH_RING 3
@@ -557,6 +559,33 @@ double vr_consume_turn(void)
 }
 
 const VrGameConfig *vr_game_config(void) { return &g_xr.cfg.game; }
+
+void vr_game_haptic(int hand, float strength, uint32_t ms)
+{
+    const float k = g_xr.cfg.haptic_fire;
+    const int h = hand & 1;
+    float a = strength * k;
+    if (!(a > 0.0f)) return;
+    if (a > 1.0f) a = 1.0f;
+    if (ms < 5u) ms = 5u;
+    if (ms > 200u) ms = 200u;
+    pthread_mutex_lock(&g_lock);
+    if (a > g_pulse[h]) g_pulse[h] = a;
+    if (ms > g_pulse_ms[h]) g_pulse_ms[h] = ms;
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* XR thread: the pending pulse of a hand (0 when none), cleared. */
+void vrb_take_pulse(int hand, float *strength, uint32_t *ms)
+{
+    const int h = hand & 1;
+    pthread_mutex_lock(&g_lock);
+    *strength = g_pulse[h];
+    *ms = g_pulse_ms[h];
+    g_pulse[h] = 0.0f;
+    g_pulse_ms[h] = 0;
+    pthread_mutex_unlock(&g_lock);
+}
 
 void vr_set_rumble(uint16_t left_motor, uint16_t right_motor)
 {

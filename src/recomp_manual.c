@@ -1048,6 +1048,7 @@ static void black_vr_vm_push(int is_vm);
 static void black_vr_vm_pop(void);
 static void black_vr_upload(uint32_t upload);
 static void black_vr_upload_at(uint32_t upload, int reg);
+static void black_vr_shot_pulse(void);
 #endif
 
 /* BEGIN BLACK_VIEWMODEL_OWNER
@@ -1168,6 +1169,10 @@ void black_viewmodel_muzzle_constants(uint32_t upload, uint32_t caller)
         !black_pc_ram_span(0x2D45D4u, 4u)) return;
     player = GUEST32(0x2D45D4u);
     if (!black_pc_ram_span(player, 0x4D0u) || player + 0x30u != black_vm_owner) return;
+#ifdef BLACK_VR
+    /* the player's muzzle flash is drawn: a shot, so a pulse on the gun hand's controller */
+    black_vr_shot_pulse();
+#endif
     previous = black_viewmodel_draw_begin(black_vm_owner + 0x2C8u);
     black_viewmodel_constants_kind(upload, 1);
 #ifdef BLACK_VR

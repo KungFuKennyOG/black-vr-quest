@@ -42,6 +42,7 @@
  *   bob_filter        = 1
  *   hud_distance      = 3.0       ; metres: the head-locked HUD / virtual screen
  *   hud_width         = 2.4       ; metres (4:3)
+ *   haptic_fire       = 0.7       ; 0..1: shot pulse on the gun hand's controller (0 = off; the game's own rumble stays)
  *   gun_latch         = on        ; on | off: the first-person weapon follows the hand pose latched at display
  *                                 ; time, not the game frame's (port/notes/gun-latch.md); env
  *                                 ; BLACKVR_GUN_LATCH_DEBUG=1 tints the draws taken for the weapon
@@ -76,6 +77,7 @@ typedef struct {
     int   multiview;
     int   locomotion;
     float hud_distance_m, hud_width_m;   /* head-locked HUD quad layer (vr-glue) */
+    float haptic_fire;       /* 0..1: strength of the shot pulse on the gun hand (0 off) */
     int   foveation;         /* VR_FOVEATION_* */
     int   game_hz;           /* 30 | 60 -> RECOMP_BLACK_HZ / RECOMP_BLACK_60HZ */
     int   raster_workers;    /* -> RECOMP_KELVIN_THREADS = workers + 1 */
@@ -115,6 +117,7 @@ static inline void vr_config_defaults(VrShellConfig *c)
     c->locomotion = VR_LOCO_HEAD;
     c->hud_distance_m = 3.0f;
     c->hud_width_m = 2.4f;
+    c->haptic_fire = 0.7f;
     c->gun_latch = 1;
     vr_input_default_config(&c->input);
     vrg_default_config(&c->gest);
@@ -213,6 +216,7 @@ static inline int vr_config_line(VrShellConfig *c, const char *line_in)
     }
     if (!strcmp(key, "hud_distance")) { if (!vr_cfg_float(val, 0.5f, 10.0f, &f)) return 0; c->hud_distance_m = f; return 1; }
     if (!strcmp(key, "hud_width")) { if (!vr_cfg_float(val, 0.3f, 10.0f, &f)) return 0; c->hud_width_m = f; return 1; }
+    if (!strcmp(key, "haptic_fire")) { if (!vr_cfg_float(val, 0.0f, 1.0f, &f)) return 0; c->haptic_fire = f; return 1; }
     if (!strcmp(key, "gun_latch")) return vr_cfg_bool(val, &c->gun_latch);
     if (!strcmp(key, "settings_menu")) {
         if (!strcmp(val, "native") || !strcmp(val, "game")) c->settings_menu = VR_SETTINGS_MENU_NATIVE;

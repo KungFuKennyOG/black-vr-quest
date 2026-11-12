@@ -112,6 +112,7 @@ void vr_get_recentre(VrPose *origin) { memset(origin, 0, sizeof(*origin)); origi
 double vr_consume_turn(void) { return 0.0; }
 const VrGameConfig *vr_game_config(void) { return &s_cfg; }
 void vr_set_rumble(uint16_t l, uint16_t r) { (void)l; (void)r; }
+void vr_game_haptic(int hand, float strength, uint32_t ms) { (void)hand; (void)strength; (void)ms; }
 int  vr_get_pad(VrPadState *out) { memset(out, 0, sizeof(*out)); return 0; }
 void vr_mark_world_pass(uint32_t va, int begin) { (void)va; (void)begin; }
 /* gun latch (port/notes/gun-latch.md) */
