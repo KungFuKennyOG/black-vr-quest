@@ -1992,26 +1992,29 @@ class BatchTranslator:
         # So it tracks the template, like the .c files do. A project that
         # genuinely needs its own can put one earlier on the include path --
         # gen/ is only found because recomp_funcs.h sits beside it.
-        types_dst = os.path.join(output_dir, "recomp_types.h")
-        types_src = os.path.join(os.path.dirname(__file__), "..", "..",
-                                 "templates", "runtime", "recomp_types.h")
-        try:
-            with open(types_src, "r", encoding="utf-8") as src:
-                want = src.read()
-            have = None
-            if os.path.exists(types_dst):
-                with open(types_dst, "r", encoding="utf-8") as dst:
-                    have = dst.read()
-            if have != want:
-                with open(types_dst, "w", encoding="utf-8") as dst:
-                    dst.write(want)
-                print("  %s recomp_types.h (runtime register model)"
-                      % ("refreshed" if have is not None else "wrote"),
-                      file=sys.stderr)
-        except OSError as e:
-            print(f"  WARNING: could not write recomp_types.h ({e}); copy "
-                  f"it from templates/runtime/ by hand or the build will "
-                  f"not find it", file=sys.stderr)
+        # recomp_regfile.h is the register file as one TLS object, which
+        # recomp_types.h includes on Android; it travels with it.
+        for header in ("recomp_types.h", "recomp_regfile.h"):
+            types_dst = os.path.join(output_dir, header)
+            types_src = os.path.join(os.path.dirname(__file__), "..", "..",
+                                     "templates", "runtime", header)
+            try:
+                with open(types_src, "r", encoding="utf-8") as src:
+                    want = src.read()
+                have = None
+                if os.path.exists(types_dst):
+                    with open(types_dst, "r", encoding="utf-8") as dst:
+                        have = dst.read()
+                if have != want:
+                    with open(types_dst, "w", encoding="utf-8") as dst:
+                        dst.write(want)
+                    print("  %s %s (runtime register model)"
+                          % ("refreshed" if have is not None else "wrote", header),
+                          file=sys.stderr)
+            except OSError as e:
+                print(f"  WARNING: could not write {header} ({e}); copy "
+                      f"it from templates/runtime/ by hand or the build will "
+                      f"not find it", file=sys.stderr)
 
         # Split translations into chunks and write .c files
         generated_files = [header_path]

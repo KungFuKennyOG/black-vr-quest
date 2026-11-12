@@ -74,10 +74,39 @@ static inline void qemu_cond_timedwait(QemuCond *c, QemuMutex *m, int ms) {
 typedef void *(*QemuThreadFunc)(void *arg);
 
 #ifndef qemu_thread_create
+#if !defined(_WIN32)
+/* POSIX: the thread takes its QEMU name ("mcpx.apu_thread"), so per-thread CPU accounting on the device (the
+ * HEARTBEAT threads line, top, simpleperf) can tell it apart; unnamed, it inherits its creator's name. */
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+typedef struct { void *(*func)(void *); void *arg; char name[16]; } QemuShimStart;
+static DWORD WINAPI qemu_shim_thread_start(LPVOID p) {
+    QemuShimStart st = *(QemuShimStart *)p;
+    free(p);
+    if (st.name[0]) pthread_setname_np(pthread_self(), st.name);
+    st.func(st.arg);
+    return 0;
+}
+#endif
 static inline void qemu_thread_create(QemuThread *t, const char *name,
                                        void *(*func)(void *), void *arg,
                                        int mode) {
-    (void)name; (void)mode;
+    (void)mode;
+#if !defined(_WIN32)
+    {
+        QemuShimStart *st = (QemuShimStart *)calloc(1, sizeof(*st));
+        if (st) {
+            st->func = func; st->arg = arg;
+            if (name) { strncpy(st->name, name, sizeof(st->name) - 1); }
+            t->thread = CreateThread(NULL, 0, qemu_shim_thread_start, st, 0, NULL);
+            if (!t->thread) free(st);
+            return;
+        }
+    }
+#else
+    (void)name;
+#endif
     t->thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)func, arg, 0, NULL);
 }
 #endif

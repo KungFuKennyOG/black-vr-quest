@@ -8,7 +8,11 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#if defined(__aarch64__) && !defined(_WIN32)
+#include "platform/win32_compat.h"   /* Quest: SRW locks, GetTickCount64, _stricmp, *_s */
+#else
 #include <windows.h>
+#endif
 
 #define MOVIE_LEASE_MS 500u
 #define CONFIRM_MS 3000u

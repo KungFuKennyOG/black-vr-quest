@@ -321,5 +321,31 @@ static inline int mmio_emulate(PCONTEXT ctx, uint32_t off, void *dev,
     }
 }
 
-#endif /* _WIN32 */
+#elif defined(__aarch64__) || defined(XR_HOST_FAULT_GLUE)
+/* (XR_HOST_FAULT_GLUE: a host test supplying arm64_fault_decode.h's glue for its own architecture.) */
+/* AArch64 Linux/Android: the same entry point, with ctx the ucontext_t a
+ * SA_SIGINFO SIGSEGV handler receives (PCONTEXT is void * off Windows). The
+ * instruction is decoded by arm64_fault_decode.c -- loads and stores only;
+ * AArch64 has no memory-operand ALU forms, so the TEST/CMP/RMW cases above
+ * have no counterpart. The faulting address comes from
+ * uc_mcontext.fault_address, so `off` must be that address's register
+ * offset; the offset of each element (LDP/STP, a 16-byte Q register) is
+ * derived from it. Flags need no emulation: they are set by a later
+ * instruction that sees the loaded register. */
+#include "arm64_fault_decode.h"
+
+typedef uint64_t (*mmio_read_fn)(void *dev, uint32_t off, int size);
+typedef void     (*mmio_write_fn)(void *dev, uint32_t off, uint64_t val, int size);
+
+/* 1 if the instruction at the context's pc was serviced and pc advanced. */
+static inline int mmio_emulate(void *ctx, uint32_t off, void *dev,
+                               mmio_read_fn rd, mmio_write_fn wr)
+{
+    if (!ctx || !rd || !wr)
+        return 0;
+    return a64_uc_emulate_mmio(ctx, (uintptr_t)a64_uc_fault_address(ctx),
+                               off, 0, dev, rd, wr);
+}
+
+#endif /* _WIN32 / __aarch64__ */
 #endif /* MMIO_DECODE_H */

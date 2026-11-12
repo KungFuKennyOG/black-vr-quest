@@ -19,6 +19,10 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#elif defined(__ANDROID__)
+/* Quest: no keyboard or mouse ever arrives; the pad filters, prompts and
+ * device tracking still run. win32_android.h is port/android/include. */
+#include "win32_android.h"
 #else
 #error "pc_input is Windows only (raw input, scancodes)"
 #endif

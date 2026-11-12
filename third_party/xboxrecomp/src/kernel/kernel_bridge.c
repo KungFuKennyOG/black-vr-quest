@@ -43,17 +43,25 @@
 #include <string.h>
 #include <ctype.h>
 #include <wctype.h>
-/* timeBeginPeriod, for the timer thread (kernel_timer_thread). */
+/* timeBeginPeriod, for the timer thread (kernel_timer_thread). Windows only:
+ * POSIX sleeps are already fine-grained and win32_compat.h maps the call to a
+ * no-op there. */
+#if defined(_WIN32)
 #include <timeapi.h>
+#endif
 
 /* Access to recompiled code registers. Per-thread: RECOMP_TLS comes from
  * xbox_memory_layout.h and must match the definitions there -- a plain extern
  * here binds to the TLS template rather than the calling thread's copy, which
  * reads as every register being zero. */
+#ifndef RECOMP_REGFILE   /* else members of the register file (recomp_regfile.h, via xbox_memory_layout.h) */
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
 extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
+#endif
 extern uint32_t g_xbox_code_lo, g_xbox_code_hi;
+#ifndef RECOMP_REGFILE
 extern RECOMP_TLS uint32_t g_seh_ebp;
+#endif
 extern ptrdiff_t g_xbox_mem_offset;
 
 /* Dispatch table lookup (for function pointer args) */
@@ -3224,6 +3232,15 @@ static HANDLE bridge_resolve_handle(uint32_t token)
         uint32_t i = token & BRIDGE_HANDLE_MASK;
         return (i > 0 && i < BRIDGE_HANDLE_MAX) ? s_handle_table[i] : NULL;
     }
+#if !defined(_WIN32)
+    /* NtCurrentProcess() / NtCurrentThread() are (HANDLE)-1 / -2. The POSIX
+     * Win32 layer recognises its pseudo handles only sign-extended; zero-
+     * extended, DuplicateHandle took 0xFFFFFFFE for an object and incremented
+     * a refcount at 0x100000002 (BLACK duplicates NtCurrentThread at boot:
+     * SIGBUS on arm64, SIGSEGV on x86-64 Linux). */
+    if (token >= 0xFFFFFFFEu)
+        return (HANDLE)(intptr_t)(int32_t)token;
+#endif
     /* Untagged: synthetic/dummy handle -- pass through unchanged. */
     return (HANDLE)(uintptr_t)token;
 }
@@ -4189,6 +4206,15 @@ static void bridge_NtDeviceIoControlFile(void)
         size.QuadPart = 0;
         if (h && h != INVALID_HANDLE_VALUE)
             GetFileSizeEx(h, &size);
+#if !defined(_WIN32)
+        if (h && h != INVALID_HANDLE_VALUE) {
+            /* POSIX partition images are sparse by construction: the partition is the table's size, whatever the
+             * image file holds so far (kernel_path.c xbox_partition_image_size) */
+            const unsigned long long nominal = xbox_partition_image_size(w32_handle_path(h));
+            if (nominal > (unsigned long long)size.QuadPart)
+                size.QuadPart = (LONGLONG)nominal;
+        }
+#endif
         BRIDGE_MEM32(out_va +  0) = 0;                       /* StartingOffset */
         BRIDGE_MEM32(out_va +  4) = 0;
         BRIDGE_MEM32(out_va +  8) = (uint32_t)size.LowPart;  /* PartitionLength */
@@ -9795,6 +9821,31 @@ void xbox_DumpGuestThreads(void)
     }
     fflush(stderr);
 }
+
+#if !defined(_WIN32)
+/* POSIX hosts (the Quest's crash and stall reports, src/main.c under __ANDROID__): the calling thread's most recent
+ * kernel call, read without registering the thread, so it is safe from a signal handler. 0 if this thread never
+ * made one. ms_ago counts from the call's start. */
+int xbox_kernel_last_call(uint32_t *ordinal, uint32_t *caller, int *in_call, uint32_t *ms_ago)
+{
+    const int slot = g_guest_thread_slot;
+    const GuestThreadInfo *t;
+    if (slot < 0 || slot >= XBOX_MAX_GUEST_THREADS)
+        return 0;
+    t = &g_guest_threads[slot];
+    *ordinal = t->ordinal;
+    *caller = t->ret;
+    *in_call = t->in_call != 0;
+    *ms_ago = (uint32_t)(GetTickCount() - t->since);
+    return 1;
+}
+
+/* Every kernel call so far, all threads (a stall line's "is the title still asking the kernel for anything"). */
+uint64_t xbox_kernel_call_total(void)
+{
+    return (uint64_t)(unsigned int)g_kernel_call_count;
+}
+#endif
 
 static void kernel_thunk_dispatch(void)
 {

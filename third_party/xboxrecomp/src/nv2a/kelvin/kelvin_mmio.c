@@ -34,7 +34,20 @@
  * version 2.1 of the License, or (at your option) any later version.
  */
 
+#if (defined(__aarch64__) || defined(XR_HOST_FAULT_GLUE)) && !defined(_WIN32)
+/* AArch64 Linux/Android (Quest): POSIX Win32 primitives, and the SIGSEGV
+ * dispatcher of platform/arm64_fault_decode.h instead of a VEH. */
+#define KELVIN_A64 1
+#include "platform/win32_compat.h"
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#if defined(__ANDROID__)
+#include <android/sharedmem.h>
+#endif
+#else
 #include <windows.h>
+#endif
 
 #include "kelvin_int.h"
 #include "kelvin.h"
@@ -458,6 +471,188 @@ static void access_write(void *dev, uint32_t off, uint64_t val, int size)
 
 extern void kgpu_symbol_name(uint64_t addr, char *out, size_t cap);
 
+#if defined(KELVIN_A64)
+/* ---- aarch64: the USER page, write-trapped ------------------------------------
+ *
+ * D3D publishes work by storing DMA_PUT (USER page, aperture 0x800040) after
+ * the pushbuffer words. On x86 (TSO) the pusher seeing the new PUT implies it
+ * sees the words. On AArch64 the title's stores are plain STRs from generated
+ * code, with no barrier between them, and may become visible out of order: the
+ * pusher could read PUT, then a stale word before it. Nothing on the reading
+ * side can repair that; the writer needs a barrier. So the USER page is mapped
+ * read-only: title reads of GET cost nothing, and each title store to it faults
+ * into kelvin_a64_fault, which issues DMB ISH -- ordering every store that
+ * thread made before the faulting one -- and then performs the store through a
+ * writable alias of the same memfd page. One fault per D3D kickoff.
+ * The pusher reads PUT with load-acquire, and publishes GET (and CACHE1 GET)
+ * through the alias with store-release, so the title seeing GET implies the
+ * words before it were consumed. RECOMP_KELVIN_PUT_TRAP=0 turns the trap off
+ * (plain RAM, x86-like but unordered on ARM). */
+static uint8_t *s_user_alias;           /* writable view of the USER page */
+static uint32_t s_user_size;            /* host page size, 0 = no trap */
+
+static int user_trapped(uint32_t off)
+{
+    return s_user_size && off - KELVIN_USER_BASE < s_user_size;
+}
+
+static uint8_t *user_ptr(uint32_t off)
+{
+    return s_user_alias + (off - KELVIN_USER_BASE);
+}
+
+static uint64_t user_read(void *dev, uint32_t off, int size)
+{
+    uint64_t v = 0;
+    (void)dev;
+    if (user_trapped(off) && off + (uint32_t)size - KELVIN_USER_BASE <= s_user_size) {
+        memcpy(&v, user_ptr(off), (size_t)size);
+    }
+    return v;
+}
+
+static void user_write(void *dev, uint32_t off, uint64_t val, int size)
+{
+    uint8_t *p;
+    (void)dev;
+    if (!user_trapped(off) || off + (uint32_t)size - KELVIN_USER_BASE > s_user_size) {
+        return;
+    }
+    p = user_ptr(off);
+    /* Everything the faulting thread stored before this store -- the
+     * pushbuffer words -- is visible before the store itself. */
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (size == 4 && !((uintptr_t)p & 3)) {
+        __atomic_store_n((uint32_t *)p, (uint32_t)val, __ATOMIC_RELEASE);
+    } else if (size == 8 && !((uintptr_t)p & 7)) {
+        __atomic_store_n((uint64_t *)p, val, __ATOMIC_RELEASE);
+    } else if (size == 2 && !((uintptr_t)p & 1)) {
+        __atomic_store_n((uint16_t *)p, (uint16_t)val, __ATOMIC_RELEASE);
+    } else if (size == 1) {
+        __atomic_store_n(p, (uint8_t)val, __ATOMIC_RELEASE);
+    } else {
+        memcpy(p, &val, (size_t)size);   /* misaligned: after the fence */
+    }
+}
+
+uint32_t kelvin_user_r32_acquire(uint32_t offset)
+{
+    return __atomic_load_n((const uint32_t *)kelvin_aperture(offset), __ATOMIC_ACQUIRE);
+}
+
+void kelvin_user_w32_release(uint32_t offset, uint32_t v)
+{
+    uint32_t *p = user_trapped(offset) && !(offset & 3)
+                      ? (uint32_t *)user_ptr(offset)
+                      : (uint32_t *)kelvin_aperture(offset);
+    __atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+
+static int user_trap_start(void)
+{
+    const char *e = getenv("RECOMP_KELVIN_PUT_TRAP");
+    long page = sysconf(_SC_PAGESIZE);
+    uint8_t *user = s_ap + KELVIN_USER_BASE;
+    void *alias, *fixed;
+    int fd;
+
+    if ((e && *e == '0') || page <= 0 || ((uintptr_t)user & (uintptr_t)(page - 1))) {
+        return 0;
+    }
+    fd = (int)syscall(__NR_memfd_create, "kelvin-user", 1u /* MFD_CLOEXEC */);
+    if (fd >= 0 && ftruncate(fd, (off_t)page) != 0) {
+        close(fd);
+        fd = -1;
+    }
+#if defined(__ANDROID__)
+    if (fd < 0) {
+        fd = ASharedMemory_create("kelvin-user", (size_t)page);
+    }
+#endif
+    if (fd < 0) {
+        return 0;
+    }
+    alias = mmap(NULL, (size_t)page, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (alias == MAP_FAILED) {
+        close(fd);
+        return 0;
+    }
+    /* Nothing writes the page yet: the title has not started and the ack
+     * thread leaves USER alone (it only echoes GET while no engine runs). */
+    memcpy(alias, user, (size_t)page);
+    fixed = mmap(user, (size_t)page, PROT_READ, MAP_SHARED | MAP_FIXED, fd, 0);
+    close(fd);
+    if (fixed != (void *)user) {
+        /* MAP_FIXED may have unmapped the page before failing: put plain
+         * memory back with the same contents. */
+        void *back = mmap(user, (size_t)page, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (back == (void *)user) {
+            memcpy(user, alias, (size_t)page);
+        }
+        munmap(alias, (size_t)page);
+        return 0;
+    }
+    s_user_alias = (uint8_t *)alias;
+    __atomic_store_n(&s_user_size, (uint32_t)page, __ATOMIC_RELEASE);
+    return 1;
+}
+
+static int kelvin_a64_fault(void *uc, uintptr_t fault)
+{
+    uint32_t off;
+    int done;
+
+    if (!s_ap || fault < (uintptr_t)s_ap || fault - (uintptr_t)s_ap >= 0x01000000u) {
+        return 0;
+    }
+    off = (uint32_t)(fault - (uintptr_t)s_ap);
+    if (user_trapped(off)) {
+        /* Any thread, any store: emulated through the alias. No engine lock,
+         * as plain RAM never had one. */
+        return a64_uc_emulate_mmio(uc, fault, off, 0x01000000u, NULL, user_read, user_write);
+    }
+    if (!owned(off)) {
+        return 0;
+    }
+    {
+        /* RECOMP_KELVIN_MMIOSTAT=1, as the Windows handler: register, thread, host pc */
+        static int stat_on = -1;
+        static struct { uint32_t off; DWORD tid; uint64_t pc; unsigned n; } tab[64];
+        static ULONGLONG last_tick;
+        if (stat_on < 0) { const char *e = getenv("RECOMP_KELVIN_MMIOSTAT"); stat_on = e && *e && *e != '0'; }
+        if (stat_on) {
+            unsigned k;
+            ULONGLONG now = GetTickCount64();
+            DWORD tid = GetCurrentThreadId();
+            uint64_t pc = a64_uc_pc(uc);
+            for (k = 0; k < 64 && tab[k].n; k++) if (tab[k].off == off && tab[k].tid == tid && tab[k].pc == pc) break;
+            if (k < 64) { tab[k].off = off; tab[k].tid = tid; tab[k].pc = pc; tab[k].n++; }
+            if (!last_tick) last_tick = now;
+            if (now - last_tick >= 1000) {
+                fprintf(stderr, "[KMMIO] last second:");
+                for (k = 0; k < 64 && tab[k].n; k++) { char nm[64]; kgpu_symbol_name(tab[k].pc, nm, sizeof(nm)); fprintf(stderr, " 0x%X/tid%lu/%s x%u", tab[k].off, (unsigned long)tab[k].tid, nm, tab[k].n); }
+                fprintf(stderr, "\n");
+                memset(tab, 0, sizeof(tab));
+                last_tick = now;
+            }
+        }
+    }
+    InterlockedIncrement(&s_waiters);
+    kelvin_lock();
+    InterlockedDecrement(&s_waiters);
+    done = mmio_emulate(uc, off, NULL, access_read, access_write);
+    kelvin_unlock();
+    if (done) {
+        return 1;
+    }
+    fprintf(stderr, "[KELVIN] register access at 0x%08X by an instruction the"
+                    " decoder does not know: %08X (host pc %p)\n",
+            KELVIN_APERTURE_VA + off, a64_uc_insn(uc), (void *)(uintptr_t)a64_uc_pc(uc));
+    fflush(stderr);
+    return 0;
+}
+#else
 static LONG CALLBACK kelvin_mmio_veh(PEXCEPTION_POINTERS ep)
 {
     const EXCEPTION_RECORD *er = ep->ExceptionRecord;
@@ -520,6 +715,7 @@ static LONG CALLBACK kelvin_mmio_veh(PEXCEPTION_POINTERS ep)
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
+#endif /* KELVIN_A64 */
 
 bool kelvin_mmio_start(KelvinState *pg)
 {
@@ -546,8 +742,17 @@ bool kelvin_mmio_start(KelvinState *pg)
     pg->enabled_interrupts = s_pgraph[NV_PGRAPH_INTR_EN / 4];
 
     s_irq_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+#if defined(KELVIN_A64)
+    /* The SIGSEGV dispatcher runs the most recently added handler first, as
+     * AddVectoredExceptionHandler(1, ..) does. It cannot be removed again, so
+     * on failure below it stays and declines every fault (s_trapped is 0 and
+     * the blocks are not protected). */
+    s_veh = (a64_fault_install() && a64_fault_add_handler(kelvin_a64_fault))
+                ? (PVOID)kelvin_a64_fault : NULL;
+#else
     /* First, so it runs before the game target's own crash reporter. */
     s_veh = AddVectoredExceptionHandler(1, kelvin_mmio_veh);
+#endif
     if (!s_irq_event || !s_veh) {
         goto fail;
     }
@@ -564,6 +769,11 @@ bool kelvin_mmio_start(KelvinState *pg)
     InterlockedExchange(&s_trapped, 1);
     fprintf(stderr, "[KELVIN] PMC, PGRAPH, PCRTC and palette registers trapped"
                     " (interrupt status, enables and triggers modelled)\n");
+#if defined(KELVIN_A64)
+    fprintf(stderr, "[KELVIN] USER page (DMA_PUT/GET) %s\n",
+            user_trap_start() ? "write-trapped: kickoffs are ordered (DMB) for the pusher"
+                              : "NOT trapped: title stores to PUT are unordered on ARM");
+#endif
     fflush(stderr);
     return true;
 
@@ -571,10 +781,12 @@ fail:
     fprintf(stderr, "[KELVIN] could not trap the NV2A registers (error %lu)\n",
             GetLastError());
     fflush(stderr);
+#if !defined(KELVIN_A64)
     if (s_veh) {
         RemoveVectoredExceptionHandler(s_veh);
         s_veh = NULL;
     }
+#endif
     if (s_irq_event) {
         CloseHandle(s_irq_event);
         s_irq_event = NULL;

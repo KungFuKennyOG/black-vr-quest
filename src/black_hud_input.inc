@@ -5,8 +5,10 @@
  */
 #include <fenv.h>
 #include "recomp/gen/recomp_types.h" /* TLS register types; generated aliases remain disabled */
+#ifndef RECOMP_REGFILE   /* Android: members of the one register-file object (recomp_regfile.h) */
 extern RECOMP_TLS RecompMmx g_mm0, g_mm1, g_mm2, g_mm3;
 extern RECOMP_TLS RecompMmx g_mm4, g_mm5, g_mm6, g_mm7;
+#endif
 
 extern void sub_001314E0_gen(void);
 
@@ -205,6 +207,39 @@ static BlackHintField *black_hint_capture(uint32_t caller, uint32_t buffer, int 
     return field;
 }
 
+#if defined(__ANDROID__)
+/* Quest: no SEH. Each __try below has only a __finally clause (no __except):
+ * nothing is caught, and the finally block runs on every way out of the
+ * block, `return` included. A cleanup variable scoped to the same block does
+ * exactly that. A fault inside still ends the process, as on Windows, where
+ * the VEH crash reporter declines it and no frame handler exists. */
+typedef struct BlackHintFinally {
+    const BlackHintGuestState *saved;
+    const int *previous_native_formatting;   /* black_hint_format only */
+    const uint32_t *tib_head;                /* black_hint_format only */
+} BlackHintFinally;
+static void black_hint_finally(BlackHintFinally *f)
+{
+    if (f->previous_native_formatting)
+        black_hint_native_formatting=*f->previous_native_formatting;
+    if (f->tib_head)
+        GUEST32(f->saved->regs[9])=*f->tib_head;
+    black_hint_restore(f->saved);
+}
+#define BLACK_HINT_TRY(...) { BlackHintFinally black_hint_finally_ \
+    __attribute__((cleanup(black_hint_finally)))={__VA_ARGS__}; {
+#define BLACK_HINT_TRY_END }}
+/* The TIB the formatter runs on is the main guest thread's, at 0x4000 in
+ * primary RAM: plain read-write memory mapped by xbox_MemoryLayoutInit. The
+ * Windows build asks VirtualQuery; here the mapping is known, so check the
+ * range against it (the null guard below 0x4000 never covers it). */
+static int black_hint_tib_mapped(uint32_t fs_base)
+{
+    return xbox_GetMemoryBase()!=NULL && fs_base>=0x1000u &&
+        (uint64_t)fs_base+4u<=(uint64_t)xbox_GetMappedSize();
+}
+#endif
+
 static int black_hint_disjoint(uint32_t a, uint32_t na, uint32_t b, uint32_t nb)
 {
     return (uint64_t)a+na<=b || (uint64_t)b+nb<=a;
@@ -214,8 +249,10 @@ static int black_hint_format(const BlackHintField *field, int device, uint16_t *
 {
     BlackHintCache *cache=&black_hint_cache;
     BlackHintGuestState saved;
+#if !defined(__ANDROID__)
     MEMORY_BASIC_INFORMATION mapping;
     uintptr_t tib=(uintptr_t)g_xbox_mem_offset+g_fs_base;
+#endif
     uint32_t tib_head, text, stack;
     unsigned length, i;
     int result=0;
@@ -224,13 +261,21 @@ static int black_hint_format(const BlackHintField *field, int device, uint16_t *
         !black_pc_ram_span(0x002D45D8u,4u) ||
         !black_pc_ram_span(GUEST32(0x002D45D8u),16u) ||
         g_fs_base!=0x4000u ||
+#if defined(__ANDROID__)
+        !black_hint_tib_mapped(g_fs_base)) return 0;
+#else
         VirtualQuery((void *)tib,&mapping,sizeof(mapping))!=sizeof(mapping) ||
         mapping.State!=MEM_COMMIT || (mapping.Protect&(PAGE_GUARD|PAGE_NOACCESS)) ||
         ((mapping.Protect&0xFFu)!=PAGE_READWRITE && (mapping.Protect&0xFFu)!=PAGE_EXECUTE_READWRITE) ||
         tib+4u>(uintptr_t)mapping.BaseAddress+mapping.RegionSize) return 0;
+#endif
     black_hint_snapshot(&saved);
     tib_head=GUEST32(saved.regs[9]);
+#if defined(__ANDROID__)
+    BLACK_HINT_TRY(&saved,&previous_native_formatting,&tib_head)
+#else
     __try {
+#endif
         _mm_setcsr(0x1F80u);
         if (!cache->allocation_attempted) {
             cache->allocation_attempted=1;
@@ -267,6 +312,9 @@ static int black_hint_format(const BlackHintField *field, int device, uint16_t *
                 result=1;
             }
         }
+#if defined(__ANDROID__)
+    BLACK_HINT_TRY_END
+#else
     } __finally {
         black_hint_native_formatting=previous_native_formatting;
         /* These formatter/localization/conversion paths install no new persistent
@@ -274,6 +322,7 @@ static int black_hint_format(const BlackHintField *field, int device, uint16_t *
         GUEST32(saved.regs[9])=tib_head;
         black_hint_restore(&saved);
     }
+#endif
     return result;
 }
 
@@ -339,7 +388,11 @@ static void black_pickup_refresh(uint32_t hud, int device)
     int control, have_glyph, have_label;
     if (!text->valid) return;
     black_hint_snapshot(&saved);
+#if defined(__ANDROID__)
+    BLACK_HINT_TRY(&saved,NULL,NULL)
+#else
     __try {
+#endif
         _mm_setcsr(0x1F80u);
         if (!black_hint_current(hud) || !text->valid) return;
         state=*(const unsigned char *)((uintptr_t)g_xbox_mem_offset+hud+0x2B13u);
@@ -386,9 +439,13 @@ static void black_pickup_refresh(uint32_t hud, int device)
         memcpy(text->rendered,formatted,sizeof(formatted));
         memcpy(text->label,label,sizeof(label));
         text->glyph=glyph; text->control=control; text->device=device;
+#if defined(__ANDROID__)
+    BLACK_HINT_TRY_END
+#else
     } __finally {
         black_hint_restore(&saved);
     }
+#endif
 }
 
 /* Called only after132AB7: both native capped200-unit conversions and the two
@@ -402,7 +459,11 @@ void black_pickup_text_ready(uint32_t hud)
     uint16_t glyph;
     int control, device;
     black_hint_snapshot(&saved);
+#if defined(__ANDROID__)
+    BLACK_HINT_TRY(&saved,NULL,NULL)
+#else
     __try {
+#endif
         _mm_setcsr(0x1F80u);
         if (!black_hint_current(hud)) return;
         memset(text,0,sizeof(*text));
@@ -421,9 +482,13 @@ void black_pickup_text_ready(uint32_t hud)
         text->device=PC_DEVICE_CONTROLLER; text->valid=1;
         pc_input_init(); device=black_hint_device();
         black_pickup_refresh(hud,device);
+#if defined(__ANDROID__)
+    BLACK_HINT_TRY_END
+#else
     } __finally {
         black_hint_restore(&saved);
     }
+#endif
 }
 
 static void black_hint_tick(void)

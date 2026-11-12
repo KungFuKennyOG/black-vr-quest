@@ -34,7 +34,9 @@
  */
 #include "pc_menu.h"
 
+#ifndef RECOMP_REGFILE   /* Android: members of the one register-file object (recomp_regfile.h) */
 extern RECOMP_TLS uint32_t g_ebp, g_seh_ebp;
+#endif
 extern void sub_00124330_gen(void);
 extern void sub_00101790(void);
 extern void sub_00101420(void);
@@ -907,13 +909,21 @@ static void bnm_page_visible(uint32_t ui, int visible)
 
 static uint8_t *bnm_read_game_file(const char *xbox_path, size_t *size)
 {
+#if defined(__ANDROID__)
+    xbox_host_char host[MAX_PATH];        /* char on POSIX hosts (kernel.h) */
+#else
     WCHAR host[MAX_PATH];
+#endif
     HANDLE f;
     LARGE_INTEGER sz;
     uint8_t *buf;
     DWORD got = 0;
     if (!xbox_translate_path(xbox_path, host, MAX_PATH)) return NULL;
+#if defined(__ANDROID__)
+    f = CreateFileA(host, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+#else
     f = CreateFileW(host, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+#endif
     if (f == INVALID_HANDLE_VALUE) return NULL;
     if (!GetFileSizeEx(f, &sz) || sz.QuadPart <= 0 || sz.QuadPart > 16 * 1024 * 1024) { CloseHandle(f); return NULL; }
     buf = (uint8_t *)malloc((size_t)sz.QuadPart);

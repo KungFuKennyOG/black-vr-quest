@@ -1,0 +1,12 @@
+// BLACK VR - optional Gradle build for a PC with Android Studio / Gradle 8 + AGP 8.
+// The primary build is port/quest/build_apk.sh (no Gradle, no Maven). This project
+// reuses the same manifest, resources and CMakeLists.txt.
+pluginManagement {
+    repositories { google(); mavenCentral(); gradlePluginPortal() }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories { google(); mavenCentral() }
+}
+rootProject.name = "blackvr"
+include ":app"

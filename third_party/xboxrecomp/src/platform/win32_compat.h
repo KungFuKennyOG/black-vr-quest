@@ -89,6 +89,7 @@ LONG InterlockedIncrement(volatile LONG *Addend);
 LONG InterlockedDecrement(volatile LONG *Addend);
 LONG InterlockedExchange(volatile LONG *Target, LONG Value);
 LONG InterlockedExchangeAdd(volatile LONG *Addend, LONG Value);
+LONG InterlockedAdd(volatile LONG *Addend, LONG Value);   /* returns the new value */
 LONG InterlockedCompareExchange(volatile LONG *Dest, LONG Exchange, LONG Comparand);
 LONGLONG InterlockedCompareExchange64(volatile LONGLONG *Dest, LONGLONG Exchange, LONGLONG Comparand);
 PVOID InterlockedCompareExchangePointer(PVOID volatile *Dest, PVOID Exchange, PVOID Comparand);
@@ -116,6 +117,9 @@ VOID InitializeConditionVariable(PCONDITION_VARIABLE cv);
 BOOL SleepConditionVariableCS(PCONDITION_VARIABLE cv, PCRITICAL_SECTION cs, DWORD ms);
 VOID WakeConditionVariable(PCONDITION_VARIABLE cv);
 VOID WakeAllConditionVariable(PCONDITION_VARIABLE cv);
+/* ...and paired with an SRWLOCK. */
+#define CONDITION_VARIABLE_LOCKMODE_SHARED 0x1u
+BOOL SleepConditionVariableSRW(PCONDITION_VARIABLE cv, PSRWLOCK lock, DWORD ms, ULONG flags);
 
 /* ---- Generic handle lifetime ------------------------------------------ */
 BOOL  CloseHandle(HANDLE h);
@@ -188,6 +192,10 @@ BOOL   TrySubmitThreadpoolCallback(PTP_SIMPLE_CALLBACK callback,
 /* ---- Waitable timers --------------------------------------------------- */
 typedef VOID (*PTIMERAPCROUTINE)(PVOID arg, DWORD lowValue, DWORD highValue);
 HANDLE CreateWaitableTimerW(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, LPCWSTR name);
+#define CREATE_WAITABLE_TIMER_MANUAL_RESET    0x00000001u
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002u
+#define TIMER_ALL_ACCESS                      0x001F0003u
+HANDLE CreateWaitableTimerExW(LPSECURITY_ATTRIBUTES sa, LPCWSTR name, DWORD flags, DWORD access);
 BOOL   SetWaitableTimer(HANDLE h, const LARGE_INTEGER *dueTime, LONG period,
                         PTIMERAPCROUTINE completion, PVOID arg, BOOL resume);
 BOOL   CancelWaitableTimer(HANDLE h);
@@ -563,6 +571,99 @@ static inline MMRESULT waveOutWrite(HWAVEOUT h, WAVEHDR *hdr, UINT sz)
 { (void)h;(void)hdr;(void)sz; return MMSYSERR_NOERROR; }
 static inline MMRESULT waveOutReset(HWAVEOUT h) { (void)h; return MMSYSERR_NOERROR; }
 static inline MMRESULT waveOutClose(HWAVEOUT h) { (void)h; return MMSYSERR_NOERROR; }
+
+/* timeapi: the 1 ms timer-resolution request. POSIX sleeps are already
+ * high-resolution, so there is nothing to ask for. */
+#define TIMERR_NOERROR 0u
+static inline MMRESULT timeBeginPeriod(UINT ms) { (void)ms; return TIMERR_NOERROR; }
+static inline MMRESULT timeEndPeriod(UINT ms)   { (void)ms; return TIMERR_NOERROR; }
+
+/* ---- aarch64 (Quest): what the NV2A Kelvin engine needs beyond the above.
+ * MSVC spells these as intrinsics or <winnt.h> macros. All are full barriers
+ * there (x86 locked instructions; MSVC ARM64 uses the AL forms + DMB), so they
+ * are SEQ_CST here: LSE LDADDAL/SWPAL/CASAL with -march=armv8.1-a or later.
+ * Type-generic macros, because the callers pass LONG64, __int64 and long long
+ * objects alike. Kept to aarch64 so x86 POSIX builds see no new tokens. */
+#if defined(__aarch64__)
+#include <string.h>
+#include <unistd.h>
+#define InterlockedIncrement64(p)       __atomic_add_fetch((p), 1, __ATOMIC_SEQ_CST)
+#define InterlockedDecrement64(p)       __atomic_sub_fetch((p), 1, __ATOMIC_SEQ_CST)
+#define InterlockedExchange64(p, v)     __atomic_exchange_n((p), (v), __ATOMIC_SEQ_CST)
+#define InterlockedExchangeAdd64(p, v)  __atomic_fetch_add((p), (v), __ATOMIC_SEQ_CST)
+#define _InterlockedExchange64(p, v)    __atomic_exchange_n((p), (v), __ATOMIC_SEQ_CST)
+#define _InterlockedExchangeAdd64(p, v) __atomic_fetch_add((p), (v), __ATOMIC_SEQ_CST)
+/* MemoryBarrier: a full fence (DMB ISH), as MSVC's __dmb on ARM64. */
+#define MemoryBarrier()                 __atomic_thread_fence(__ATOMIC_SEQ_CST)
+/* YieldProcessor: the spin-wait hint. ISB, as sse2neon's _mm_pause: on the
+ * A78/A55 YIELD is a NOP and ISB is the closest thing to x86 PAUSE's delay. */
+#define YieldProcessor()                __asm__ __volatile__("isb" ::: "memory")
+
+typedef struct _SYSTEM_INFO {
+    WORD      wProcessorArchitecture;
+    WORD      wReserved;
+    DWORD     dwPageSize;
+    LPVOID    lpMinimumApplicationAddress;
+    LPVOID    lpMaximumApplicationAddress;
+    DWORD_PTR dwActiveProcessorMask;
+    DWORD     dwNumberOfProcessors;
+    DWORD     dwProcessorType;
+    DWORD     dwAllocationGranularity;
+    WORD      wProcessorLevel;
+    WORD      wProcessorRevision;
+} SYSTEM_INFO, *LPSYSTEM_INFO;
+#define PROCESSOR_ARCHITECTURE_ARM64 12
+/* Only what callers here read is meaningful: the page size and the online
+ * processor count (every cluster; Quest 3 reports 6). */
+static inline VOID GetSystemInfo(LPSYSTEM_INFO si)
+{
+    long page = sysconf(_SC_PAGESIZE), cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    memset(si, 0, sizeof(*si));
+    si->wProcessorArchitecture = PROCESSOR_ARCHITECTURE_ARM64;
+    si->dwPageSize = page > 0 ? (DWORD)page : 4096u;
+    si->dwAllocationGranularity = si->dwPageSize > 65536u ? si->dwPageSize : 65536u;
+    si->dwNumberOfProcessors = cpus > 0 ? (DWORD)cpus : 1u;
+}
+#define GetNativeSystemInfo GetSystemInfo
+
+/* MSVC CRT bounded-string variants, for the one count the callers use:
+ * _TRUNCATE (copy/format what fits, always terminate; -1 / STRUNCATE (80)
+ * when it did not fit). */
+#include <stdarg.h>
+#include <stdio.h>
+#ifndef _TRUNCATE
+#define _TRUNCATE ((SIZE_T)-1)
+#endif
+#ifndef STRUNCATE
+#define STRUNCATE 80
+#endif
+static inline int _snprintf_s(char *buf, SIZE_T size, SIZE_T count, const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+    if (!buf || !size) return -1;
+    if (count != _TRUNCATE && count < size) size = count + 1;
+    va_start(ap, fmt);
+    n = vsnprintf(buf, size, fmt, ap);
+    va_end(ap);
+    if (n < 0) { buf[0] = 0; return -1; }
+    return (SIZE_T)n >= size ? -1 : n;
+}
+static inline int strncpy_s(char *dst, SIZE_T size, const char *src, SIZE_T count)
+{
+    SIZE_T n = 0;
+    if (!dst || !size) return 22;                       /* EINVAL */
+    if (!src) { dst[0] = 0; return 22; }
+    while (n + 1 < size && n < count && src[n]) { dst[n] = src[n]; n++; }
+    dst[n] = 0;
+    if (src[n] && n < count) {                          /* did not fit */
+        if (count == _TRUNCATE) return STRUNCATE;
+        dst[0] = 0;
+        return 34;                                      /* ERANGE */
+    }
+    return 0;
+}
+#endif /* __aarch64__ */
 
 #ifdef __cplusplus
 }

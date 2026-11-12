@@ -5,6 +5,26 @@
 # MMIO interception via VEH (Vectored Exception Handling)
 # Push buffer parsing and command dispatch
 
+# The Kelvin GPU backend (kelvin/kelvin_gfx.h): d3d11 (kelvin_gpu.c and its PC extras: ray tracing, DLSS, texture
+# packs) or vulkan (kelvin/vk, for Android/Quest; needs KVK_GLSLANG_DIR). Android defaults to vulkan, every other host
+# to d3d11 as before.
+if(ANDROID)
+    set(_kgfx_default vulkan)
+else()
+    set(_kgfx_default d3d11)
+endif()
+set(KELVIN_GFX_BACKEND ${_kgfx_default} CACHE STRING "Kelvin GPU backend: d3d11 or vulkan")
+set_property(CACHE KELVIN_GFX_BACKEND PROPERTY STRINGS d3d11 vulkan)
+if(KELVIN_GFX_BACKEND STREQUAL "vulkan")
+    set(_kgfx_sources)
+else()
+    set(_kgfx_sources
+        kelvin/kelvin_gpu.c
+        kelvin/kelvin_rt.c
+        kelvin/kelvin_dlss.c
+        kelvin/kelvin_texpack.c)
+endif()
+
 add_library(xbox_nv2a STATIC
     nv2a_core.c
     nv2a_pgraph_d3d11.c
@@ -16,13 +36,10 @@ add_library(xbox_nv2a STATIC
     kelvin/kelvin_mmio.c
     kelvin/kelvin_pgraph.c
     kelvin/kelvin_render.c
-    kelvin/kelvin_gpu.c
-    kelvin/kelvin_rt.c
-    kelvin/kelvin_dlss.c
+    ${_kgfx_sources}
     kelvin/kelvin_vsh.c
     kelvin/kelvin_pixel.c
     kelvin/kelvin_texture.c
-    kelvin/kelvin_texpack.c
     kelvin/kelvin_workers.c
     kelvin/nv2a_vsh_cpu/nv2a_vsh_cpu.c
     kelvin/nv2a_vsh_cpu/nv2a_vsh_disassembler.c
@@ -76,6 +93,20 @@ if(WIN32 AND EXISTS "${KDLSS_SDK}/include/nvsdk_ngx.h" AND EXISTS "${KDLSS_SDK}/
     message(STATUS "DLSS SDK: ${KDLSS_SDK}")
 else()
     message(STATUS "DLSS SDK not found at ${KDLSS_SDK}: DLAA falls back to FXAA")
+endif()
+
+if(KELVIN_GFX_BACKEND STREQUAL "vulkan")
+    # kelvin_vk needs kelvin_unsupported and the vertex-program parser from this library, and this library needs
+    # kgpu_* from kelvin_vk: the backend's objects go into xbox_nv2a itself.
+    add_subdirectory(kelvin/vk)
+    target_sources(xbox_nv2a PRIVATE $<TARGET_OBJECTS:kelvin_vk>)
+    target_link_libraries(xbox_nv2a PUBLIC kelvin_vk_shadergen glslang glslang-default-resource-limits)
+    target_include_directories(xbox_nv2a PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/kelvin/vk)
+    if(ANDROID)
+        target_link_libraries(xbox_nv2a PUBLIC vulkan log)
+    elseif(KVK_VULKAN_LIB)
+        target_link_libraries(xbox_nv2a PUBLIC ${KVK_VULKAN_LIB})
+    endif()
 endif()
 
 target_include_directories(xbox_nv2a PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

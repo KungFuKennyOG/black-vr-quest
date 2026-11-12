@@ -60,8 +60,57 @@
  * CMakeLists) -- MSVC's C4013 was emitted and discarded. Same failure as the
  * missing stdlib.h in kernel_bridge.c, in a hotter path. */
 #include <math.h>
+
+/* ---- Host SIMD selection ------------------------------------------------
+ *
+ * The guest is a Pentium III, so the generated code speaks SSE: the XMM_*
+ * helpers below, plus a handful of raw _mm_* calls and `.m` member accesses
+ * that title-specific post-processing (scripts/generate.py) splices in.
+ * Three host paths implement that vocabulary:
+ *
+ *   x86 / x64        the real SSE intrinsics. Unchanged.
+ *   arm64            sse2neon (cdnjs-free, MIT, header-only; put the directory
+ *                    holding sse2neon.h on the include path). __m128 becomes a
+ *                    float32x4_t, so `.m` and the raw _mm_* calls keep working.
+ *   portable         lane-wise C. Selected by RECOMP_FORCE_PORTABLE on any
+ *                    host (that is how the regression in
+ *                    tests/arm64_runtime checks it against SSE), and
+ *                    automatically on a host with neither.
+ *
+ * sse2neon's default min/max are NEON fmin/fmax, which propagate NaN and order
+ * -0 below +0. MINPS/MAXPS do neither -- they return the second operand when
+ * the lanes are unordered or equal, and titles lean on that for clamps -- so
+ * the precise variant is mandatory, not a tuning knob. */
 #if defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__)
-#include <xmmintrin.h>
+#  define RECOMP_HOST_X86 1
+#  include <xmmintrin.h>
+#  include <emmintrin.h>
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#  define RECOMP_HOST_ARM64 1
+#  ifndef SSE2NEON_PRECISE_MINMAX
+#    define SSE2NEON_PRECISE_MINMAX 1
+#  endif
+#  include "sse2neon.h"
+#  if !SSE2NEON_PRECISE_MINMAX
+#    error "sse2neon.h was included without SSE2NEON_PRECISE_MINMAX=1; MINPS/MAXPS need it"
+#  endif
+#else
+#  define RECOMP_NO_M128 1
+#endif
+#if defined(RECOMP_FORCE_PORTABLE) || defined(RECOMP_NO_M128)
+#  define RECOMP_SIMD_PORTABLE 1
+#endif
+
+/* No fused multiply-add behind the guest's back.
+ *
+ * x86-64 without FMA never contracts `a * b + c`; clang targeting arm64 does
+ * by default (-ffp-contract=on), which rounds once instead of twice and makes
+ * every lifted dot product differ from the console in the last bit -- enough
+ * to flip a `fcomp; jp` and send a branch the other way. Off for the rest of
+ * every translation unit that includes this header. GCC ignores the STDC form,
+ * so the arm64 build also passes -ffp-contract=off (port/android). */
+#if defined(__clang__)
+#pragma STDC FP_CONTRACT OFF
 #endif
 
 /* MSVC's __forceinline -> gcc/clang equivalent on POSIX. */
@@ -100,7 +149,18 @@ void recomp_debug_service(uint32_t service, uint32_t arg_va);
  *
  * Set once during memory initialization, then read-only.
  */
+#if defined(RECOMP_GENERATED_CODE) && defined(__clang__) && defined(__ANDROID__) && !defined(_WIN32) \
+    && !defined(RECOMP_NO_MEMBASE_INVARIANT)
+/* Generated code only (Android): declared const, which clang treats as memory no store can modify, so a function
+ * loads the offset once instead of after every guest store. MEM8/16/32 are volatile and the build has
+ * -fno-strict-aliasing, so with a plain declaration each guest store could alias the offset and clang reloaded it
+ * before almost every guest access: ~11% of the generated arm64 instructions (port/notes/perf.md 9). The object is
+ * written once, by the runtime (xbox_memory_layout.c, main.c), before any generated code runs, and never while it
+ * runs; those translation units see it non-const. */
+extern const ptrdiff_t g_xbox_mem_offset;
+#else
 extern ptrdiff_t g_xbox_mem_offset;
+#endif
 
 /* Bounds of the title's executable sections, filled in by
  * xbox_MemoryLayoutInit from the XBE's own section table. Zero means "not
@@ -159,8 +219,50 @@ extern uint32_t g_xbox_code_hi;
 #  define RECOMP_TLS _Thread_local
 #endif
 
+/* One TLS object for the whole register file on Android (recomp_regfile.h; port/notes/perf.md 9): a dlopen()ed
+ * library only has dynamic TLS on bionic, where every separate register variable costs a TLSDESC resolver call per
+ * function. The g_ names become macros for its members. Windows keeps the separate variables. */
+#if !defined(RECOMP_REGFILE) && !defined(RECOMP_NO_REGFILE) && defined(__ANDROID__) && !defined(_WIN32)
+#  define RECOMP_REGFILE 1
+#endif
+#if defined(RECOMP_REGFILE)
+/* the register types first: the same definitions as below (and as src/kernel/xbox_memory_layout.h), guarded */
+#ifndef RECOMP_MMX_DEFINED
+#define RECOMP_MMX_DEFINED
+typedef union RecompMmx {
+    int8_t   b[8];
+    uint8_t  ub[8];
+    int16_t  w[4];
+    uint16_t uw[4];
+    int32_t  d[2];
+    uint32_t ud[2];
+    uint64_t q;
+} RecompMmx;
+#endif
+#ifndef RECOMP_XMM_DEFINED
+#define RECOMP_XMM_DEFINED
+#if defined(RECOMP_SIMD_PORTABLE)
+typedef struct RecompM128 {
+    float f[4] __attribute__((aligned(16)));
+} RecompM128;
+#  define RECOMP_M128 RecompM128
+#else
+#  define RECOMP_M128 __m128
+#endif
+typedef union RecompXmm {
+    float    f[4];
+    double   d[2];
+    uint32_t u[4];
+    int32_t  i[4];
+    uint64_t q[2];
+    RECOMP_M128 m;
+} RecompXmm;
+#endif
+#include "recomp_regfile.h"
+#else
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
 extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
+#endif
 
 /* Optional BLACK diagnostic hook for unresolved call-target stubs. */
 #ifdef RECOMP_TRACE_UNRESOLVED_STUBS
@@ -172,8 +274,10 @@ void recomp_unresolved_stub_log(uint32_t target_va);
 
 /* x87 stack. Per-thread for the same reason the integer registers are:
  * arguments are passed in st(0)/st(1) across call boundaries. */
+#ifndef RECOMP_REGFILE
 extern RECOMP_TLS double g_fp_stack[8];
 extern RECOMP_TLS int g_fp_top;
+#endif
 
 /**
  * SEH frame pointer bridge.
@@ -191,10 +295,14 @@ extern RECOMP_TLS int g_fp_top;
  * Per-thread, because a TIB is. fs:[0] is the SEH chain head and fs:[4]
  * reaches the CRT's per-thread data, so a single shared base makes every
  * guest thread the same thread as far as the CRT is concerned. */
+#ifndef RECOMP_REGFILE
 extern RECOMP_TLS uint32_t g_fs_base;
+#endif
 #define XBOX_FS_BASE g_fs_base
 
+#ifndef RECOMP_REGFILE
 extern RECOMP_TLS uint32_t g_seh_ebp;
+#endif
 
 /* ---- non-local jumps (setjmp / longjmp) --------------------------------
  *
@@ -228,6 +336,58 @@ extern RECOMP_TLS uint32_t g_seh_ebp;
 #include <intrin.h>
 #define RECOMP_ATOMIC_ADD32(p, v)     ((uint32_t)_InterlockedExchangeAdd((volatile long *)(p), (long)(v)))
 #define RECOMP_ATOMIC_CAS32(p, cmp, val)     ((uint32_t)_InterlockedCompareExchange((volatile long *)(p),                                            (long)(val), (long)(cmp)))
+#elif defined(__aarch64__)
+/* x86 executes a `lock` on any address, misaligned included (a split lock is
+ * slow, not wrong). arm64 exclusives and LSE atomics need natural alignment
+ * and raise SIGBUS otherwise -- Quest 3's Cortex-A78C has no LSE2 to relax
+ * that. Aligned operands, the overwhelmingly common case, stay one native
+ * atomic; a misaligned word inside one aligned dword is done as a CAS loop on
+ * that dword; one straddling a dword boundary goes to the runtime's
+ * lock-serialised helper (xbox_memory_layout.c). That last case is atomic
+ * against other lock-prefixed accesses only, which is all x86 promised
+ * software that never mixes plain and locked stores to one word. */
+uint32_t recomp_atomic_rmw32_split(volatile uint32_t *p, int is_cas,
+                                   uint32_t cmp, uint32_t val);
+
+static inline uint32_t recomp_atomic_rmw32_unaligned(volatile uint32_t *p, int is_cas,
+                                                     uint32_t cmp, uint32_t val)
+{
+    uintptr_t a = (uintptr_t)p;
+    unsigned shift = (unsigned)(a & 7u) * 8u;
+    if (shift > 32u)
+        return recomp_atomic_rmw32_split(p, is_cas, cmp, val);
+    volatile uint64_t *q = (volatile uint64_t *)(a & ~(uintptr_t)7);
+    uint64_t mask = (uint64_t)0xFFFFFFFFu << shift;
+    uint64_t old = __atomic_load_n(q, __ATOMIC_RELAXED);
+    for (;;) {
+        uint32_t cur = (uint32_t)((old & mask) >> shift);
+        uint32_t next = is_cas ? (cur == cmp ? val : cur) : cur + val;
+        uint64_t want = (old & ~mask) | ((uint64_t)next << shift);
+        if (is_cas && cur != cmp) {
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            return cur;
+        }
+        if (__atomic_compare_exchange_n(q, &old, want, 0,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+            return cur;
+    }
+}
+
+static inline uint32_t recomp_atomic_add32(volatile uint32_t *p, uint32_t v)
+{
+    if (__builtin_expect(((uintptr_t)p & 3u) == 0, 1))
+        return __sync_fetch_and_add(p, v);
+    return recomp_atomic_rmw32_unaligned(p, 0, 0, v);
+}
+
+static inline uint32_t recomp_atomic_cas32(volatile uint32_t *p, uint32_t cmp, uint32_t val)
+{
+    if (__builtin_expect(((uintptr_t)p & 3u) == 0, 1))
+        return __sync_val_compare_and_swap(p, cmp, val);
+    return recomp_atomic_rmw32_unaligned(p, 1, cmp, val);
+}
+#define RECOMP_ATOMIC_ADD32(p, v)        recomp_atomic_add32((volatile uint32_t *)(p), (uint32_t)(v))
+#define RECOMP_ATOMIC_CAS32(p, cmp, val) recomp_atomic_cas32((volatile uint32_t *)(p), (uint32_t)(cmp), (uint32_t)(val))
 #else
 #define RECOMP_ATOMIC_ADD32(p, v)     ((uint32_t)__sync_fetch_and_add((volatile uint32_t *)(p), (uint32_t)(v)))
 #define RECOMP_ATOMIC_CAS32(p, cmp, val)     ((uint32_t)__sync_val_compare_and_swap((volatile uint32_t *)(p),                                            (uint32_t)(cmp), (uint32_t)(val)))
@@ -236,7 +396,9 @@ extern RECOMP_TLS uint32_t g_seh_ebp;
 #include <setjmp.h>
 jmp_buf *recomp_setjmp_slot(uint32_t buf_va);
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value);
+#ifndef RECOMP_REGFILE
 extern RECOMP_TLS uint32_t g_ebp;
+#endif
 
 /* EFLAGS.DF, and the signed step the string instructions take because of it.
  *
@@ -250,16 +412,20 @@ extern RECOMP_TLS uint32_t g_ebp;
  * be found by name, and the dashboard rebooted rather than showing a UI.
  * memmove's overlapping case is the same instruction and the same bug.
  */
+#ifndef RECOMP_REGFILE
 extern RECOMP_TLS int g_df;
+#endif
 #define RECOMP_DF_STEP(n) (g_df ? -(int32_t)(n) : (int32_t)(n))
 
 /* x87 control and status. Thread-local for the same reason the x87 stack
    above is: one guest routine can lift to several C functions, so a compare
    and the FNSTSW that reads it can land in different bodies, and the control
    word has to survive a call. (g_fp_stack/g_fp_top are declared above.) */
+#ifndef RECOMP_REGFILE
 extern RECOMP_TLS uint16_t g_fp_control_word;
 extern RECOMP_TLS int g_fp_cmp;
 extern RECOMP_TLS uint16_t g_fp_cc;
+#endif
 #define RECOMP_FCMP_CC(c) ((uint16_t)((c)==2 ? 0x4500u : (c)<0 ? 0x0100u : (c)>0 ? 0u : 0x4000u))
 /* Round arithmetic results to the guest's 24-bit x87 significand when PC=00.
  * The precision control applies to add/subtract/multiply/divide and sqrt,
@@ -505,25 +671,173 @@ void black_level_override(uint8_t *level, uint8_t *stage);
 
 #ifndef RECOMP_XMM_DEFINED
 #define RECOMP_XMM_DEFINED
-#include <emmintrin.h>
+#if defined(RECOMP_SIMD_PORTABLE)
+/* Plain-C stand-in for __m128 when there is no SSE (or sse2neon) to lean on.
+ * Same size and alignment as the real thing, so RecompXmm has one layout on
+ * every host and the TLS register file is interchangeable between TUs. */
+typedef struct RecompM128 {
+#if defined(_MSC_VER)
+    __declspec(align(16)) float f[4];
+#else
+    float f[4] __attribute__((aligned(16)));
+#endif
+} RecompM128;
+#  define RECOMP_M128 RecompM128
+#else
+#  define RECOMP_M128 __m128
+#endif
 typedef union RecompXmm {
     float    f[4];
     double   d[2];
     uint32_t u[4];
     int32_t  i[4];
     uint64_t q[2];
-    __m128   m;
+    RECOMP_M128 m;
 } RecompXmm;
 #endif
 
+#ifndef RECOMP_REGFILE
 extern RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3;
 extern RECOMP_TLS RecompXmm g_xmm4, g_xmm5, g_xmm6, g_xmm7;
+#endif
+
+/* ---- portable lane-wise reference -------------------------------------
+ *
+ * Always compiled, whichever host path is active: these are the guest
+ * semantics written out, and the regression in tests/arm64_runtime compares
+ * the active path against them. Moves go through the integer lanes so NaN
+ * payloads survive bit-exactly, as they do through movaps. */
+
+static inline RecompXmm recomp_px_lanes(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+    RecompXmm r; r.u[0] = a; r.u[1] = b; r.u[2] = c; r.u[3] = d; return r;
+}
+static inline RecompXmm recomp_px_scalar(float v) {
+    RecompXmm r = recomp_px_lanes(0, 0, 0, 0); r.f[0] = v; return r;
+}
+static inline RecompXmm recomp_px_scalar_double(double v) {
+    RecompXmm r; r.q[1] = 0; r.d[0] = v; return r;
+}
+static inline RecompXmm recomp_px_movelh(RecompXmm a, RecompXmm b) {
+    return recomp_px_lanes(a.u[0], a.u[1], b.u[0], b.u[1]);
+}
+static inline RecompXmm recomp_px_movehl(RecompXmm a, RecompXmm b) {
+    return recomp_px_lanes(b.u[2], b.u[3], a.u[2], a.u[3]);
+}
+#define RECOMP_PX_FLOP(NAME, EXPR) \
+    static inline RecompXmm NAME(RecompXmm a, RecompXmm b) { \
+        RecompXmm r; int l; for (l = 0; l < 4; l++) r.f[l] = (EXPR); return r; }
+RECOMP_PX_FLOP(recomp_px_add, a.f[l] + b.f[l])
+RECOMP_PX_FLOP(recomp_px_sub, a.f[l] - b.f[l])
+RECOMP_PX_FLOP(recomp_px_mul, a.f[l] * b.f[l])
+RECOMP_PX_FLOP(recomp_px_div, a.f[l] / b.f[l])
+#undef RECOMP_PX_FLOP
+/* MINPS/MAXPS: the second operand on unordered or equal (so -0/+0 and NaN
+ * are decided by operand order, not by IEEE minNum). */
+static inline RecompXmm recomp_px_min(RecompXmm a, RecompXmm b) {
+    RecompXmm r; int l;
+    for (l = 0; l < 4; l++) r.u[l] = a.f[l] < b.f[l] ? a.u[l] : b.u[l];
+    return r;
+}
+static inline RecompXmm recomp_px_max(RecompXmm a, RecompXmm b) {
+    RecompXmm r; int l;
+    for (l = 0; l < 4; l++) r.u[l] = a.f[l] > b.f[l] ? a.u[l] : b.u[l];
+    return r;
+}
+#define RECOMP_PX_IOP(NAME, EXPR) \
+    static inline RecompXmm NAME(RecompXmm a, RecompXmm b) { \
+        RecompXmm r; int l; for (l = 0; l < 4; l++) r.u[l] = (EXPR); return r; }
+RECOMP_PX_IOP(recomp_px_and,  a.u[l] & b.u[l])
+RECOMP_PX_IOP(recomp_px_or,   a.u[l] | b.u[l])
+RECOMP_PX_IOP(recomp_px_xor,  a.u[l] ^ b.u[l])
+RECOMP_PX_IOP(recomp_px_andn, ~a.u[l] & b.u[l])
+RECOMP_PX_IOP(recomp_px_cmpeq,  (a.f[l] == b.f[l]) ? 0xFFFFFFFFu : 0u)
+RECOMP_PX_IOP(recomp_px_cmplt,  (a.f[l] <  b.f[l]) ? 0xFFFFFFFFu : 0u)
+RECOMP_PX_IOP(recomp_px_cmple,  (a.f[l] <= b.f[l]) ? 0xFFFFFFFFu : 0u)
+RECOMP_PX_IOP(recomp_px_cmpneq, !(a.f[l] == b.f[l]) ? 0xFFFFFFFFu : 0u)
+RECOMP_PX_IOP(recomp_px_cmpnlt, !(a.f[l] <  b.f[l]) ? 0xFFFFFFFFu : 0u)
+RECOMP_PX_IOP(recomp_px_cmpnle, !(a.f[l] <= b.f[l]) ? 0xFFFFFFFFu : 0u)
+#undef RECOMP_PX_IOP
+static inline uint32_t recomp_px_movemask(RecompXmm a) {
+    return (a.u[0] >> 31) | ((a.u[1] >> 31) << 1) |
+           ((a.u[2] >> 31) << 2) | ((a.u[3] >> 31) << 3);
+}
+static inline RecompXmm recomp_px_shuffle(RecompXmm a, RecompXmm b, unsigned imm) {
+    return recomp_px_lanes(a.u[imm & 3], a.u[(imm >> 2) & 3],
+                           b.u[(imm >> 4) & 3], b.u[(imm >> 6) & 3]);
+}
+static inline RecompXmm recomp_px_unpacklo(RecompXmm a, RecompXmm b) {
+    return recomp_px_lanes(a.u[0], b.u[0], a.u[1], b.u[1]);
+}
+static inline RecompXmm recomp_px_unpackhi(RecompXmm a, RecompXmm b) {
+    return recomp_px_lanes(a.u[2], b.u[2], a.u[3], b.u[3]);
+}
+/* The scalar compare forms (cmpltss & co.): lane 0 from the compare, lanes
+ * 1-3 from the first operand. */
+static inline RecompXmm recomp_px_ss(RecompXmm a, RecompXmm cmp) {
+    a.u[0] = cmp.u[0]; return a;
+}
+static inline RecompXmm recomp_px_sqrt(RecompXmm a) {
+    RecompXmm r; int l; for (l = 0; l < 4; l++) r.f[l] = sqrtf(a.f[l]); return r;
+}
+static inline RecompXmm recomp_px_set1(float v) {
+    RecompXmm r; int l; for (l = 0; l < 4; l++) r.f[l] = v; return r;
+}
 
 /* -- construction -- */
 
-static inline RecompXmm RecompXmmOf(__m128 v) {
+static inline RecompXmm RecompXmmOf(RECOMP_M128 v) {
     RecompXmm r; r.m = v; return r;
 }
+
+#if defined(RECOMP_SIMD_PORTABLE)
+
+/* Raw intrinsics that title post-processing splices into generated code
+ * (scripts/generate.py repair_sse: cmp*ss, cmpnltps, rsqrtps/rcpps as
+ * div/sqrt/set1). Defined only on the portable path; elsewhere they are the
+ * real SSE or sse2neon functions. */
+static inline RecompXmm recomp_px_of(RecompM128 v) { RecompXmm r; r.m = v; return r; }
+#define RECOMP_PX_SS(NAME, CMP) \
+    static inline RecompM128 NAME(RecompM128 a, RecompM128 b) { \
+        RecompXmm x = recomp_px_of(a); return recomp_px_ss(x, CMP(x, recomp_px_of(b))).m; }
+#define RECOMP_PX_PS(NAME, OP) \
+    static inline RecompM128 NAME(RecompM128 a, RecompM128 b) { \
+        return OP(recomp_px_of(a), recomp_px_of(b)).m; }
+RECOMP_PX_SS(recomp_pxm_cmplt_ss,  recomp_px_cmplt)
+RECOMP_PX_SS(recomp_pxm_cmple_ss,  recomp_px_cmple)
+RECOMP_PX_SS(recomp_pxm_cmpeq_ss,  recomp_px_cmpeq)
+RECOMP_PX_SS(recomp_pxm_cmpneq_ss, recomp_px_cmpneq)
+RECOMP_PX_SS(recomp_pxm_cmpnlt_ss, recomp_px_cmpnlt)
+RECOMP_PX_SS(recomp_pxm_cmpnle_ss, recomp_px_cmpnle)
+RECOMP_PX_PS(recomp_pxm_cmpnlt_ps, recomp_px_cmpnlt)
+RECOMP_PX_PS(recomp_pxm_cmpnle_ps, recomp_px_cmpnle)
+RECOMP_PX_PS(recomp_pxm_div_ps,    recomp_px_div)
+#undef RECOMP_PX_SS
+#undef RECOMP_PX_PS
+static inline RecompM128 recomp_pxm_sqrt_ps(RecompM128 a) { return recomp_px_sqrt(recomp_px_of(a)).m; }
+static inline RecompM128 recomp_pxm_set1_ps(float v) { return recomp_px_set1(v).m; }
+/* Macros so they take precedence over xmmintrin.h's functions when the
+ * portable path is forced on an x86 host (the regression build). */
+#define _mm_cmplt_ss  recomp_pxm_cmplt_ss
+#define _mm_cmple_ss  recomp_pxm_cmple_ss
+#define _mm_cmpeq_ss  recomp_pxm_cmpeq_ss
+#define _mm_cmpneq_ss recomp_pxm_cmpneq_ss
+#define _mm_cmpnlt_ss recomp_pxm_cmpnlt_ss
+#define _mm_cmpnle_ss recomp_pxm_cmpnle_ss
+#define _mm_cmpnlt_ps recomp_pxm_cmpnlt_ps
+#define _mm_cmpnle_ps recomp_pxm_cmpnle_ps
+#define _mm_div_ps    recomp_pxm_div_ps
+#define _mm_sqrt_ps   recomp_pxm_sqrt_ps
+#define _mm_set1_ps   recomp_pxm_set1_ps
+
+static inline RecompXmm XMM_ZERO(void) { return recomp_px_lanes(0, 0, 0, 0); }
+/** movss from memory: lane 0 set, upper lanes zeroed. */
+static inline RecompXmm XMM_SCALAR(float v) { return recomp_px_scalar(v); }
+/** movsd from memory: low double set, high double zeroed. */
+static inline RecompXmm XMM_SCALAR_DOUBLE(double v) { return recomp_px_scalar_double(v); }
+/** movd: 32 raw bits into lane 0, upper lanes zeroed. */
+static inline RecompXmm XMM_SCALAR_BITS(uint32_t bits) { return recomp_px_lanes(bits, 0, 0, 0); }
+
+#else /* SSE or sse2neon */
 
 static inline RecompXmm XMM_ZERO(void) {
     return RecompXmmOf(_mm_setzero_ps());
@@ -543,28 +857,57 @@ static inline RecompXmm XMM_SCALAR_DOUBLE(double v) {
 static inline RecompXmm XMM_SCALAR_BITS(uint32_t bits) {
     return RecompXmmOf(_mm_castsi128_ps(_mm_cvtsi32_si128((int)bits)));
 }
+#endif
 
 /* -- guest memory --
  * Addresses are guest VAs. Plain RAM is one 16-byte load or store (unaligned-safe, so movaps and movups are the
  * same); a span that reaches the device apertures goes lane by lane through MEM32, which the fault handlers decode. */
 
+/* AArch64: a lane that goes to or comes from MEM32 passes through a general register. Left to itself clang stores
+ * lane k of a vector held in a register with ST1 {v.s}[k] (and loads one with LD1), a SIMD single-structure access
+ * the MMIO decoder (platform/arm64_fault_decode.c) refuses -- on exactly the device path these helpers keep for the
+ * fault handlers. The empty asm only pins the value to an X/W register: one fmov/mov, no other effect. */
+#if defined(__aarch64__) && (defined(__clang__) || defined(__GNUC__))
+#  define RECOMP_LANE_GPR(v) __asm__("" : "+r"(v))
+#endif
+
 static inline RecompXmm XMM_MEM(uint32_t addr) {
     RecompXmm r;
     if (RECOMP_RAM_SPAN(addr, 16u)) {
+#if defined(RECOMP_SIMD_PORTABLE)
+        memcpy(&r, (const void *)XBOX_PTR(addr), 16);
+#else
         r.m = _mm_loadu_ps((const float *)XBOX_PTR(addr));
+#endif
     } else {
+#if defined(RECOMP_LANE_GPR)
+        uint32_t u0 = MEM32(addr), u1 = MEM32(addr + 4), u2 = MEM32(addr + 8), u3 = MEM32(addr + 12);
+        RECOMP_LANE_GPR(u0); RECOMP_LANE_GPR(u1); RECOMP_LANE_GPR(u2); RECOMP_LANE_GPR(u3);
+        r.u[0] = u0; r.u[1] = u1; r.u[2] = u2; r.u[3] = u3;
+#else
         r.u[0] = MEM32(addr);      r.u[1] = MEM32(addr + 4);
         r.u[2] = MEM32(addr + 8);  r.u[3] = MEM32(addr + 12);
+#endif
     }
     return r;
 }
 
 static inline void XMM_STORE(uint32_t addr, RecompXmm v) {
     if (RECOMP_RAM_SPAN(addr, 16u)) {
+#if defined(RECOMP_SIMD_PORTABLE)
+        memcpy((void *)XBOX_PTR(addr), &v, 16);
+#else
         _mm_storeu_ps((float *)XBOX_PTR(addr), v.m);
+#endif
     } else {
+#if defined(RECOMP_LANE_GPR)
+        uint32_t u0 = v.u[0], u1 = v.u[1], u2 = v.u[2], u3 = v.u[3];
+        RECOMP_LANE_GPR(u0); RECOMP_LANE_GPR(u1); RECOMP_LANE_GPR(u2); RECOMP_LANE_GPR(u3);
+        MEM32(addr) = u0; MEM32(addr + 4) = u1; MEM32(addr + 8) = u2; MEM32(addr + 12) = u3;
+#else
         MEM32(addr)      = v.u[0]; MEM32(addr + 4)  = v.u[1];
         MEM32(addr + 8)  = v.u[2]; MEM32(addr + 12) = v.u[3];
+#endif
     }
 }
 
@@ -577,15 +920,52 @@ static inline void XMM_STORE(uint32_t addr, RecompXmm v) {
 
 static inline void recomp_xmm_load_half(RecompXmm *dst, uint32_t addr,
                                         int high) {
+#if defined(RECOMP_LANE_GPR)
+    uint32_t lo = MEM32(addr), hi = MEM32(addr + 4);
+    RECOMP_LANE_GPR(lo); RECOMP_LANE_GPR(hi);
+    dst->u[high * 2] = lo; dst->u[high * 2 + 1] = hi;
+#else
     dst->u[high * 2]     = MEM32(addr);
     dst->u[high * 2 + 1] = MEM32(addr + 4);
+#endif
 }
 
 static inline void recomp_xmm_store_half(uint32_t addr, RecompXmm src,
                                          int high) {
+#if defined(RECOMP_LANE_GPR)
+    uint32_t lo = src.u[high * 2], hi = src.u[high * 2 + 1];
+    RECOMP_LANE_GPR(lo); RECOMP_LANE_GPR(hi);
+    MEM32(addr) = lo; MEM32(addr + 4) = hi;
+#else
     MEM32(addr)     = src.u[high * 2];
     MEM32(addr + 4) = src.u[high * 2 + 1];
+#endif
 }
+
+#if defined(RECOMP_SIMD_PORTABLE)
+
+static inline RecompXmm XMM_MOVE_LOW_TO_HIGH(RecompXmm a, RecompXmm b) { return recomp_px_movelh(a, b); }
+static inline RecompXmm XMM_MOVE_HIGH_TO_LOW(RecompXmm a, RecompXmm b) { return recomp_px_movehl(a, b); }
+static inline RecompXmm XMM_ADD(RecompXmm a, RecompXmm b) { return recomp_px_add(a, b); }
+static inline RecompXmm XMM_SUB(RecompXmm a, RecompXmm b) { return recomp_px_sub(a, b); }
+static inline RecompXmm XMM_MUL(RecompXmm a, RecompXmm b) { return recomp_px_mul(a, b); }
+static inline RecompXmm XMM_DIV(RecompXmm a, RecompXmm b) { return recomp_px_div(a, b); }
+static inline RecompXmm XMM_MIN(RecompXmm a, RecompXmm b) { return recomp_px_min(a, b); }
+static inline RecompXmm XMM_MAX(RecompXmm a, RecompXmm b) { return recomp_px_max(a, b); }
+static inline RecompXmm XMM_AND(RecompXmm a, RecompXmm b) { return recomp_px_and(a, b); }
+static inline RecompXmm XMM_OR(RecompXmm a, RecompXmm b)  { return recomp_px_or(a, b); }
+static inline RecompXmm XMM_XOR(RecompXmm a, RecompXmm b) { return recomp_px_xor(a, b); }
+static inline RecompXmm XMM_ANDN(RecompXmm a, RecompXmm b) { return recomp_px_andn(a, b); }
+static inline RecompXmm XMM_CMP_EQ(RecompXmm a, RecompXmm b)  { return recomp_px_cmpeq(a, b); }
+static inline RecompXmm XMM_CMP_LT(RecompXmm a, RecompXmm b)  { return recomp_px_cmplt(a, b); }
+static inline RecompXmm XMM_CMP_LE(RecompXmm a, RecompXmm b)  { return recomp_px_cmple(a, b); }
+static inline RecompXmm XMM_CMP_NEQ(RecompXmm a, RecompXmm b) { return recomp_px_cmpneq(a, b); }
+static inline uint32_t XMM_MOVEMASK(RecompXmm a) { return recomp_px_movemask(a); }
+#define XMM_SHUFFLE(a, b, imm) recomp_px_shuffle((a), (b), (unsigned)((imm) & 0xFF))
+static inline RecompXmm XMM_UNPACK_LOW(RecompXmm a, RecompXmm b)  { return recomp_px_unpacklo(a, b); }
+static inline RecompXmm XMM_UNPACK_HIGH(RecompXmm a, RecompXmm b) { return recomp_px_unpackhi(a, b); }
+
+#else /* SSE or sse2neon */
 
 /** movlhps: dst high = src low. */
 static inline RecompXmm XMM_MOVE_LOW_TO_HIGH(RecompXmm a, RecompXmm b) {
@@ -603,7 +983,8 @@ static inline RecompXmm XMM_ADD(RecompXmm a, RecompXmm b) { return RecompXmmOf(_
 static inline RecompXmm XMM_SUB(RecompXmm a, RecompXmm b) { return RecompXmmOf(_mm_sub_ps(a.m, b.m)); }
 static inline RecompXmm XMM_MUL(RecompXmm a, RecompXmm b) { return RecompXmmOf(_mm_mul_ps(a.m, b.m)); }
 static inline RecompXmm XMM_DIV(RecompXmm a, RecompXmm b) { return RecompXmmOf(_mm_div_ps(a.m, b.m)); }
-/* MINPS/MAXPS return the second operand when the lanes are unordered or equal. */
+/* MINPS/MAXPS return the second operand when the lanes are unordered or equal.
+ * (sse2neon: only with SSE2NEON_PRECISE_MINMAX, enforced at the top.) */
 static inline RecompXmm XMM_MIN(RecompXmm a, RecompXmm b) { return RecompXmmOf(_mm_min_ps(a.m, b.m)); }
 static inline RecompXmm XMM_MAX(RecompXmm a, RecompXmm b) { return RecompXmmOf(_mm_max_ps(a.m, b.m)); }
 
@@ -632,6 +1013,64 @@ static inline uint32_t XMM_MOVEMASK(RecompXmm a) {
 /** unpcklps / unpckhps: interleave the low or high halves. */
 static inline RecompXmm XMM_UNPACK_LOW(RecompXmm a, RecompXmm b) { return RecompXmmOf(_mm_unpacklo_ps(a.m, b.m)); }
 static inline RecompXmm XMM_UNPACK_HIGH(RecompXmm a, RecompXmm b) { return RecompXmmOf(_mm_unpackhi_ps(a.m, b.m)); }
+
+#endif /* RECOMP_SIMD_PORTABLE */
+
+/* ---- scalar float -> int32 (cvttss2si / cvtss2si / cvttsd2si / cvtsd2si) --
+ *
+ * A C cast is undefined for NaN and out-of-range values, and the two hosts
+ * disagree on what they actually do: x86 cvttss2si returns 0x80000000 (the
+ * "integer indefinite"), arm64 fcvtzs saturates (NaN -> 0, +big -> INT_MAX).
+ * A title that converts an uninitialised float, or clamps through an
+ * overflow, then takes different paths on the two hosts.
+ *
+ * The lifter emits these helpers instead of a bare cast. `truncate`
+ * selects cvtt* (always toward zero); otherwise the current host rounding
+ * mode is used, which is where MXCSR.RC lives on x86 and where sse2neon's
+ * _mm_setcsr puts it on arm64. On x86 the hardware instruction is used,
+ * so behaviour there is exactly what the C cast already compiled to. */
+static inline int32_t recomp_cvt_f2i32(double v, int truncate)
+{
+#if defined(RECOMP_HOST_X86) && !defined(RECOMP_FORCE_PORTABLE)
+    return truncate ? _mm_cvttsd_si32(_mm_set_sd(v))
+                    : _mm_cvtsd_si32(_mm_set_sd(v));
+#else
+    double rounded = truncate ? trunc(v) : nearbyint(v);
+    if (!(rounded >= -2147483648.0 && rounded <= 2147483647.0))
+        return (int32_t)0x80000000u;       /* integer indefinite */
+    return (int32_t)rounded;
+#endif
+}
+/* Single-precision source (cvttss2si / cvtss2si): on x86 the very instruction
+ * the old `(int32_t)float` cast compiled to, so the Windows build's code is
+ * unchanged. Elsewhere it widens -- every float is exact as a double, so every
+ * float-to-int32 decision is the same made on the widened value. */
+static inline int32_t recomp_cvt_f2i32_ss(float v, int truncate)
+{
+#if defined(RECOMP_HOST_X86) && !defined(RECOMP_FORCE_PORTABLE)
+    return truncate ? _mm_cvttss_si32(_mm_set_ss(v))
+                    : _mm_cvtss_si32(_mm_set_ss(v));
+#else
+    return recomp_cvt_f2i32((double)v, truncate);
+#endif
+}
+/* Dispatch on the operand's type: lane reads and MEMF are float, MEMD and
+ * the double lanes are double (cvtt?sd2si). */
+#define RECOMP_CVT_DISPATCH(v, t) _Generic((v), \
+        float: recomp_cvt_f2i32_ss, \
+        default: recomp_cvt_f2i32)((v), (t))
+#define RECOMP_CVTT_F2I32(v) RECOMP_CVT_DISPATCH((v), 1)
+#define RECOMP_CVT_F2I32(v)  RECOMP_CVT_DISPATCH((v), 0)
+/* What the lifter emits for cvtss2si/cvtsd2si. Those round by MXCSR.RC on
+ * hardware, but the lifter used to emit a truncating C cast for them, and
+ * shipped builds were tuned against that. Truncation stays the default so a
+ * rebuild changes nothing; define RECOMP_CVT_ROUND_MXCSR for the hardware
+ * behaviour (BLACK has 4 such sites). */
+#if defined(RECOMP_CVT_ROUND_MXCSR)
+#define RECOMP_CVTR_F2I32(v) RECOMP_CVT_F2I32(v)
+#else
+#define RECOMP_CVTR_F2I32(v) RECOMP_CVTT_F2I32(v)
+#endif
 
 /* ================================================================
  * Flag computation helpers
@@ -912,7 +1351,16 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
  * 2's static init, where the clobber demonstrably exists. It is the right tool
  * for vtable-dispatch-heavy code and the wrong one for early boot.
  */
-#ifdef RECOMP_ABI_CHECK
+#if defined(GRX_CALL_TRACE)
+/* tests/game_render_x86 equivalence build only (port/notes/perf.md 9): hash every guest call and the registers at it */
+void grx_call_trace(uint32_t va);
+#define RECOMP_ABI_CALL(va, fn) do { grx_call_trace((uint32_t)(va)); (fn)(); } while (0)
+#elif defined(GRX_COUNT_CALLS)
+/* tests/game_render_x86 measurement build only (port/notes/perf.md): count every direct guest call */
+extern volatile unsigned long long g_grx_guest_calls;
+extern unsigned int g_grx_call_hist[1u << 22];   /* calls per guest VA (low 22 bits), for the per-function counts */
+#define RECOMP_ABI_CALL(va, fn) do { g_grx_guest_calls++; g_grx_call_hist[(uint32_t)(va) & 0x3FFFFFu]++; (fn)(); } while (0)
+#elif defined(RECOMP_ABI_CHECK)
 void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
                               uint32_t edi0, uint32_t esp0);
 #define RECOMP_ABI_CALL(va, fn) do { \
@@ -1055,8 +1503,10 @@ typedef union RecompMmx {
 } RecompMmx;
 #endif
 
+#ifndef RECOMP_REGFILE
 extern RECOMP_TLS RecompMmx g_mm0, g_mm1, g_mm2, g_mm3;
 extern RECOMP_TLS RecompMmx g_mm4, g_mm5, g_mm6, g_mm7;
+#endif
 
 static inline RecompMmx MMX_ZERO(void) { RecompMmx r; r.q = 0; return r; }
 
@@ -1065,15 +1515,7 @@ static inline RecompMmx MMX_ZERO(void) { RecompMmx r; r.q = 0; return r; }
  * Non-x86 hosts use their floating-point environment for rounding instead. */
 static inline int32_t MMX_CVT_F2I(float v, int truncate)
 {
-#if defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__)
-    return truncate ? _mm_cvttss_si32(_mm_set_ss(v))
-                    : _mm_cvtss_si32(_mm_set_ss(v));
-#else
-    double rounded = truncate ? trunc((double)v) : nearbyint((double)v);
-    if (!(rounded >= -2147483648.0 && rounded <= 2147483647.0))
-        return (int32_t)0x80000000u;       /* integer indefinite */
-    return (int32_t)rounded;
-#endif
+    return recomp_cvt_f2i32_ss(v, truncate);
 }
 
 static inline RecompMmx MMX_FROM_PS(float lo, float hi, int truncate)

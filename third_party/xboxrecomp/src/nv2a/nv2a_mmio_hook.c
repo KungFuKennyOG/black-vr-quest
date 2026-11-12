@@ -417,6 +417,83 @@ bool nv2a_hook_handle_vram(uintptr_t fault_addr, uint32_t fault_xbox_va)
     return false;
 }
 
+#elif defined(__aarch64__)
+/* AArch64 Linux/Android. The fault arrives as SIGSEGV through
+ * a64_fault_add_handler (platform/arm64_fault_decode.h) and ctx is the
+ * handler's ucontext_t. The decoder there replaces the x86-64 one above;
+ * the device side is the same nv2a_mmio_read/write. Unlike RIP decoding,
+ * AArch64 also has pairs and Q registers, so the per-element offset comes
+ * from the fault address: fault_addr must be the faulting host address and
+ * fault_xbox_va its guest VA. is_write is not needed (the instruction says). */
+#include "platform/arm64_fault_decode.h"
+#include <string.h>
+
+static uint64_t nv2a_a64_read(void *dev, uint32_t off, int size)
+{
+    g_mmio_read_count++;
+    return nv2a_mmio_read((NV2AState *)dev, off, (unsigned)size);
+}
+
+static void nv2a_a64_write(void *dev, uint32_t off, uint64_t val, int size)
+{
+    g_mmio_write_count++;
+    nv2a_mmio_write((NV2AState *)dev, off, val, (unsigned)size);
+}
+
+void nv2a_hook_init(ptrdiff_t xbox_mem_offset)
+{
+    g_mem_offset = xbox_mem_offset;
+    g_nv2a_vram = (uint8_t *)VirtualAlloc(NULL, NV2A_VRAM_SIZE + NV2A_RAMIN_SIZE,
+                                          MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!g_nv2a_vram) {
+        fprintf(stderr, "[NV2A] Failed to allocate %u MB for VRAM!\n",
+                (NV2A_VRAM_SIZE + NV2A_RAMIN_SIZE) / (1024*1024));
+        return;
+    }
+    nv2a_init_standalone(g_nv2a_vram, NV2A_VRAM_SIZE,
+                         g_nv2a_vram + NV2A_VRAM_SIZE, NV2A_RAMIN_SIZE);
+    fprintf(stderr, "[NV2A] MMIO hook initialized: VRAM=%p RAMIN=%p\n",
+            (void*)g_nv2a_vram, (void*)(g_nv2a_vram + NV2A_VRAM_SIZE));
+}
+
+bool nv2a_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
+                           uint32_t fault_xbox_va, int is_write)
+{
+    NV2AState *nv2a = nv2a_get_state();
+    (void)is_write;
+    if (!nv2a || !ctx)
+        return false;
+    if (a64_uc_emulate_mmio(ctx, fault_addr, fault_xbox_va - NV2A_MMIO_BASE,
+                            NV2A_MMIO_SIZE, nv2a, nv2a_a64_read,
+                            nv2a_a64_write))
+        return true;
+    g_mmio_decode_fail++;
+    if (g_mmio_decode_fail <= 20) {
+        fprintf(stderr, "[NV2A] MMIO decode fail at PC=%p: insn %08X\n",
+                (void *)(uintptr_t)a64_uc_pc(ctx), a64_uc_insn(ctx));
+        fflush(stderr);
+    }
+    return false;
+}
+
+bool nv2a_hook_handle_vram(uintptr_t fault_addr, uint32_t fault_xbox_va)
+{
+    /* As on Windows: commit the 64 KB around the fault. Within an existing
+     * reservation VirtualAlloc(MEM_COMMIT) is an mprotect. */
+    uintptr_t alloc_base = fault_addr & ~(uintptr_t)0xFFFF;
+    LPVOID result;
+    (void)fault_xbox_va;
+    result = VirtualAlloc((LPVOID)alloc_base, 0x10000, MEM_COMMIT, PAGE_READWRITE);
+    if (!result)
+        result = VirtualAlloc((LPVOID)alloc_base, 0x10000,
+                              MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (result) {
+        memset(result, 0, 0x10000);
+        return true;
+    }
+    return false;
+}
+
 #else /* !_WIN32 -- SIGSEGV-based MMIO trapping deferred to main.c port */
 
 void nv2a_hook_init(ptrdiff_t xbox_mem_offset)

@@ -37,6 +37,19 @@
 #else
 #include <sys/sysinfo.h>
 #endif
+#if defined(__ANDROID__)
+#include <sys/syscall.h>
+#include <android/api-level.h>
+#include <android/sharedmem.h>
+#include <android/log.h>
+#endif
+
+/* Length registry for mappings, defined with the view helpers further down.
+ * Declared here for every host: VirtualAlloc uses it on all of them, and
+ * only the Darwin branch used to see a declaration -- everywhere else the
+ * first use was an implicit declaration, a hard error under C99 clang. */
+void view_register(void *addr, size_t len);
+size_t view_take(const void *addr);
 
 /* ===================================================================== */
 /* Last-error (thread-local)                                             */
@@ -55,6 +68,7 @@ LONG InterlockedIncrement(volatile LONG *p)        { return __atomic_add_fetch(p
 LONG InterlockedDecrement(volatile LONG *p)        { return __atomic_sub_fetch(p, 1, __ATOMIC_SEQ_CST); }
 LONG InterlockedExchange(volatile LONG *p, LONG v) { return __atomic_exchange_n(p, v, __ATOMIC_SEQ_CST); }
 LONG InterlockedExchangeAdd(volatile LONG *p, LONG v) { return __atomic_fetch_add(p, v, __ATOMIC_SEQ_CST); }
+LONG InterlockedAdd(volatile LONG *p, LONG v)         { return __atomic_add_fetch(p, v, __ATOMIC_SEQ_CST); }
 
 LONG InterlockedCompareExchange(volatile LONG *p, LONG xchg, LONG cmp)
 {
@@ -201,13 +215,31 @@ BOOL InitOnceExecuteOnce(PINIT_ONCE once, PINIT_ONCE_FN fn, PVOID param, PVOID *
 /* Forward decl; the definition lives further down with the wait helpers. */
 static void deadline_from_ms(DWORD ms, struct timespec *ts);
 
+/* The cond comes first so the CS paths can keep treating Ptr as a plain
+ * pthread_cond_t*. seq is for the SRW-paired waits below. */
+typedef struct w32_cv {
+    pthread_cond_t cond;
+    unsigned long  seq;
+} w32_cv;
+
+/* An SRWLOCK is a pthread_rwlock_t here, and pthread has no condition wait on
+ * an rwlock. The SRW-paired waits therefore sleep on this mutex instead, with
+ * a generation count so a wake that lands between dropping the SRW lock and
+ * sleeping is not lost. Wakes take it too (briefly); for CS-paired CVs that
+ * only orders the signal, it changes nothing else. */
+static pthread_mutex_t s_cv_srw_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static void cv_lazy_init(PCONDITION_VARIABLE cv)
 {
-    if (!cv->Ptr) {
-        pthread_cond_t *c = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
-        pthread_cond_init(c, NULL);
-        /* Race window OK for typical Win32 usage (the CS is held). */
-        cv->Ptr = c;
+    if (!__atomic_load_n(&cv->Ptr, __ATOMIC_ACQUIRE)) {
+        /* SRW-paired CVs are not covered by one CS, so serialise first use. */
+        pthread_mutex_lock(&s_cv_srw_lock);
+        if (!cv->Ptr) {
+            w32_cv *c = (w32_cv *)calloc(1, sizeof(w32_cv));
+            pthread_cond_init(&c->cond, NULL);
+            __atomic_store_n(&cv->Ptr, (PVOID)c, __ATOMIC_RELEASE);
+        }
+        pthread_mutex_unlock(&s_cv_srw_lock);
     }
 }
 
@@ -237,13 +269,42 @@ BOOL SleepConditionVariableCS(PCONDITION_VARIABLE cv, PCRITICAL_SECTION cs, DWOR
 VOID WakeConditionVariable(PCONDITION_VARIABLE cv)
 {
     cv_lazy_init(cv);
-    pthread_cond_signal((pthread_cond_t *)cv->Ptr);
+    w32_cv *c = (w32_cv *)cv->Ptr;
+    pthread_mutex_lock(&s_cv_srw_lock);
+    c->seq++;
+    pthread_cond_signal(&c->cond);
+    pthread_mutex_unlock(&s_cv_srw_lock);
 }
 
 VOID WakeAllConditionVariable(PCONDITION_VARIABLE cv)
 {
     cv_lazy_init(cv);
-    pthread_cond_broadcast((pthread_cond_t *)cv->Ptr);
+    w32_cv *c = (w32_cv *)cv->Ptr;
+    pthread_mutex_lock(&s_cv_srw_lock);
+    c->seq++;
+    pthread_cond_broadcast(&c->cond);
+    pthread_mutex_unlock(&s_cv_srw_lock);
+}
+
+BOOL SleepConditionVariableSRW(PCONDITION_VARIABLE cv, PSRWLOCK lock, DWORD ms, ULONG flags)
+{
+    struct timespec ts;
+    int rc = 0;
+    int shared = (flags & CONDITION_VARIABLE_LOCKMODE_SHARED) != 0;
+    cv_lazy_init(cv);
+    w32_cv *c = (w32_cv *)cv->Ptr;
+    if (ms != INFINITE) deadline_from_ms(ms, &ts);
+
+    pthread_mutex_lock(&s_cv_srw_lock);
+    unsigned long seq = c->seq;
+    if (shared) ReleaseSRWLockShared(lock); else ReleaseSRWLockExclusive(lock);
+    while (c->seq == seq && rc != ETIMEDOUT)
+        rc = (ms == INFINITE) ? pthread_cond_wait(&c->cond, &s_cv_srw_lock)
+                              : pthread_cond_timedwait(&c->cond, &s_cv_srw_lock, &ts);
+    pthread_mutex_unlock(&s_cv_srw_lock);
+    if (shared) AcquireSRWLockShared(lock); else AcquireSRWLockExclusive(lock);
+    if (rc == ETIMEDOUT && c->seq == seq) { SetLastError(WAIT_TIMEOUT); return FALSE; }
+    return TRUE;
 }
 
 /* ===================================================================== */
@@ -691,11 +752,65 @@ BOOL ReleaseMutex(HANDLE h)
 /* Threads                                                               */
 /* ===================================================================== */
 
+/* Every thread this layer starts gets a 256 KB alternate signal stack (unless it already has one that big), freed
+ * at thread exit. The runtime's SIGSEGV handlers -- every trapped device register (Kelvin, APU, AC97, OHCI) and the
+ * crash report -- run on that stack in an Android app, because ART's libsigchain installs its handler SA_ONSTACK;
+ * bionic's own per-thread stack is 32 KB, which the kernel's signal frame (~4.6 KB on arm64, again for every
+ * nested trap) and a device model share. A stack overflow is then still reported instead of the process being
+ * killed silently. RECOMP_SIGSTACK_KB overrides the size (0: leave the thread's stack alone). */
+static pthread_key_t s_sigstk_key;
+static pthread_once_t s_sigstk_once = PTHREAD_ONCE_INIT;
+static size_t s_sigstk_bytes;
+
+static void sigstk_free(void *map)
+{
+    stack_t off;
+    memset(&off, 0, sizeof(off));
+    off.ss_flags = SS_DISABLE;
+    sigaltstack(&off, NULL);
+    munmap(map, s_sigstk_bytes + (size_t)sysconf(_SC_PAGESIZE));
+}
+
+static void sigstk_init(void)
+{
+    const char *e = getenv("RECOMP_SIGSTACK_KB");
+    const size_t pg = (size_t)sysconf(_SC_PAGESIZE);
+    s_sigstk_bytes = (e && *e ? (size_t)strtoul(e, NULL, 0) : 256u) * 1024u;
+    s_sigstk_bytes = (s_sigstk_bytes + pg - 1) / pg * pg;
+    pthread_key_create(&s_sigstk_key, sigstk_free);
+}
+
+static void thread_signal_stack(void)
+{
+    stack_t cur, ns;
+    size_t pg;
+    uint8_t *m;
+    pthread_once(&s_sigstk_once, sigstk_init);
+    memset(&cur, 0, sizeof(cur));
+    if (!s_sigstk_bytes || (sigaltstack(NULL, &cur) == 0 && !(cur.ss_flags & SS_DISABLE) &&
+                            cur.ss_size >= s_sigstk_bytes))
+        return;
+    pg = (size_t)sysconf(_SC_PAGESIZE);
+    m = (uint8_t *)mmap(NULL, s_sigstk_bytes + pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED)
+        return;
+    mprotect(m, pg, PROT_NONE);              /* guard page below the stack */
+    memset(&ns, 0, sizeof(ns));
+    ns.ss_sp = m + pg;
+    ns.ss_size = s_sigstk_bytes;
+    if (sigaltstack(&ns, NULL) != 0) {
+        munmap(m, s_sigstk_bytes + pg);
+        return;
+    }
+    pthread_setspecific(s_sigstk_key, m);
+}
+
 static void *thread_trampoline(void *arg)
 {
     w32_object *o = (w32_object *)arg;
     t_self_obj = o;
     t_tid      = o->tid;
+    thread_signal_stack();
 
     /* CREATE_SUSPENDED gate */
     pthread_mutex_lock(&o->lock);
@@ -730,8 +845,13 @@ HANDLE CreateThread(LPSECURITY_ATTRIBUTES sa, SIZE_T stackSize,
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
+    /* Win32's dwStackSize (without STACK_SIZE_PARAM_IS_A_RESERVATION) is the initial *commit*: the thread still
+     * reserves the image's default (1 MB) and grows into it. A pthread stack is its whole size, so the guest
+     * threads' KernelStackSize (16-64 KB, PsCreateSystemThreadEx) gave the lifted code -- which runs on the host
+     * stack -- a fraction of what it has on Windows. Reserve at least the Windows default; only touched pages cost
+     * memory. */
     if (stackSize)
-        pthread_attr_setstacksize(&attr, stackSize < 65536 ? 65536 : stackSize);
+        pthread_attr_setstacksize(&attr, stackSize < ((SIZE_T)1 << 20) ? ((SIZE_T)1 << 20) : stackSize);
 
     if (pthread_create(&o->thread, &attr, thread_trampoline, o) != 0) {
         pthread_attr_destroy(&attr);
@@ -801,7 +921,17 @@ BOOL TerminateThread(HANDLE h, DWORD exitCode)
 {
     w32_object *o = (w32_object *)h;
     if (!o || o->kind != K_THREAD) return FALSE;
+#if defined(__ANDROID__)
+    /* Bionic has no pthread_cancel (and no asynchronous cancellation at all).
+     * TerminateThread is a last resort on Windows too; here the thread is
+     * reported as exited to every waiter, which is what callers act on, and
+     * left to run to its own end. Nothing in the runtime calls this today. */
+    __android_log_print(ANDROID_LOG_WARN, "xboxrecomp",
+                        "TerminateThread(tid %u): no pthread_cancel on bionic; "
+                        "thread marked exited but keeps running", o->tid);
+#else
     pthread_cancel(o->thread);
+#endif
     pthread_mutex_lock(&o->lock);
     o->exit_code = exitCode;
     o->exited    = 1;
@@ -968,6 +1098,14 @@ BOOL TrySubmitThreadpoolCallback(PTP_SIMPLE_CALLBACK callback,
 /* Waitable timers                                                       */
 /* ===================================================================== */
 
+HANDLE CreateWaitableTimerExW(LPSECURITY_ATTRIBUTES sa, LPCWSTR name, DWORD flags, DWORD access)
+{
+    /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION is what the timer already is:
+     * deadlines are CLOCK_MONOTONIC timespecs. */
+    (void)access;
+    return CreateWaitableTimerW(sa, (flags & CREATE_WAITABLE_TIMER_MANUAL_RESET) != 0, name);
+}
+
 HANDLE CreateWaitableTimerW(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, LPCWSTR name)
 {
     (void)sa;
@@ -1087,12 +1225,10 @@ static int prot_from_page(DWORD protect)
  * Memory from mach_vm_map is released by munmap like any other, because the
  * BSD and Mach halves of Darwin share one VM map, so VirtualFree is unchanged.
  */
-/* Length registry, defined with the view helpers below. Win32 frees by address
- * alone -- UnmapViewOfFile takes no length and VirtualFree(MEM_RELEASE) is
- * documented to take size 0 -- so the length has to be recoverable here or
- * munmap cannot be called at all. */
-void view_register(void *addr, size_t len);
-size_t view_take(const void *addr);
+/* Length registry (declared at the top): Win32 frees by address alone --
+ * UnmapViewOfFile takes no length and VirtualFree(MEM_RELEASE) is documented
+ * to take size 0 -- so the length has to be recoverable or munmap cannot be
+ * called at all. */
 
 static void *mach_map_fixed(void *address, size_t size, int prot)
 {
@@ -1146,6 +1282,17 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
     if (address) {
         p = mach_map_fixed(address, size, prot ? prot : PROT_READ | PROT_WRITE);
     } else
+#endif
+#if !defined(__APPLE__)
+    /* A pure reservation is address space, not memory: PROT_NONE and
+     * MAP_NORESERVE, as Win32's MEM_RESERVE is inaccessible and uncommitted.
+     * It used to map read-write and count against the commit limit, which
+     * for the multi-GB guest window is the difference between an Android
+     * low-memory kill and nothing. A later MEM_COMMIT mprotects pieces open
+     * (the branch at the top of this function). */
+    if ((allocationType & MEM_RESERVE) && !(allocationType & MEM_COMMIT))
+        p = mmap(address, size, PROT_NONE, flags | MAP_NORESERVE, -1, 0);
+    else
 #endif
     p = mmap(address, size, prot ? prot : PROT_READ | PROT_WRITE, flags, -1, 0);
     if (p == MAP_FAILED) {
@@ -1311,6 +1458,10 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
 {
 #if defined(__APPLE__)
     memset_s(ptr, cnt, 0, cnt);
+#elif defined(__ANDROID__)
+    /* Bionic has no explicit_bzero. A volatile store loop cannot be elided. */
+    volatile unsigned char *p = (volatile unsigned char *)ptr;
+    while (cnt--) *p++ = 0;
 #else
     explicit_bzero(ptr, cnt);
 #endif
@@ -1595,7 +1746,16 @@ size_t view_take(const void *addr)
  * memfd_create for this; elsewhere an immediately-unlinked temp file does. */
 static int anon_map_fd(const char *name)
 {
-#if defined(__APPLE__)
+#if defined(__ANDROID__)
+    /* Android: no shm_open (bionic omits it) and no /dev/shm; memfd_create is
+     * only declared from API 30 (Quest builds target 29). The raw syscall has
+     * existed since Linux 3.17, so every Quest kernel has it, and an SELinux
+     * untrusted_app domain may use it. ASharedMemory (ashmem, API 26) is the
+     * fallback for a kernel or policy that refuses it -- it gives an fd that
+     * ftruncate cannot resize, so it is sized at creation by the caller. */
+    int fd = (int)syscall(__NR_memfd_create, name ? name : "xbox_map", 0u);
+    return fd;
+#elif defined(__APPLE__)
     static volatile LONG map_counter = 0;
     char shm_name[32];
     LONG seq = InterlockedIncrement(&map_counter);
@@ -1617,11 +1777,21 @@ HANDLE CreateFileMappingA(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
     if (size == 0) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
 
     int fd = anon_map_fd(name);
+#if defined(__ANDROID__)
+    if (fd < 0) {
+        /* memfd refused: ashmem is created at its final size and needs no
+         * ftruncate. MAP_SHARED views of it alias exactly as memfd's do. */
+        fd = ASharedMemory_create(name ? name : "xbox_map", (size_t)size);
+        if (fd < 0) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
+    } else
+#endif
+    {
     if (fd < 0) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
     if (ftruncate(fd, (off_t)size) != 0) {
         close(fd);
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return NULL;
+    }
     }
 
     w32_object *o = obj_alloc(K_FILEMAP);

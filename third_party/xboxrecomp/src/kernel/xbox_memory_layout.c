@@ -22,6 +22,11 @@
 #include <setjmp.h>
 #if !defined(_WIN32)
 #include <unistd.h>   /* _exit */
+#include <sys/mman.h>
+#include <pthread.h>
+#endif
+#if (defined(__aarch64__) || defined(XR_HOST_FAULT_GLUE)) && !defined(_WIN32)
+#include "../platform/arm64_fault_decode.h"
 #endif
 
 /* XBE header field offsets (per xboxdevwiki.net/Xbe) */
@@ -368,6 +373,106 @@ static void ac97_clear_reset_bits(void)
     }
 }
 
+#if defined(__aarch64__) && !defined(_WIN32)
+/* arm64 POSIX: there is no user-mode single step, so instead of "open the
+ * page, step the write, close it" the faulting store is emulated against the
+ * real (temporarily writable) page with the shared AArch64 decoder, then the
+ * controller's reaction is applied and the page is closed again -- the same
+ * net effect, one fault instead of two. Reads never fault: the page is
+ * PROT_READ, as it is PAGE_READONLY on Windows. */
+static uint64_t ac97_mem_rd(void *ctx, uint64_t addr, int size)
+{
+    (void)ctx;
+    switch (size) {
+    case 1: return *(volatile uint8_t *)(uintptr_t)addr;
+    case 2: return *(volatile uint16_t *)(uintptr_t)addr;
+    case 4: return *(volatile uint32_t *)(uintptr_t)addr;
+    default: return *(volatile uint64_t *)(uintptr_t)addr;
+    }
+}
+static void ac97_mem_wr(void *ctx, uint64_t addr, int size, uint64_t v)
+{
+    (void)ctx;
+    switch (size) {
+    case 1: *(volatile uint8_t *)(uintptr_t)addr = (uint8_t)v; break;
+    case 2: *(volatile uint16_t *)(uintptr_t)addr = (uint16_t)v; break;
+    case 4: *(volatile uint32_t *)(uintptr_t)addr = (uint32_t)v; break;
+    default: *(volatile uint64_t *)(uintptr_t)addr = v; break;
+    }
+}
+static pthread_mutex_t s_ac97_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int ac97_write_fault(void *uc, uintptr_t fault)
+{
+    static const a64_mem_ops ops = { ac97_mem_rd, ac97_mem_wr };
+    a64_access a;
+    a64_regs r;
+    uint64_t start;
+    int have;
+
+    if (!g_ac97_page || fault < (uintptr_t)g_ac97_page
+            || fault >= (uintptr_t)g_ac97_page + AC97_TRAP_BYTES)
+        return 0;
+    if (!a64_decode(a64_uc_insn(uc), &a) || !a.is_write || a.exclusive)
+        return 0;
+    have = a64_uc_get(uc, &r);
+    if (a.is_fp && !(have & A64_UC_HAVE_FPSIMD))
+        return 0;
+    start = a64_address(&a, &r) & 0x00FFFFFFFFFFFFFFull;   /* TBI */
+    if (start < (uintptr_t)g_ac97_page
+            || start + a64_span(&a) > (uintptr_t)g_ac97_page + AC97_TRAP_BYTES)
+        return 0;
+    /* Serialised: two threads must not see the page writable at once and
+     * have one close it under the other's store. */
+    pthread_mutex_lock(&s_ac97_lock);
+    mprotect(g_ac97_page, AC97_TRAP_BYTES, PROT_READ | PROT_WRITE);
+    a64_execute(&r, &a, &ops, NULL);
+    ac97_clear_reset_bits();
+    mprotect(g_ac97_page, AC97_TRAP_BYTES, PROT_READ);
+    pthread_mutex_unlock(&s_ac97_lock);
+    a64_uc_put(uc, &r, a64_fp_dest_mask(&a));
+    return 1;
+}
+#elif defined(XR_HOST_FAULT_GLUE) && !defined(_WIN32)
+/* A non-AArch64 POSIX host whose build supplies arm64_fault_decode.h's glue
+ * (tests/game_render_x86 on x86-64 Linux): the same net effect as above, the
+ * store decoded by that glue (a64_uc_emulate_mmio) and performed on the real,
+ * briefly writable page. Without it the title's channel reset (write RR, spin
+ * until it reads back clear) never ends. */
+static uint64_t ac97_dev_rd(void *dev, uint32_t off, int size)
+{
+    uint64_t v = 0;
+    (void)dev;
+    memcpy(&v, (char *)g_ac97_page + off, (size_t)size);
+    return v;
+}
+static void ac97_dev_wr(void *dev, uint32_t off, uint64_t v, int size)
+{
+    (void)dev;
+    memcpy((char *)g_ac97_page + off, &v, (size_t)size);
+}
+static pthread_mutex_t s_ac97_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int ac97_write_fault(void *uc, uintptr_t fault)
+{
+    int ok;
+    if (!g_ac97_page || fault < (uintptr_t)g_ac97_page
+            || fault >= (uintptr_t)g_ac97_page + AC97_TRAP_BYTES
+            || a64_uc_access_is_write(uc) != 1)
+        return 0;
+    pthread_mutex_lock(&s_ac97_lock);
+    mprotect(g_ac97_page, AC97_TRAP_BYTES, PROT_READ | PROT_WRITE);
+    ok = a64_uc_emulate_mmio(uc, fault, (uint32_t)(fault - (uintptr_t)g_ac97_page),
+                             AC97_TRAP_BYTES, NULL, ac97_dev_rd, ac97_dev_wr);
+    if (ok)
+        ac97_clear_reset_bits();
+    mprotect(g_ac97_page, AC97_TRAP_BYTES, PROT_READ);
+    pthread_mutex_unlock(&s_ac97_lock);
+    return ok;
+}
+#endif
+
+#if defined(_WIN32)
 static LONG CALLBACK ac97_write_veh(PEXCEPTION_POINTERS ep)
 {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
@@ -405,6 +510,7 @@ static LONG CALLBACK ac97_write_veh(PEXCEPTION_POINTERS ep)
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
+#endif
 
 /* Arm the trap. Called once the MCPX aperture exists, and only alongside the
  * rest of RECOMP_AC97_READY: a title that never gets as far as resetting a
@@ -416,6 +522,29 @@ static void ac97_arm_write_trap(void)
     if (!g_mcpx_memory || g_ac97_page)
         return;
     g_ac97_page = (char *)g_mcpx_memory + AC97_NABM_OFFSET;
+#if (defined(__aarch64__) || defined(XR_HOST_FAULT_GLUE)) && !defined(_WIN32)
+    /* The SIGSEGV dispatcher runs the most recently added handler first, so
+     * this precedes any crash reporter registered earlier. */
+    g_ac97_veh = (a64_fault_install() && a64_fault_add_handler(ac97_write_fault))
+                 ? (void *)ac97_write_fault : NULL;
+    if (!g_ac97_veh || mprotect(g_ac97_page, AC97_TRAP_BYTES, PROT_READ) != 0) {
+        g_ac97_page = NULL;
+        g_ac97_veh = NULL;
+        fprintf(stderr, "  AC97: could not arm the bus-master write trap;"
+                        " a channel reset will spin\n");
+        return;
+    }
+    (void)old;
+#elif !defined(_WIN32)
+    /* x86-64 POSIX: AddVectoredExceptionHandler is a stub there and no
+     * SIGSEGV path exists for this trap yet. Report it rather than arm a
+     * page whose writes nothing would service. */
+    (void)old;
+    g_ac97_page = NULL;
+    fprintf(stderr, "  AC97: bus-master write trap not available on this"
+                    " host; a channel reset will spin\n");
+    return;
+#else
     /* First, so it runs before the game target's own crash reporter, which
      * would otherwise print the write as an access violation. */
     g_ac97_veh = AddVectoredExceptionHandler(1, ac97_write_veh);
@@ -431,6 +560,7 @@ static void ac97_arm_write_trap(void)
                         " a channel reset will spin\n");
         return;
     }
+#endif
     fprintf(stderr, "  AC97: bus-master writes trapped at 0x%08X"
                     " (channel reset completes on write)\n",
             XBOX_MCPX_BASE + AC97_NABM_OFFSET);
@@ -772,11 +902,46 @@ extern void xbox_PinThread(const char *role);
 static void (*volatile g_ack_tick)(void);
 void xbox_SetAckTick(void (*fn)(void)) { g_ack_tick = fn; }
 
+#if defined(__ANDROID__)
+/* How the acknowledger idles between turns on Android (Quest). Sleep(0) is sched_yield(), which returns at once on a
+ * core with nothing else runnable: on a desktop with idle cores that is a spinning thread nobody notices, on the
+ * headset it is one core held at 100% (heat, and the XR runtime's threads share the cluster). A turn that changed a
+ * register is followed by yields as before, so a burst of acknowledgements keeps its microsecond latency; after
+ * ACK_SPIN_TURNS quiet turns the thread sleeps RECOMP_ACK_SLEEP_US (default 200 us) per turn instead: a title
+ * waiting on something only this loop answers (the DSP doorbell; the busy bits when Kelvin is off) waits at most
+ * that long, KeTickCount (1 ms units) stays current. RECOMP_ACK_SLEEP_US=0 restores the yield loop. */
+#include <time.h>
+#define ACK_SPIN_TURNS 64
+static void ack_idle(int worked)
+{
+    static int sleep_us = -1, quiet;
+    if (sleep_us < 0) {
+        const char *e = getenv("RECOMP_ACK_SLEEP_US");
+        sleep_us = e && *e ? atoi(e) : 200;
+        if (sleep_us < 0) sleep_us = 0;
+        if (sleep_us > 5000) sleep_us = 5000;
+    }
+    if (worked) quiet = 0;
+    if (!sleep_us || quiet < ACK_SPIN_TURNS) {
+        quiet++;
+        Sleep(0);
+        return;
+    }
+    {
+        struct timespec ts = { 0, (long)sleep_us * 1000L };
+        nanosleep(&ts, NULL);
+    }
+}
+#endif
+
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
     xbox_PinThread("ACK");
     while (!nv2a_ack_stopped()) {
+#if defined(__ANDROID__)
+        int worked = 0;
+#endif
         for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
             volatile uint32_t *r =
                 (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
@@ -787,6 +952,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 continue;
             if (*r & NV2A_ACK[i].busy_mask) {
                 *r &= ~NV2A_ACK[i].busy_mask;
+#if defined(__ANDROID__)
+                worked = 1;
+#endif
             }
         }
         for (size_t i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++) {
@@ -794,6 +962,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 (volatile uint32_t *)((char *)regs + NV2A_IDLE[i].offset);
             if ((*r & NV2A_IDLE[i].idle_mask) != NV2A_IDLE[i].idle_mask) {
                 *r |= NV2A_IDLE[i].idle_mask;
+#if defined(__ANDROID__)
+                worked = 1;
+#endif
             }
         }
         /* With the Kelvin engine running, DMA_GET is its to move: it says
@@ -806,6 +977,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
             if (*get != *put) {
                 *get = *put;
+#if defined(__ANDROID__)
+                worked = 1;
+#endif
             }
         }
         {
@@ -916,7 +1090,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
         *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                + g_memory_offset) = GetTickCount();
 
+#if defined(__ANDROID__)
+        ack_idle(worked);
+#else
         Sleep(0);  /* yield; the waiter is spinning on another core */
+#endif
     }
     return 0;
 }
@@ -960,7 +1138,12 @@ uint32_t g_xbox_code_hi = 0;
 /* Global registers for recompiled code (via recomp_types.h) */
 /* Each guest thread's TIB. The first thread uses the one the loader built;
  * a spawned thread gets its own from xbox_AllocThreadTib(). */
+#if defined(RECOMP_REGFILE)
+/* The whole guest register file, one TLS object (recomp_regfile.h): every register below lives in it. */
+RECOMP_TLS RecompRegFile g_recomp_regs = RECOMP_REGFILE_INIT(XBOX_TIB_MAIN, 0x037Fu, 0x4000);
+#else
 RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
+#endif
 
 /* The shape of the TLS block the loader built, so a new thread can be
  * given one just like it: where the initialised image data starts, how
@@ -968,8 +1151,10 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
  * at is. Zero total means the image had no TLS directory. */
 static uint32_t g_tls_template_va, g_tls_total, g_tls_thread_size = 64;
 
+#ifndef RECOMP_REGFILE
 RECOMP_TLS uint32_t g_eax = 0, g_ecx = 0, g_edx = 0, g_esp = 0;
 RECOMP_TLS uint32_t g_ebx = 0, g_esi = 0, g_edi = 0;
+#endif
 
 #ifdef RECOMP_ABI_CHECK
 /* Report a lifted function that returned without restoring ebx/esi/edi.
@@ -1031,6 +1216,7 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
 #endif
 
 /* SEH frame pointer bridge (see recomp_types.h for explanation) */
+#ifndef RECOMP_REGFILE
 RECOMP_TLS uint32_t g_seh_ebp = 0;
 RECOMP_TLS double g_fp_stack[8];
 RECOMP_TLS int g_fp_top = 0;
@@ -1043,6 +1229,7 @@ RECOMP_TLS uint16_t g_fp_cc = 0x4000;
 /* Defined below, with the other guest registers. */
 extern RECOMP_TLS uint32_t g_ebp;
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_ebx, g_esi, g_edi;
+#endif
 
 /* ---- non-local jumps ---------------------------------------------------
  *
@@ -1062,6 +1249,29 @@ typedef struct {
 
 static RECOMP_TLS recomp_jmp_slot s_jmp[RECOMP_JMPBUF_SLOTS];
 static RECOMP_TLS int             s_jmp_used;
+
+#if defined(__aarch64__) && !defined(_MSC_VER)
+/* The rare half of RECOMP_ATOMIC_* on arm64 (recomp_types.h): a lock-prefixed
+ * dword that straddles an 8-byte boundary, which no single arm64 atomic can
+ * cover. Serialised against every other such access by one lock; the
+ * guest's own locked operations on that dword all come through here, so they
+ * stay atomic with respect to each other, which is what the lock prefix is
+ * for. memcpy keeps the plain accesses alignment-safe. */
+static pthread_mutex_t s_atomic_split_lock = PTHREAD_MUTEX_INITIALIZER;
+
+uint32_t recomp_atomic_rmw32_split(volatile uint32_t *p, int is_cas,
+                                   uint32_t cmp, uint32_t val)
+{
+    uint32_t cur, next;
+    pthread_mutex_lock(&s_atomic_split_lock);
+    memcpy(&cur, (const void *)p, 4);
+    next = is_cas ? (cur == cmp ? val : cur) : cur + val;
+    if (next != cur || !is_cas)
+        memcpy((void *)p, &next, 4);
+    pthread_mutex_unlock(&s_atomic_split_lock);
+    return cur;
+}
+#endif
 
 jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
 {
@@ -1329,6 +1539,7 @@ void xbox_WatchdogStart(void)
 }
 
 /* SSE. 128 bits of architectural state, per-thread like the rest. */
+#ifndef RECOMP_REGFILE
 RECOMP_TLS RecompMmx g_mm0, g_mm1, g_mm2, g_mm3;
 RECOMP_TLS RecompMmx g_mm4, g_mm5, g_mm6, g_mm7;
 RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3;
@@ -1336,6 +1547,7 @@ RECOMP_TLS RecompXmm g_xmm4, g_xmm5, g_xmm6, g_xmm7;
 /* Last frame established by `mov ebp, esp`. Read by frameless functions
  * that address their caller's frame through ebp. */
 RECOMP_TLS uint32_t g_ebp = 0;
+#endif
 
 /* EFLAGS.DF. Zero means the string instructions walk forwards, which is the
  * ABI's resting state and what almost every one of them does -- so this is
@@ -1344,12 +1556,38 @@ RECOMP_TLS uint32_t g_ebp = 0;
  * `std; repne scasb`, and memmove goes backwards when its regions overlap the
  * wrong way. Thread-local, because `std` and the `cld` that undoes it can land
  * in different lifted bodies of the same guest routine. */
+#ifndef RECOMP_REGFILE
 RECOMP_TLS int g_df = 0;
+#endif
 
 /* ICALL trace ring buffer */
 volatile uint32_t g_icall_trace[16] = {0};
 volatile uint32_t g_icall_trace_idx = 0;
 volatile uint64_t g_icall_count = 0;
+
+/* 64-bit POSIX hosts reserve the full 4 GB guest window up front (see the
+ * span reservation in xbox_MemoryLayoutInit). Windows keeps its existing
+ * layout; Darwin's fixed placement goes through mach_vm_map and is left
+ * alone. */
+#if !defined(_WIN32) && !defined(__APPLE__) && UINTPTR_MAX > 0xFFFFFFFFu
+#define XBOX_RESERVE_GUEST_4GB 1
+#define XBOX_GUEST_SPAN ((size_t)1 << 32)
+#else
+#define XBOX_RESERVE_GUEST_4GB 0
+#endif
+
+/* Hand back a slice of the guest reservation so a fixed-address mapping can
+ * take its place. A no-op outside the reservation, or where there is none. */
+static void guest_span_release(uintptr_t native, size_t len)
+{
+#if XBOX_RESERVE_GUEST_4GB
+    uintptr_t lo = (uintptr_t)g_span_base;
+    if (g_span_base && native >= lo && native - lo + len <= g_span_size)
+        munmap((void *)native, len);
+#else
+    (void)native; (void)len;
+#endif
+}
 
 BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
 {
@@ -1425,6 +1663,19 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          * VirtualFree releases just the slice about to be used, so each view
          * replaces our own reservation rather than racing for free space. */
         g_span_size = g_memory_size * (size_t)(1 + XBOX_NUM_MIRRORS);
+#if XBOX_RESERVE_GUEST_4GB
+        /* Reserve the whole 32-bit guest window, not just base + mirrors.
+         * Every aperture sits at a fixed offset from the base (contiguous
+         * window 0x80000000, tiled 0xF0000000, NV2A 0xFD000000, MCPX,
+         * flash), and with only the mirrors reserved those offsets landed on
+         * whatever the process had mapped there -- on Android arm64 that is
+         * the Java heap, ART and the linker's own mappings, so every aperture
+         * failed with "exists" and the title got no device memory at all.
+         * Owning the 4 GB guarantees each fixed placement below hits our own
+         * PROT_NONE reservation, released slice by slice as it is used. */
+        if (g_span_size < XBOX_GUEST_SPAN)
+            g_span_size = XBOX_GUEST_SPAN;
+#endif
         g_span_base = VirtualAlloc(NULL, g_span_size, MEM_RESERVE, PAGE_NOACCESS);
         if (g_span_base) {
             VirtualFree(g_span_base, g_memory_size, MEM_RELEASE);
@@ -1903,6 +2154,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      */
     {
         uintptr_t contig_native = XBOX_CONTIG_BASE + g_memory_offset;
+        guest_span_release(contig_native, XBOX_CONTIG_SIZE);
         g_contig_mapping = CreateFileMappingW(
             INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
             0, (DWORD)XBOX_CONTIG_SIZE, NULL);
@@ -1948,6 +2200,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      */
     {
         uintptr_t nv2a_native = XBOX_NV2A_BASE + g_memory_offset;
+        guest_span_release(nv2a_native, XBOX_NV2A_SIZE);
         g_nv2a_memory = VirtualAlloc(
             (LPVOID)nv2a_native,
             XBOX_NV2A_SIZE,
@@ -1993,6 +2246,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      */
     {
         uintptr_t mcpx_native = XBOX_MCPX_BASE + g_memory_offset;
+        guest_span_release(mcpx_native, XBOX_MCPX_SIZE);
         g_mcpx_memory = VirtualAlloc(
             (LPVOID)mcpx_native,
             XBOX_MCPX_SIZE,
@@ -2072,6 +2326,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
     /* Flash ROM aperture -- see XBOX_FLASH_BASE for why. */
     {
         uintptr_t flash_native = XBOX_FLASH_BASE + g_memory_offset;
+        guest_span_release(flash_native, XBOX_FLASH_SIZE);
 
         g_flash_memory = VirtualAlloc(
             (LPVOID)flash_native,
@@ -2233,6 +2488,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
     if (g_mapping_handle && g_contig_memory
             && g_memory_size == XBOX_CONTIG_SIZE) {
         uintptr_t native = XBOX_LOWRAM_PHYS_VA + g_memory_offset;
+        guest_span_release(native, g_memory_size);
         g_lowram_phys_view = MapViewOfFileEx(g_mapping_handle,
                                              FILE_MAP_ALL_ACCESS, 0, 0,
                                              g_memory_size, (LPVOID)native);
@@ -2283,6 +2539,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          */
         if (tiled_size > XBOX_CONTIG_SIZE)
             tiled_size = XBOX_CONTIG_SIZE;
+        guest_span_release(tiled_native, tiled_size);
         g_tiled_view = g_contig_mapping
             ? MapViewOfFileEx(
                 g_contig_mapping,

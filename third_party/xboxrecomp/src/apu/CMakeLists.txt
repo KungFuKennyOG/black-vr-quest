@@ -33,10 +33,22 @@ if(NOT CARGO_EXECUTABLE)
         "Rust/Cargo 1.98 or newer is required to build the DSP56300 core.")
 endif()
 
+set(DSP56300_CARGO_ENV)
 if(WIN32 AND MSVC)
     set(DSP56300_TARGET_TRIPLE x86_64-pc-windows-msvc)
     set(DSP56300_LIBRARY
         "${CMAKE_CURRENT_BINARY_DIR}/dsp56300/${DSP56300_TARGET_TRIPLE}/release/dsp56300_emu_ffi.lib")
+elseif(ANDROID)
+    # Quest / Android arm64: cross-compile with the NDK clang as linker. Needs
+    # `rustup target add aarch64-linux-android`. Consumers must link -ldl.
+    set(DSP56300_TARGET_TRIPLE aarch64-linux-android)
+    set(DSP56300_LIBRARY
+        "${CMAKE_CURRENT_BINARY_DIR}/dsp56300/${DSP56300_TARGET_TRIPLE}/release/libdsp56300_emu_ffi.a")
+    set(DSP56300_CARGO_ENV ${CMAKE_COMMAND} -E env
+        "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${CMAKE_C_COMPILER}"
+        "CC_aarch64_linux_android=${CMAKE_C_COMPILER}"
+        "CFLAGS_aarch64_linux_android=--target=aarch64-linux-android${ANDROID_NATIVE_API_LEVEL}"
+        "AR_aarch64_linux_android=${CMAKE_AR}")
 else()
     set(DSP56300_TARGET_TRIPLE x86_64-unknown-linux-gnu)
     set(DSP56300_LIBRARY
@@ -50,7 +62,7 @@ file(GLOB_RECURSE DSP56300_RUST_SOURCES CONFIGURE_DEPENDS
 )
 add_custom_command(
     OUTPUT "${DSP56300_LIBRARY}"
-    COMMAND "${CARGO_EXECUTABLE}" build --release --locked
+    COMMAND ${DSP56300_CARGO_ENV} "${CARGO_EXECUTABLE}" build --release --locked
             --no-default-features -p dsp56300-emu-ffi
             --target "${DSP56300_TARGET_TRIPLE}"
             --target-dir "${CMAKE_CURRENT_BINARY_DIR}/dsp56300"
@@ -68,6 +80,9 @@ target_include_directories(xbox_apu PUBLIC
     "${DSP56300_SOURCE_DIR}/crates/emu-ffi/include"
 )
 target_link_libraries(xbox_apu PRIVATE "${DSP56300_LIBRARY}")
+if(ANDROID)
+    target_link_libraries(xbox_apu PRIVATE dl)
+endif()
 
 # qemu_shim.h lives in nv2a/ - shared QEMU type abstraction
 target_include_directories(xbox_apu PRIVATE

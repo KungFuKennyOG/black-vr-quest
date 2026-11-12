@@ -1,0 +1,20 @@
+        org     p:0
+        jmp     start
+        org     p:$200
+start
+        move    #$100,r0
+        move    #$200,r4
+        clr     a
+        move    #$123456,x0
+        move    #$0abcde,y0
+        do      #50,loop_end
+        mac     x0,y0,a
+        asl     a
+        move    a1,x:(r0)+
+        move    a0,y:(r4)+
+        add     x0,a
+loop_end
+        move    a1,x:$300
+        move    a0,x:$301
+        move    a2,x:$302
+done    jmp     done

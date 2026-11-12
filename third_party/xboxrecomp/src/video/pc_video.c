@@ -7,6 +7,8 @@
 #include <math.h>
 #if defined(_WIN32)
 #include <windows.h>
+#elif defined(__aarch64__)
+#include "platform/win32_compat.h"   /* _stricmp (Quest) */
 #endif
 
 const unsigned pc_video_internal_heights[] = { 480, 720, 1080, 1440, 2160 };

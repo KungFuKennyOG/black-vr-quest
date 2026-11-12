@@ -280,4 +280,56 @@ bool apu_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
     return ok;
 }
 
-#endif /* _WIN32 */
+#elif defined(__aarch64__) || defined(XR_HOST_FAULT_GLUE)
+/* AArch64 Linux/Android: ctx is the SIGSEGV handler's ucontext_t and the
+ * instruction is decoded by platform/arm64_fault_decode.c in place of the
+ * x86-64 decoder above. fault_addr must be the faulting host address (each
+ * element's register offset is derived from it). The trace reports what the
+ * instruction does, since is_write is a guess the caller had to make. */
+#include "platform/arm64_fault_decode.h"
+
+#define APU_MMIO_BASE  0xFE800000u
+#define APU_MMIO_SIZE  0x00080000u  /* 512KB */
+
+static int g_apu_mmio_decode_fail = 0;
+
+static uint64_t apu_a64_read(void *dev, uint32_t off, int size)
+{
+    return mcpx_apu_mmio_read((MCPXAPUState *)dev, off, (unsigned)size);
+}
+
+static void apu_a64_write(void *dev, uint32_t off, uint64_t val, int size)
+{
+    mcpx_apu_mmio_write((MCPXAPUState *)dev, off, val, (unsigned)size);
+}
+
+bool apu_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
+                          uint32_t fault_xbox_va, int is_write)
+{
+    uint32_t mmio_offset = fault_xbox_va - APU_MMIO_BASE;
+    int writes = ctx ? a64_uc_access_is_write(ctx) : -1;
+    bool ok = false;
+
+    (void)is_write;
+    if (g_apu_state && ctx)
+        ok = a64_uc_emulate_mmio(ctx, fault_addr, mmio_offset, APU_MMIO_SIZE,
+                                 g_apu_state, apu_a64_read, apu_a64_write) != 0;
+    if (!ok && ctx && g_apu_mmio_decode_fail++ < 20) {
+        fprintf(stderr, "[APU] MMIO decode fail at PC=%p offset=0x%X: insn %08X\n",
+                (void *)(uintptr_t)a64_uc_pc(ctx), mmio_offset,
+                a64_uc_insn(ctx));
+        fflush(stderr);
+    }
+    if (g_apu_state && g_apu_state->trace_mmio) {
+        static unsigned n;
+        if (n++ < 400) {
+            uint64_t v = mcpx_apu_mmio_read(g_apu_state, mmio_offset, 4);
+            fprintf(stderr, "  [APUMMIO] %s 0x%05X = %08X%s\n",
+                    writes > 0 ? "write" : "read ", mmio_offset,
+                    (uint32_t)v, ok ? "" : "  (decode failed)");
+        }
+    }
+    return ok;
+}
+
+#endif /* _WIN32 / __aarch64__ */

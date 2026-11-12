@@ -24,7 +24,11 @@
  */
 
 #include <stdlib.h>
+#if defined(__aarch64__) && !defined(_WIN32)
+#include "platform/win32_compat.h"
+#else
 #include <windows.h>
+#endif
 #include <intrin.h>
 
 #include "kelvin_int.h"
@@ -352,8 +356,16 @@ static uint32_t pushbuffer_va(const PushMap *m, uint32_t offset)
 
 static void publish_get_raw(uint32_t get)
 {
+#if (defined(__aarch64__) || defined(XR_HOST_FAULT_GLUE)) && !defined(_WIN32)
+    /* Release: every pushbuffer word before GET has been read (and every
+     * vertex read kelvin_render_get_bound waited for has finished) before the
+     * title can see GET and reuse that memory. x86 stores are ordered. */
+    kelvin_user_w32_release(KELVIN_USER_DMA_GET, get);
+    kelvin_user_w32_release(KELVIN_PFIFO_BASE + NV_PFIFO_CACHE1_DMA_GET, get);
+#else
     aperture_w32(KELVIN_USER_DMA_GET, get);
     aperture_w32(KELVIN_PFIFO_BASE + NV_PFIFO_CACHE1_DMA_GET, get);
+#endif
 }
 
 /* With asynchronous GPU submission the final GET of a run (at PUT, which reads as "the GPU is idle") is published by
@@ -732,7 +744,14 @@ static DWORD WINAPI kelvin_thread(LPVOID arg)
     }
 
     for (;;) {
+#if (defined(__aarch64__) || defined(XR_HOST_FAULT_GLUE)) && !defined(_WIN32)
+        /* Acquire: no pushbuffer word is read ahead of PUT (ARM does not
+         * order loads behind a control dependency). The title's side is the
+         * write-trapped USER page (kelvin_mmio.c). */
+        uint32_t put = kelvin_user_r32_acquire(KELVIN_USER_DMA_PUT);
+#else
         uint32_t put = kelvin_aperture_r32(KELVIN_USER_DMA_PUT);
+#endif
         uint32_t done = 0;
 
         if (g_kelvin_timing > 0) {
@@ -1006,3 +1025,22 @@ void kelvin_report(void)
     }
     fflush(stderr);
 }
+
+#if !defined(_WIN32)
+/* POSIX hosts (the Quest's heartbeat and stall lines, src/main.c under __ANDROID__): the engine's progress and the
+ * pusher's position, read without the engine lock (monotonic counters; a torn read only blurs one line).
+ * counters: [0] pushbuffer words [1] methods [2] flips [3] draws. flags: 1 waiting for a notify ack, 2 waiting for a
+ * context switch, 4 in a flip stall, 8 the engine is not running. */
+void kelvin_diag_state(uint64_t counters[4], uint32_t *get, uint32_t *put, uint32_t *flags)
+{
+    const KelvinStats *st = &g_kelvin.stats;
+    counters[0] = st->words;
+    counters[1] = st->methods;
+    counters[2] = st->flips;
+    counters[3] = st->draws;
+    *get = s_push.get;
+    *put = kelvin_active() ? kelvin_aperture_r32(KELVIN_USER_DMA_PUT) : 0;
+    *flags = (g_kelvin.waiting_for_nop ? 1u : 0u) | (g_kelvin.waiting_for_context_switch ? 2u : 0u) |
+             (g_kelvin.waiting_for_flip ? 4u : 0u) | (kelvin_active() ? 0u : 8u);
+}
+#endif

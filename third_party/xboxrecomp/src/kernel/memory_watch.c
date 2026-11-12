@@ -129,6 +129,134 @@ void xbox_MemoryWatchInit(void)
             s_watch_va, s_watch_len, (long)s_budget);
     fflush(stderr);
 }
+#elif defined(__aarch64__)
+/* AArch64 Linux/Android. There is no trap flag to single-step with from
+ * user mode, so instead of guard + step + re-arm, the page stays PROT_NONE
+ * and the faulting instruction is emulated against the real memory by
+ * platform/arm64_fault_decode.c: open the page, perform the access, close
+ * it. A thread touching the page in that window is not seen -- this is a
+ * diagnostic, as on Windows. Symbols come from dladdr, so only exported
+ * names resolve; the PC is printed either way. */
+#include "platform/arm64_fault_decode.h"
+#include <dlfcn.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <pthread.h>
+
+static uint32_t s_watch_va, s_watch_len;
+static uintptr_t s_page;
+static long s_page_size = 4096;
+static volatile long s_budget = 200;
+
+static uint64_t watch_rd(void *c, uint64_t addr, int size)
+{
+    uint64_t v = 0;
+    (void)c;
+    switch (size) {
+    case 1: v = *(volatile uint8_t  *)(uintptr_t)addr; break;
+    case 2: v = *(volatile uint16_t *)(uintptr_t)addr; break;
+    case 4: v = *(volatile uint32_t *)(uintptr_t)addr; break;
+    default: v = *(volatile uint64_t *)(uintptr_t)addr; break;
+    }
+    return v;
+}
+
+static void watch_wr(void *c, uint64_t addr, int size, uint64_t v)
+{
+    (void)c;
+    switch (size) {
+    case 1: *(volatile uint8_t  *)(uintptr_t)addr = (uint8_t)v; break;
+    case 2: *(volatile uint16_t *)(uintptr_t)addr = (uint16_t)v; break;
+    case 4: *(volatile uint32_t *)(uintptr_t)addr = (uint32_t)v; break;
+    default: *(volatile uint64_t *)(uintptr_t)addr = v; break;
+    }
+}
+
+static int watch_fault(void *uc, uintptr_t fault)
+{
+    static const a64_mem_ops ops = { watch_rd, watch_wr };
+    a64_access a;
+    a64_regs r;
+    uint32_t va;
+    uint64_t start;
+    int have;
+
+    if (fault < s_page || fault >= s_page + (uintptr_t)s_page_size)
+        return 0;
+    if (!a64_decode(a64_uc_insn(uc), &a))
+        return 0;
+    have = a64_uc_get(uc, &r);
+    if (a.is_fp && !(have & A64_UC_HAVE_FPSIMD))
+        return 0;
+    start = a64_address(&a, &r);
+    /* Both ends of the access must be on the watched page: the open/close
+     * below covers that page only. */
+    if (start < s_page || start + a64_span(&a) > s_page + (uintptr_t)s_page_size)
+        return 0;
+
+    va = (uint32_t)(fault - (uintptr_t)xbox_GetMemoryOffset());
+    if (va >= s_watch_va && va - s_watch_va < s_watch_len
+            && __atomic_sub_fetch(&s_budget, 1, __ATOMIC_SEQ_CST) >= 0) {
+        Dl_info info;
+        uintptr_t pc = (uintptr_t)a64_uc_pc(uc);
+        if (dladdr((void *)pc, &info) && info.dli_sname)
+            fprintf(stderr, "[WATCH] %s 0x%08X (+0x%X) by %s+0x%lX tid %d\n",
+                    a.is_write ? "write" : "read ", va, va - s_watch_va,
+                    info.dli_sname, (unsigned long)(pc - (uintptr_t)info.dli_saddr),
+                    (int)gettid());
+        else
+            fprintf(stderr, "[WATCH] %s 0x%08X (+0x%X) by %p tid %d\n",
+                    a.is_write ? "write" : "read ", va, va - s_watch_va,
+                    (void *)pc, (int)gettid());
+    } else {
+        va = 0;
+    }
+
+    mprotect((void *)s_page, (size_t)s_page_size, PROT_READ | PROT_WRITE);
+    a64_execute(&r, &a, &ops, NULL);
+    if (va && a.is_write) {
+        uint32_t at = va & ~3u;
+        fprintf(stderr, "[WATCH]   now [0x%08X] = %08X\n", at,
+                *(volatile uint32_t *)((uintptr_t)at
+                                       + (uintptr_t)xbox_GetMemoryOffset()));
+    }
+    mprotect((void *)s_page, (size_t)s_page_size, PROT_NONE);
+    a64_uc_put(uc, &r, a64_fp_dest_mask(&a));
+    return 1;
+}
+
+void xbox_MemoryWatchInit(void)
+{
+    const char *spec = getenv("RECOMP_WATCH");
+    const char *max = getenv("RECOMP_WATCH_MAX");
+    char *end;
+    long ps = sysconf(_SC_PAGESIZE);
+
+    if (!spec || !*spec)
+        return;
+    if (ps > 0)
+        s_page_size = ps;
+    s_watch_va = (uint32_t)strtoul(spec, &end, 0);
+    s_watch_len = (*end == ',') ? (uint32_t)strtoul(end + 1, NULL, 0) : 4;
+    if (!s_watch_len)
+        s_watch_len = 4;
+    if (max)
+        s_budget = strtol(max, NULL, 0);
+    s_page = ((uintptr_t)s_watch_va + (uintptr_t)xbox_GetMemoryOffset())
+             & ~(uintptr_t)(s_page_size - 1);
+    if (((uintptr_t)s_watch_va + (uintptr_t)xbox_GetMemoryOffset() + s_watch_len
+            - 1) >= s_page + (uintptr_t)s_page_size)
+        fprintf(stderr, "[WATCH] range crosses a page; only the first is"
+                        " watched\n");
+    if (!a64_fault_install() || !a64_fault_add_handler(watch_fault)) {
+        fprintf(stderr, "[WATCH] no fault handler; not watching\n");
+        return;
+    }
+    mprotect((void *)s_page, (size_t)s_page_size, PROT_NONE);
+    fprintf(stderr, "[WATCH] watching 0x%08X, %u bytes (at most %ld lines)\n",
+            s_watch_va, s_watch_len, (long)s_budget);
+    fflush(stderr);
+}
 #else
 void xbox_MemoryWatchInit(void) {}
 #endif

@@ -559,6 +559,14 @@ typedef char  xbox_host_char;
 const wchar_t *xbox_LastHostPath(void);
 
 BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size);
+#if !defined(_WIN32)
+/* Resolve base/rel case-insensitively (FATX semantics on a case-sensitive
+ * host). Returns 1 when every component exists. */
+int xbox_path_resolve_case(const char *base, const char *rel, char *out, size_t out_size);
+/* Nominal size in bytes of a raw partition image (<save>/PartitionN.img, N = 1..5), else 0. The images are sparse by
+ * construction: bytes past the file's end read as zeros up to this size (kernel_path.c). */
+unsigned long long xbox_partition_image_size(const char *host_path);
+#endif
 
 /* ============================================================================
  * Pool Allocator (kernel_pool.c)

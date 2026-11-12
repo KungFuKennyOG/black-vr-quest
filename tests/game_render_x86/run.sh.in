@@ -1,0 +1,10 @@
+#!/bin/sh
+# tests/game_render_x86: one headless end-to-end run on SwiftShader (configured by CMake).
+# Reads the disc in place from @BLACK_GAME_ROOT@/game; writes only under @CMAKE_CURRENT_BINARY_DIR@.
+# Environment knobs (defaults in render_main.c): GRX_SECONDS, GRX_EYE_W/H, GRX_INPUT, GRX_MULTIVIEW, GRX_ROT_AT.
+export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-@KVK_TEST_ICD@}"
+export GRX_SECONDS="${GRX_SECONDS:-@GRX_SECONDS@}"
+# the fake AAudio device (host_stubs.c) records what the game plays; GRX_AUDIO_WAV= (empty) runs without audio output
+export GRX_AUDIO_WAV="${GRX_AUDIO_WAV-@CMAKE_CURRENT_BINARY_DIR@/frames/audio.wav}"
+exec "@CMAKE_CURRENT_BINARY_DIR@/game_render_x86" "@BLACK_GAME_ROOT@" "@CMAKE_CURRENT_BINARY_DIR@/scratch" \
+     "@CMAKE_CURRENT_BINARY_DIR@/frames" "$@"

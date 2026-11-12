@@ -183,6 +183,19 @@ int usb_gamepad_control(int pad, const UsbSetup *setup, uint8_t *out, int max)
         return -1;
     }
 
+#if !defined(_WIN32)
+    /* HID GET_REPORT (input) on the interface: the current input report, as a controller (and xemu's usb-xid)
+     * answers it. XAPI asks once per pad while it enumerates. Stalling it sent XAPI's USB driver down its
+     * stall-recovery path, whose DPC walks the endpoint's remaining descriptors from HeadP; under CPU load at the
+     * 30 Hz rate that walk raced the controller model, ran off the end of the list and spun forever at
+     * DISPATCH_LEVEL, so no DPC or interrupt ran again and BLACK hung at its title screen (port/notes/perf.md).
+     * The other report types and class requests still stall. */
+    if (setup->bmRequestType == 0xA1u && setup->bRequest == 0x01u && (setup->wValue >> 8) == 0x01u) {
+        uint8_t rep[20];
+        int n = usb_gamepad_report(pad, rep, (int)sizeof rep);
+        return copy_out(out, max, rep, n, setup->wLength);
+    }
+#endif
     /* Class requests: not ours to guess at. */
     return -1;
 }

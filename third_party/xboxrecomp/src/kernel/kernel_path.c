@@ -467,6 +467,124 @@ translate:
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
+#include <dirent.h>
+#include <strings.h>
+#include <pthread.h>
+#include <fcntl.h>
+#include <stdint.h>
+
+/* Case-insensitive resolution under a base directory.
+ *
+ * The Xbox filesystem (FATX) is case-insensitive and titles are not careful:
+ * BLACK's disc has FEAudio.awd and Andy.aku next to all-lowercase names, and
+ * code asks for whichever spelling its author typed. Windows forgives that;
+ * ext4 and Android's sdcardfs/FUSE external storage do not (FUSE on Quest is
+ * case-insensitive for /sdcard/Android/data on some builds and not others, so
+ * this cannot be assumed either way).
+ *
+ * The exact path is tried first, so the common case costs one stat. Otherwise
+ * each component is matched with strcasecmp against its directory's entries,
+ * left to right. Components that do not exist keep their spelling -- that is
+ * what a create of a new file needs. Lookups are cached per directory+name in
+ * a small table, because the title opens the same few hundred files
+ * repeatedly. RECOMP_PATH_CASE=0 disables the fold. */
+#define CI_CACHE 512
+static struct { char *key; char *val; } s_ci_cache[CI_CACHE];
+static pthread_mutex_t s_ci_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static unsigned ci_hash(const char *s)
+{
+    unsigned h = 2166136261u;
+    for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+    return h;
+}
+
+/* Fold `rel` (forward slashes) under `base` into `out`. Returns 1 when every
+ * component exists (possibly after folding), 0 when some did not. */
+static int ci_resolve(const char *base, const char *rel, char *out, size_t out_size)
+{
+    struct stat st;
+    char cur[MAX_PATH], comp[256];
+    const char *p = rel;
+    int all_found = 1;
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *e = getenv("RECOMP_PATH_CASE");
+        enabled = !(e && *e == '0');
+    }
+    snprintf(out, out_size, "%s/%s", base, rel);
+    if (!enabled || stat(out, &st) == 0)
+        return enabled ? 1 : stat(out, &st) == 0;
+
+    pthread_mutex_lock(&s_ci_lock);
+    {
+        unsigned h = ci_hash(out) % CI_CACHE;
+        if (s_ci_cache[h].key && !strcmp(s_ci_cache[h].key, out)) {
+            snprintf(out, out_size, "%s", s_ci_cache[h].val);
+            pthread_mutex_unlock(&s_ci_lock);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&s_ci_lock);
+
+    snprintf(cur, sizeof(cur), "%s", base);
+    while (*p) {
+        size_t n = strcspn(p, "/");
+        if (n >= sizeof(comp)) n = sizeof(comp) - 1;
+        memcpy(comp, p, n);
+        comp[n] = '\0';
+        p += n;
+        while (*p == '/') p++;
+        if (!n) continue;
+
+        size_t cl = strlen(cur);
+        snprintf(cur + cl, sizeof(cur) - cl, "/%s", comp);
+        if (all_found && stat(cur, &st) != 0) {
+            DIR *d;
+            cur[cl] = '\0';
+            d = opendir(cl ? cur : "/");
+            int matched = 0;
+            if (d) {
+                struct dirent *de;
+                while ((de = readdir(d))) {
+                    if (!strcasecmp(de->d_name, comp)) {
+                        snprintf(cur + cl, sizeof(cur) - cl, "/%s", de->d_name);
+                        matched = 1;
+                        break;
+                    }
+                }
+                closedir(d);
+            }
+            if (!matched) {
+                snprintf(cur + cl, sizeof(cur) - cl, "/%s", comp);
+                all_found = 0;
+            }
+        }
+    }
+    {
+        char key[MAX_PATH];
+        snprintf(key, sizeof(key), "%s/%s", base, rel);
+        snprintf(out, out_size, "%s", cur);
+        if (all_found) {
+            pthread_mutex_lock(&s_ci_lock);
+            unsigned h = ci_hash(key) % CI_CACHE;
+            free(s_ci_cache[h].key);
+            free(s_ci_cache[h].val);
+            s_ci_cache[h].key = strdup(key);
+            s_ci_cache[h].val = strdup(cur);
+            pthread_mutex_unlock(&s_ci_lock);
+        }
+    }
+    return all_found;
+}
+
+/* Exported for the regression test and for host code (e.g. an Android shell
+ * locating default.xbe under the external files dir). */
+int xbox_path_resolve_case(const char *base, const char *rel, char *out, size_t out_size)
+{
+    return ci_resolve(base, rel, out, out_size);
+}
 
 static char s_game_dir[MAX_PATH];
 static char s_save_dir[MAX_PATH];
@@ -501,6 +619,127 @@ static void mkdir_p(const char* path)
         xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "mkdir %s: %s", tmp, strerror(errno));
 }
 
+/* The raw disk devices, as the Windows backend above maps them: a bare
+ * "\Device\Harddisk0\PartitionN" (nothing below it) opens an image file in
+ * the save dir. Partition0 carries the retail partition table at 0x800, which
+ * XAPI's utility-drive mount reads; without it the title boots to the
+ * dashboard with XLD_ERROR_INVALID_HARD_DISK. Same table and sizes as the
+ * Windows code; sparse via ftruncate. */
+#define XBOX_PART_TABLE_OFFSET 0x800
+#define XBOX_PART_IN_USE       0x80000000u
+
+static void xbox_write_partition_table(const char *path)
+{
+    static const struct { const char *name; uint32_t start, size; } parts[] = {
+        { "XBOX_PART_X",  0x00000400, 0x00177000 },  /* X: cache      */
+        { "XBOX_PART_Y",  0x00177400, 0x00177000 },  /* Y: cache      */
+        { "XBOX_PART_Z",  0x002EE400, 0x00177000 },  /* Z: cache      */
+        { "XBOX_PART_C",  0x00465400, 0x000FA000 },  /* C: system     */
+        { "XBOX_PART_E",  0x0055F400, 0x00465400 },  /* E: game/save  */
+    };
+    unsigned char sector[512];
+    size_t i;
+    FILE *f = fopen(path, "r+b");
+
+    if (!f)
+        f = fopen(path, "w+b");
+    if (!f)
+        return;
+    memset(sector, 0, sizeof(sector));
+    memcpy(sector, "****PARTINFO****", 16);
+    for (i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
+        unsigned char *e = sector + 48 + i * 32;   /* 16 magic + 32 reserved */
+        size_t n = strlen(parts[i].name);
+        uint32_t v[4] = { XBOX_PART_IN_USE, parts[i].start, parts[i].size, 0 };
+        memset(e, ' ', 16);
+        memcpy(e, parts[i].name, n < 16 ? n : 16);
+        memcpy(e + 16, v, sizeof(v));                /* little-endian host */
+    }
+    if (fseek(f, XBOX_PART_TABLE_OFFSET, SEEK_SET) == 0)
+        fwrite(sector, 1, sizeof(sector), f);
+    fclose(f);
+}
+
+static BOOL xbox_partition_device_path(const char *xbox_path, char *out, DWORD n)
+{
+    static const char *prefix = "\\Device\\Harddisk0\\Partition";
+    int len = match_prefix(xbox_path, prefix);
+    int digit;
+    const char *rest;
+
+    if (!len)
+        return FALSE;
+    digit = xbox_path[len];
+    if (digit < '0' || digit > '9')
+        return FALSE;
+    rest = xbox_path + len + 1;
+    if (*rest == '\\' || *rest == '/')
+        rest++;
+    if (*rest != '\0')
+        return FALSE;
+    snprintf(out, n, "%s/Partition%c.img", s_save_dir, digit);
+    return TRUE;
+}
+
+/* Partition sizes in sectors, as the retail table in Partition0.img says. */
+static const unsigned long long s_part_sectors[6] = {
+    0,             /* 0: whole disk                   */
+    0x00465400ull, /* 1: E: game and saves            */
+    0x000FA000ull, /* 2: C: system                    */
+    0x00177000ull, /* 3: X: cache                     */
+    0x00177000ull, /* 4: Y: cache                     */
+    0x00177000ull, /* 5: Z: cache                     */
+};
+
+/* Partition images are sparse by construction, not by filesystem: a PartitionN.img (1..5) holds only what the title
+ * wrote (BLACK formats the Z: utility drive, ~120 KB; the others stay empty), and the device is as large as the
+ * table says. Bytes past the file's end read as zeros (kernel_file.c) and the reported partition length is the
+ * nominal one (kernel_bridge.c IOCTL_DISK_GET_PARTITION_INFO, NtQueryInformationFile), exactly what a sparse
+ * file of the nominal size answers. Earlier builds ftruncate'd the images to 2.3 GB + 0.5 GB + 3 x 0.75 GB, which
+ * on a filesystem that does not keep holes (FUSE on some Android builds, FAT/exFAT cards) is ~5 GB written at
+ * first boot. Images left at full size by such a build keep working unchanged.
+ * Returns the nominal size in bytes when host_path is one of this save dir's PartitionN.img (N = 1..5), else 0. */
+unsigned long long xbox_partition_image_size(const char *host_path)
+{
+    size_t n = strlen(s_save_dir);
+    const char *p = host_path;
+    if (!p || !n || strncmp(p, s_save_dir, n) != 0)
+        return 0;
+    p += n;
+    if (strncmp(p, "/Partition", 10) != 0 || p[10] < '1' || p[10] > '5' || strcmp(p + 11, ".img") != 0)
+        return 0;
+    return s_part_sectors[p[10] - '0'] * 512ull;
+}
+
+static void xbox_create_save_layout(void)
+{
+    static const char *subs[] = { "TitleData", "UserData", "Cache", "SystemData" };
+    char path[MAX_PATH + 32];
+    int i;
+
+    mkdir_p(s_save_dir);
+    for (i = 0; i < (int)(sizeof(subs) / sizeof(subs[0])); i++) {
+        snprintf(path, sizeof(path), "%s/%s", s_save_dir, subs[i]);
+        mkdir_p(path);
+    }
+    snprintf(path, sizeof(path), "%s/Partition0.img", s_save_dir);
+    xbox_write_partition_table(path);
+    for (i = 1; i <= 5; i++) {
+        struct stat st;
+        snprintf(path, sizeof(path), "%s/Partition%d.img", s_save_dir, i);
+        if (stat(path, &st) == 0)
+            continue;               /* any size: grown only by what the title writes */
+        {
+            /* empty; the device's size comes from s_part_sectors (xbox_partition_image_size) */
+            int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0660);
+            if (fd < 0)
+                xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "create %s: %s", path, strerror(errno));
+            else
+                close(fd);
+        }
+    }
+}
+
 void xbox_path_init(const char* game_dir, const char* save_dir)
 {
     if (game_dir) {
@@ -516,6 +755,14 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
     if (save_dir) {
         snprintf(s_save_dir, sizeof(s_save_dir), "%s", save_dir);
     } else {
+#if defined(__ANDROID__)
+        /* No HOME or XDG on Android. Saves go beside the game data (the
+         * shell passes the app's external files dir as game_dir), so
+         * uninstalling the app removes them together and no storage
+         * permission is needed. The shell should normally pass an explicit
+         * save_dir (e.g. getFilesDir()/save); this is only the fallback. */
+        snprintf(s_save_dir, sizeof(s_save_dir), "%s/save", s_game_dir);
+#else
         /* XDG base-directory spec: $XDG_DATA_HOME or ~/.local/share */
         const char* xdg = getenv("XDG_DATA_HOME");
         if (xdg && xdg[0]) {
@@ -525,10 +772,12 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
             snprintf(s_save_dir, sizeof(s_save_dir), "%s/.local/share/xboxrecomp",
                      (home && home[0]) ? home : ".");
         }
+#endif
     }
 
     strip_trailing_slash(s_game_dir);
     strip_trailing_slash(s_save_dir);
+    xbox_create_save_layout();
 
     s_initialized = TRUE;
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_PATH, "Path init: game=%s, save=%s",
@@ -552,6 +801,11 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
         char linked[512];
         if (resolve_symlink(xbox_path, linked, sizeof(linked)))
             return xbox_translate_path(linked, host_path_buf, buf_size);
+    }
+
+    if (xbox_partition_device_path(xbox_path, host_path_buf, buf_size)) {
+        XBOX_TRACE(XBOX_LOG_PATH, "%s -> partition image %s", xbox_path, host_path_buf);
+        return TRUE;
     }
 
     for (int i = 0; i < PATH_RULE_COUNT; i++) {
@@ -581,15 +835,13 @@ translate:
             if (*p == '\\') *p = '/';
 
         if (sub_dir) {
-            snprintf(host_path_buf, buf_size, "%s%s/%s",
-                     base_dir, sub_dir, remainder_posix);
-
             /* Ensure the save directory tree exists. */
             char dir_path[MAX_PATH];
             snprintf(dir_path, sizeof(dir_path), "%s%s", base_dir, sub_dir);
             mkdir_p(dir_path);
+            ci_resolve(dir_path, remainder_posix, host_path_buf, buf_size);
         } else {
-            snprintf(host_path_buf, buf_size, "%s/%s", base_dir, remainder_posix);
+            ci_resolve(base_dir, remainder_posix, host_path_buf, buf_size);
         }
 
         {

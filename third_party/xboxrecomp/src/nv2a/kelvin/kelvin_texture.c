@@ -790,11 +790,21 @@ static __m128 sample_level(const KTexture *t, unsigned int level,
     float v = tc * (float)t->level_h[level];
 
     if (!linear) {
+#if defined(__aarch64__) && !defined(_WIN32)
+        /* x86's (int) (CVTTSS2SI; the AVX2 sampler's CVTTPS2DQ): a huge or NaN
+         * coordinate is INT_MIN, which wraps to texel 0, not a saturated INT_MAX. */
+        return fetch(t, level, face, kelvin_cvtt_i32(floorf(u)), kelvin_cvtt_i32(floorf(v)));
+#else
         return fetch(t, level, face, (int)floorf(u), (int)floorf(v));
+#endif
     }
     {
         float fu = u - 0.5f, fv = v - 0.5f;
+#if defined(__aarch64__) && !defined(_WIN32)
+        int x0 = kelvin_cvtt_i32(floorf(fu)), y0 = kelvin_cvtt_i32(floorf(fv));
+#else
         int x0 = (int)floorf(fu), y0 = (int)floorf(fv);
+#endif
         float ax = fu - (float)x0, ay = fv - (float)y0;
         __m128 c00, c10, c01, c11;
         unsigned int wx0, wx1, wy0, wy1;

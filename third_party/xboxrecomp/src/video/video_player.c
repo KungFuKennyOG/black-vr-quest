@@ -723,6 +723,11 @@ int video_dump_frame_bmp(const char *path)
 }
 
 #else  /* !_WIN32 -- Media Foundation is the decoder, so there is none here. */
+#if defined(__aarch64__)
+/* Quest: the stubs' prototypes (VideoFramePixels). The title's own XMV
+ * decoder plays BLACK's movies; this host player is never used there. */
+#include "video_player.h"
+#endif
 
 int  video_init(void)            { return -1; }
 void video_shutdown(void)        {}

@@ -801,6 +801,24 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     }
 
     int fd;
+    /* A partition device opened as a directory: as the Windows backend above,
+     * the path layer maps \Device\Harddisk0\PartitionN to PartitionN.img, and
+     * a title asking for free space (XAPI's E:/utility-drive checks; BLACK
+     * opens Partition1 so at startup) wants the volume, not the bytes. Use the
+     * directory holding the image, which is valid for the volume queries that
+     * follow. Without it BLACK boots to the dashboard (XLD_ERROR_INVALID_HARD_DISK). */
+    if (CreateOptions & XBOX_FILE_DIRECTORY_FILE) {
+        struct stat dst;
+        if (stat(host_path, &dst) == 0 && !S_ISDIR(dst.st_mode)) {
+            char *slash = strrchr(host_path, '/');
+            if (slash && slash != host_path) {
+                *slash = 0;
+                xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE,
+                         "NtCreateFile: directory open of a device image, "
+                         "using its containing directory instead");
+            }
+        }
+    }
     if (CreateOptions & XBOX_FILE_DIRECTORY_FILE) {
         if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
             mkdir(host_path, 0755);   /* EEXIST is fine */
@@ -852,6 +870,20 @@ NTSTATUS __stdcall xbox_NtReadFile(
         IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
         IoStatusBlock->Information = 0;
         return STATUS_UNSUCCESSFUL;
+    }
+    if ((ULONG)n < Length) {
+        /* A partition image past its written end: zeros up to the partition's nominal size, as the sparse file
+         * earlier builds created would read (kernel_path.c xbox_partition_image_size). */
+        const unsigned long long nominal = xbox_partition_image_size(w32_handle_path(FileHandle));
+        const off_t at = nominal ? lseek(fd, 0, SEEK_CUR) : -1;
+        if (at >= 0 && (unsigned long long)at < nominal) {
+            unsigned long long more = nominal - (unsigned long long)at;
+            if (more > (unsigned long long)(Length - (ULONG)n))
+                more = Length - (ULONG)n;
+            memset((char *)Buffer + n, 0, (size_t)more);
+            lseek(fd, at + (off_t)more, SEEK_SET);
+            n += (ssize_t)more;
+        }
     }
 
     IoStatusBlock->Information = (ULONG_PTR)n;
@@ -934,6 +966,11 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
     if (FileInformationClass != XboxFilePositionInformation) {
         if (fstat(fd, &st) != 0)
             return STATUS_UNSUCCESSFUL;
+        if (S_ISREG(st.st_mode)) {
+            /* a partition image is as large as its partition (sparse by construction, kernel_path.c) */
+            const unsigned long long nominal = xbox_partition_image_size(w32_handle_path(FileHandle));
+            if (nominal > (unsigned long long)st.st_size) st.st_size = (off_t)nominal;
+        }
     }
 
     switch (FileInformationClass) {

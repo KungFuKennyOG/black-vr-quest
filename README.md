@@ -1,3 +1,5 @@
+> **This fork is a Meta Quest 3 VR port — see [QUEST_PORT.md](QUEST_PORT.md).**
+
 # Black 2006 Recomp
 
 An experimental Windows recompilation of the original Xbox release of

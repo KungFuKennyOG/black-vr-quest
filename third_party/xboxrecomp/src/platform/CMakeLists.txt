@@ -25,6 +25,11 @@ if(WIN32)
     target_include_directories(platform INTERFACE ${XBOXRECOMP_SRC_DIR})
 else()
     add_library(platform STATIC win32_compat.c)
+    # AArch64 hosts trap device MMIO through SIGSEGV; the decoder replaces
+    # the x86-64 instruction decode used on Windows/Linux x86-64.
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+        target_sources(platform PRIVATE arm64_fault_decode.c)
+    endif()
     target_include_directories(platform PUBLIC
         ${XBOXRECOMP_SRC_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}

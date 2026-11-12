@@ -26,7 +26,14 @@
 #include <fenv.h>
 #include <xmmintrin.h>
 #define WIN32_LEAN_AND_MEAN
+#if defined(__ANDROID__)
+/* Quest (aarch64 Android): no Win32 SDK. black_android.h is the runtime's
+ * POSIX Win32 layer plus the few extras the game files use; <xmmintrin.h>
+ * above resolves to port/android/x86shim, i.e. sse2neon. */
+#include "black_android.h"
+#else
 #include <windows.h>
+#endif
 #include <xbox/xboxrecomp.h>
 #include "pc_video.h"
 #include "pc_video_menu.h"
@@ -60,8 +67,10 @@ typedef void (*recomp_func_t)(void);
 
 /* ── Register state (defined in xbox_memory_layout.c) ──────── */
 
+#ifndef RECOMP_REGFILE   /* Android: members of the one register-file object (recomp_regfile.h) */
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_ebx;
 extern RECOMP_TLS uint32_t g_esi, g_edi, g_esp;
+#endif
 extern ptrdiff_t g_xbox_mem_offset;
 /* Guest code span, set by the runtime from the XBE section table. */
 extern uint32_t g_xbox_code_lo, g_xbox_code_hi;
@@ -355,6 +364,84 @@ void sub_000C4570(void)
     _mm_setcsr(csr);
 }
 
+#if defined(__ANDROID__)
+/* Quest: a movie that is not on the disc dump.
+ *
+ * The open (0x000D3620, manager state 3) creates the XMV decoder from the file
+ * at manager+0x44; when that fails it calls the movie's error callback
+ * ([movie+0x68] = 0x0020B3B0, the disc-error path) and returns 0, and the
+ * manager retries the open every frame: "THERE IS A PROBLEM WITH THE DISC".
+ * The skip above can only end a movie that is already playing, so a dump
+ * without videos/ (the Quest has no host FMV player and the port skips movies
+ * by default) never reached the title. When the same variables would skip the
+ * movie and its file is absent on the host, the callback is answered here
+ * instead: the manager goes to state 0x1F, the step after a movie's close
+ * (0x00209D40: its post-movie restore, then idle 0x37), as if the movie had
+ * played to its end. Any other error, or a present file, keeps the native
+ * path. */
+static recomp_func_t black_movie_error_native;
+
+static int black_movie_skip_env(void)
+{
+    if (movie_skip_all < 0) {
+        const char *env = getenv("RECOMP_BLACK_SKIP_MOVIES");
+        movie_skip_all = env && *env && *env != '0';
+    }
+    if (movie_skip_startup < 0) {
+        const char *env = getenv("RECOMP_BLACK_SKIP_STARTUP_VIDEOS");
+        movie_skip_startup = env && *env && *env != '0';
+    }
+    return movie_skip_all || movie_skip_startup;
+}
+
+static int black_movie_missing_skip(void)
+{
+    uint32_t main, manager;
+    char path[64], stem[64];
+    xbox_host_char host[MAX_PATH];
+    unsigned i;
+    if (!black_movie_skip_env() || !black_pc_ram_span(0x002D45F0u, 4u)) return 0;
+    main = GUEST32(0x002D45F0u);
+    if (!black_pc_ram_span(main, 0x20428u)) return 0;
+    manager = main + 0x2026Cu;
+    if (GUEST32(manager + 0x1A8u) != 3u || GUEST32(manager) != g_edi) return 0;
+    for (i = 0; i < sizeof(path) && (path[i] = (char)GUEST8(manager + 0x44u + i)) != 0; i++) {}
+    if (i == sizeof(path) || !path[0]) return 0;
+    for (i = 0; i < sizeof(stem) && (stem[i] = (char)GUEST8(manager + 0x84u + i)) != 0; i++) {}
+    if (i == sizeof(stem)) return 0;
+    if (!movie_skip_all && _stricmp(stem, "LO_n_US")) return 0;
+    if (!xbox_translate_path(path, host, MAX_PATH) || access(host, F_OK) == 0) return 0;
+    GUEST32(manager + 0x1A8u) = 0x1Fu;
+    {
+        static char logged[8][64];
+        int k, seen = 0;
+        for (k = 0; k < 8 && logged[k][0]; k++) if (!strcmp(logged[k], stem)) seen = 1;
+        if (!seen) {
+            if (k < 8) snprintf(logged[k], sizeof(logged[k]), "%s", stem);
+            fprintf(stderr, "[MOVIE] %s (%s) is not on the disc: treated as played (%s)\n", stem, path,
+                    movie_skip_all ? "RECOMP_BLACK_SKIP_MOVIES" : "RECOMP_BLACK_SKIP_STARTUP_VIDEOS");
+            fflush(stderr);
+        }
+    }
+    return 1;
+}
+
+static void black_movie_open_error(void)
+{
+    unsigned csr = _mm_getcsr();
+    int skip;
+    _mm_setcsr(0x1F80u);
+    skip = black_movie_missing_skip();
+    _mm_setcsr(csr);
+    if (skip) {
+        g_esp += 4;     /* ret: the caller pops its one argument */
+        return;
+    }
+    if (!black_movie_error_native) black_movie_error_native = recomp_lookup(0x0020B3B0u);
+    black_movie_error_native();
+}
+#endif
+
 /* Optional BLACK presentation interval experiment.
  *
  * BLACK initializes its presentation interval to adaptive TWO (0x80000002)
@@ -554,6 +641,41 @@ int black_idle_yield_skip(void)
     return !keep && black_step_halved && black_hz >= 120;
 }
 
+#if !defined(_WIN32)
+#include <sched.h>
+#include <time.h>
+/* D3D's push-buffer space wait (sub_0026CC10, the loop at 0x0026CD80) re-reads the GPU's GET until the span it needs is
+ * free. On the console that is GPU time; here GET is advanced by the Kelvin pusher, another host thread, so the loop
+ * lasts as long as the pusher and the backend take to drain the buffer, including every wait for a vblank: it was
+ * 96% of the game thread's CPU in the menus and up to 97% in level 1 (port/notes/perf.md 9), a big core kept at 100%
+ * that the pusher, the APU or the compositor could use. scripts/generate.py calls this on each further iteration
+ * (spins = 1, 2, ...): spin briefly, as a short wait is the common case, then yield, then sleep 50-200 us per check
+ * (the buffer is full then, so the pusher has plenty queued). The guest's state is not touched.
+ * RECOMP_BLACK_PB_SPIN=1 keeps the plain spin. The Windows build keeps the spin (the hook is ((void)0) there). */
+void black_pb_space_wait(unsigned spins)
+{
+    static int spin_only = -1;
+    if (spin_only < 0) { const char *e = getenv("RECOMP_BLACK_PB_SPIN"); spin_only = e && *e == '1'; }
+    if (spin_only) return;
+    if (spins <= 64) {
+#if defined(__aarch64__)
+        __asm__ __volatile__("yield");
+#elif defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#endif
+        return;
+    }
+    if (spins <= 128) { sched_yield(); return; }
+    {
+        /* 50 us, backing off to 200 us in a long wait (a whole SwiftShader frame, a vblank): a wakeup costs a few us
+         * of kernel time, so a 50 us poll would be ~6% of the wait */
+        const unsigned sleeps = spins - 128u;
+        struct timespec ts = { 0, sleeps < 16u ? 50000 : sleeps < 48u ? 100000 : 200000 };
+        nanosleep(&ts, NULL);
+    }
+}
+#endif
+
 /* BEGIN BLACK_WEAPON_RUNTIME_MODES */
 /* Silver weapon selection is native by default; force modes affect this process only. */
 int black_silver_weapons_mode(void)
@@ -710,7 +832,13 @@ static void black_sim_log(void)
     }
 }
 
+#if defined(__ANDROID__)
+/* Defined by the D3D11 backend (kelvin_gpu.c), which the Quest build replaces
+ * with the Vulkan one; weak so a backend that defines it wins. */
+__attribute__((weak)) volatile DWORD g_black_main_tid;
+#else
 extern volatile DWORD g_black_main_tid;
+#endif
 extern void xbox_PinThread(const char *role);
 
 void sub_0002BA70(void)
@@ -889,6 +1017,13 @@ static void black_ao_camera_publish(uint32_t camera)
 }
 /* END BLACK_AO_CAMERA */
 
+#ifdef BLACK_VR
+static void black_vr_vm_push(int is_vm);
+static void black_vr_vm_pop(void);
+static void black_vr_upload(uint32_t upload);
+static void black_vr_upload_at(uint32_t upload, int reg);
+#endif
+
 /* BEGIN BLACK_VIEWMODEL_OWNER
  * 1D25D0 submits the first-person mesh and its suppressor using the same
  * actor+2C8 material parameter. 176F60 preserves that parameter in its native
@@ -934,6 +1069,9 @@ uint32_t black_viewmodel_draw_begin(uint32_t material_parameters)
     const uint32_t previous = black_vm_active;
     uint32_t renderer;
     black_vm_active = 0u;
+#ifdef BLACK_VR
+    black_vr_vm_push(black_vm_owner && material_parameters == black_vm_owner + 0x2C8u);
+#endif
     if (!black_vm_owner || material_parameters != black_vm_owner + 0x2C8u ||
         black_vm_scale_bits == 0x3F800000u || !black_pc_ram_span(0x2D67F4u, 4u)) return previous;
     renderer = GUEST32(0x2D67F4u);
@@ -945,6 +1083,9 @@ uint32_t black_viewmodel_draw_begin(uint32_t material_parameters)
 void black_viewmodel_draw_end(uint32_t previous)
 {
     black_vm_active = previous;
+#ifdef BLACK_VR
+    black_vr_vm_pop();
+#endif
 }
 
 static void black_viewmodel_constants_kind(uint32_t upload, int muzzle)
@@ -984,6 +1125,9 @@ static void black_viewmodel_constants_kind(uint32_t upload, int muzzle)
 void black_viewmodel_constants(uint32_t upload)
 {
     black_viewmodel_constants_kind(upload, 0);
+#ifdef BLACK_VR
+    black_vr_upload(upload);
+#endif
 }
 
 /* The player's muzzle flash is drawn directly by 16B1E0 rather than through
@@ -1000,6 +1144,9 @@ void black_viewmodel_muzzle_constants(uint32_t upload, uint32_t caller)
     if (!black_pc_ram_span(player, 0x4D0u) || player + 0x30u != black_vm_owner) return;
     previous = black_viewmodel_draw_begin(black_vm_owner + 0x2C8u);
     black_viewmodel_constants_kind(upload, 1);
+#ifdef BLACK_VR
+    black_vr_upload_at(upload, 0x70);   /* D4A50 uploads the flash's MVP to c112..c115 (gun-latch.md) */
+#endif
     black_viewmodel_draw_end(previous);
 }
 /* END BLACK_VIEWMODEL_OWNER */
@@ -1091,7 +1238,9 @@ extern void sub_001EE820_gen(void);
 extern int kelvin_mark_view(uint32_t va, int mode, int slot, int x0, int y0, int x1, int y1);
 extern void sub_00268880(void);
 extern uint32_t xbox_PhysicalAddressOf(uint32_t va);
+#ifndef RECOMP_REGFILE
 extern RECOMP_TLS uint32_t g_ebp, g_seh_ebp;
+#endif
 enum { BLACK_VIEW_FRAME = 1, BLACK_VIEW_FIT = 2 };    /* KG_VIEW_* (kelvin_gpu.h) */
 
 static int black_split_pass;                          /* 2 while player two's camera and world are produced */
@@ -1119,6 +1268,10 @@ static void black_split_camera(uint32_t camera)
     _mm_setcsr(caller_csr);
 }
 /* END BLACK_SPLITSCREEN */
+
+#ifdef BLACK_VR
+#include "black_vr.inc"
+#endif
 
 /* The gameplay FOV is a video setting too (pc_video.c): the Video Settings page changes it while the game runs. */
 static void black_fov_refresh(void)
@@ -1160,7 +1313,12 @@ void sub_000D2F40(void)
     black_aspect_refresh();
     aspect_adjusted = black_camera_aspect_begin(camera, aspect_saved);
     black_fov_refresh();
+#ifdef BLACK_VR
+    black_vr_camera_begin(camera);   /* stereo: a lens covering both eyes; the FOV policy stands down */
+    if (black_fov_vertical && !black_vr_stereo() && black_pc_ram_span(0x002D67F4u, 4u) &&
+#else
     if (black_fov_vertical && black_pc_ram_span(0x002D67F4u, 4u) &&
+#endif
         black_pc_ram_span(0x002D12B8u, 4u)) {
         const uint32_t renderer = GUEST32(0x002D67F4u);
         const uint32_t owner = GUEST32(0x002D12B8u);
@@ -1230,6 +1388,9 @@ void sub_000D2F40(void)
     if (adjusted) GUEST32(camera + 0x70u) = new_window;
     if (split_aspect) GUEST32(camera + 0x74u) = split_aspect_doubled;
     sub_000D2F40_gen();
+#ifdef BLACK_VR
+    black_vr_camera_restore(camera);
+#endif
     if (split_aspect) GUEST32(camera + 0x74u) = split_aspect;
     if (adjusted) GUEST32(camera + 0x70u) = saved_window;
     if (aspect_adjusted) {
@@ -1239,6 +1400,9 @@ void sub_000D2F40(void)
     black_ao_camera_publish(camera);
     black_photo_camera(camera);
     if (black_split_pass == 2 && camera == black_photo_world_camera()) black_split_camera(camera);
+#ifdef BLACK_VR
+    black_vr_camera_after(camera);
+#endif
 }
 /* END BLACK_PC_FOV */
 
@@ -2524,7 +2688,13 @@ void sub_001EE820(void)
     const unsigned csr = _mm_getcsr();
     uint32_t camera, ret, player;
     if (!pc_split_enabled() || !(camera = black_photo_world_camera()) || !black_pc_ram_span(esp, 8u)) {
+#ifdef BLACK_VR
+        black_vr_world_mark(1);
         sub_001EE820_gen();
+        black_vr_world_mark(0);
+#else
+        sub_001EE820_gen();
+#endif
         return;
     }
     ret = GUEST32(esp);
@@ -3310,6 +3480,9 @@ void sub_00168A30(void)
     /* photo mode keeps photos sharp: the camera it turns is not a fast look */
     if (black_motion_blur_off || pc_photo_active())
         GUEST32(effect + 0x20u) = 0u;
+#ifdef BLACK_VR
+    if (black_vr_stereo()) GUEST32(effect + 0x20u) = 0u;   /* camera-motion blur: head motion is not camera motion */
+#endif
 }
 /* END BLACK_PC_MOTION_BLUR */
 
@@ -3335,6 +3508,9 @@ void sub_001772E0(void)
     pc_video_get(&video);
     _mm_setcsr(caller_csr);
     if (video.action_blur_off || pc_photo_active()) GUEST32(effect + 0x34u) = 0u;   /* photo mode: no reload/aim blur */
+#ifdef BLACK_VR
+    if (black_vr_stereo()) GUEST32(effect + 0x34u) = 0u;   /* full-screen reload/aim blur in a headset */
+#endif
     sub_001772E0_gen();
     GUEST32(effect + 0x34u) = mode;
 }
@@ -3864,6 +4040,11 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
     for (i = 0; i < g_itrace_n; i++)
         if (g_itrace_va[i] == xbox_va)
             return g_itrace_wrappers[i];
+#if defined(__ANDROID__)
+    /* Quest: the movie open's error callback (see black_movie_open_error). */
+    if (xbox_va == 0x0020B3B0u)
+        return black_movie_open_error;
+#endif
     /* This XBE thunk shares the implementation of the discovered 0x0020B3B0
      * async worker thunk. Keep the missing-file recovery callback resolvable. */
     if (xbox_va == 0x0020B6D0u)
@@ -4943,6 +5124,9 @@ void sub_001BD3F0(void)
     _mm_setcsr(caller_csr);
     sub_001BD3F0_gen();
     black_mouse_look(camera);
+#ifdef BLACK_VR
+    black_vr_look(camera);           /* after the pad and mouse: the VR aim has the last word */
+#endif
     black_crosshair_tick(camera);
 
 }
@@ -5045,9 +5229,13 @@ void sub_00102840(void) { black_menu_render(); }
 void sub_00102D90(void) { black_menu_text_prepare(); }
 void sub_00114030(void) { black_menu_text_destroy(); }
 
+#if !defined(__ANDROID__)   /* kernel.h declares it there (host paths are char) */
 extern BOOL xbox_translate_path(const char *xbox_path, WCHAR *host_path_buf, DWORD buf_size);
+#endif
 #include "black_pc_branding.h"
+#ifndef RECOMP_REGFILE
 extern RECOMP_TLS uint32_t g_ebp, g_seh_ebp;
+#endif
 
 /* BEGIN BLACK_PC_BRANDING_RUNTIME
  * Stable process-lifetime guest copies; localized asset bytes remain untouched.

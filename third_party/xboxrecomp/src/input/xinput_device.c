@@ -14,7 +14,64 @@
 #include <string.h>
 
 /* ======================================================================== */
-#if defined(_WIN32)
+#if defined(BLACK_VR)
+/* ====================  Quest VR backend  =============================== */
+/* ======================================================================== */
+
+/* Port 0 is the Touch controllers, mapped to an Xbox pad by the XR shell
+ * (port/quest/vr_bridge.h: vr_get_pad, snap/smooth turning host-side). The
+ * report then takes the normal route: usb_gamepad_report -> OHCI -> XAPI. */
+#include "vr_bridge.h"
+#include "vr_input_map.h"
+
+static DWORD g_vr_packet;
+static VrPadState g_vr_last;
+
+void xbox_InputInit(void) {}
+
+DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
+{
+    VrPadState pad;
+    uint16_t digital;
+    if (dwPort != 0 || !pState || !vr_get_pad(&pad))
+        return ERROR_DEVICE_NOT_CONNECTED;
+    memset(pState, 0, sizeof(*pState));
+    if (memcmp(&pad, &g_vr_last, sizeof(pad))) { g_vr_last = pad; ++g_vr_packet; }
+    pState->dwPacketNumber = g_vr_packet;
+    vr_pad_to_xbox(&pad, &digital, pState->Gamepad.bAnalogButtons);
+    pState->Gamepad.wButtons = digital;
+    pState->Gamepad.sThumbLX = pad.thumb_lx;
+    pState->Gamepad.sThumbLY = pad.thumb_ly;
+    pState->Gamepad.sThumbRX = pad.thumb_rx;
+    pState->Gamepad.sThumbRY = pad.thumb_ry;
+    return ERROR_SUCCESS;
+}
+
+DWORD xbox_InputSetState(DWORD dwPort, const XBOX_VIBRATION *pVibration)
+{
+    if (dwPort != 0 || !pVibration) return ERROR_DEVICE_NOT_CONNECTED;
+    vr_set_rumble(pVibration->wLeftMotorSpeed, pVibration->wRightMotorSpeed);
+    return ERROR_SUCCESS;
+}
+
+BOOL xbox_InputIsConnected(DWORD dwPort)
+{
+    VrPadState pad;
+    return dwPort == 0 && vr_get_pad(&pad);
+}
+
+DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILITIES *pCaps)
+{
+    (void)dwFlags;
+    if (dwPort != 0 || !pCaps) return ERROR_DEVICE_NOT_CONNECTED;
+    memset(pCaps, 0, sizeof(*pCaps));
+    pCaps->Type = 1;      /* XINPUT_DEVTYPE_GAMEPAD */
+    pCaps->SubType = 1;   /* XINPUT_DEVSUBTYPE_GAMEPAD */
+    return ERROR_SUCCESS;
+}
+
+/* ======================================================================== */
+#elif defined(_WIN32)
 /* ====================  XInput backend  ================================== */
 /* ======================================================================== */
 

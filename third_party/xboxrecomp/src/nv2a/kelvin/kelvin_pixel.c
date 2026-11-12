@@ -540,7 +540,13 @@ static KPIX_NOINLINE bool mux_select(const KPixelState *ps, float r0a)
     if (ps->flags & PS_COMBINERCOUNT_MUX_MSB) {
         return r0a >= 0.5f;
     }
+#if defined(__aarch64__) && !defined(_WIN32)
+    /* (unsigned int) of a negative r0.a*255 is the low bits of the x86 64-bit
+     * conversion there; FCVTZU would give 0 and flip the mux. */
+    return (kelvin_cvtt_u32(r0a * 255.0f) & 1u) == 1u;
+#else
     return (((unsigned int)(r0a * 255.0f)) & 1u) == 1u;
+#endif
 }
 
 /* ---- the RGB portion on SSE lanes 0-2 ------------------------------------
@@ -1378,7 +1384,11 @@ static bool shade_tail(const KPixelState *ps, const KelvinTarget *t, int x, int 
                        float zvalue, const float frag[4])
 {
     if (ps->alpha_test && ps->alpha_func != 7) {
+#if defined(__aarch64__) && !defined(_WIN32)
+        int fa = kelvin_cvtt_i32(floorf(frag[3] * 255.0f + 0.5f));   /* x86's (int): NaN -> INT_MIN */
+#else
         int fa = (int)floorf(frag[3] * 255.0f + 0.5f);
+#endif
         bool pass;
         switch (ps->alpha_func) {
         case 0: pass = false; break;

@@ -366,7 +366,7 @@ void xa2_get_output_stats(Xa2OutputStats *stats)
     }
 }
 
-#else /* !_WIN32 -- POSIX stubs (no audio output yet) */
+#elif !defined(__ANDROID__) /* POSIX stubs; Android uses apu_aaudio.c */
 
 int  xa2_init(void)                                   { return 0; }
 void xa2_shutdown(void)                               {}
@@ -375,4 +375,4 @@ int  xa2_submit_samples(const int16_t *s, int n)      { (void)s; (void)n; return
 int  xa2_get_buffer_size(void)                        { return 0; }
 void xa2_get_output_stats(Xa2OutputStats *s)           { memset(s, 0, sizeof(*s)); }
 
-#endif /* _WIN32 */
+#endif /* _WIN32 / POSIX stubs */

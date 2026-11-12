@@ -336,14 +336,41 @@ typedef union RecompMmx {
 
 #ifndef RECOMP_XMM_DEFINED
 #define RECOMP_XMM_DEFINED
+/* Same host selection as recomp_types.h: SSE on x86, sse2neon on arm64 (whose
+ * __m128 is a 16-byte NEON vector with the same size and alignment), and a
+ * plain aligned float[4] where neither exists or RECOMP_FORCE_PORTABLE asks.
+ * Every variant is 16 bytes, 16-aligned, so the TLS register file has one
+ * layout whichever header a translation unit saw first. */
+#if (defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__)) \
+    && !defined(RECOMP_FORCE_PORTABLE)
 #include <emmintrin.h>
+#define RECOMP_M128 __m128
+#elif (defined(__aarch64__) || defined(_M_ARM64)) && !defined(RECOMP_FORCE_PORTABLE)
+#ifndef SSE2NEON_PRECISE_MINMAX
+#define SSE2NEON_PRECISE_MINMAX 1
+#endif
+#include "sse2neon.h"
+#define RECOMP_M128 __m128
+#else
+#ifndef RECOMP_SIMD_PORTABLE
+#define RECOMP_SIMD_PORTABLE 1
+#endif
+typedef struct RecompM128 {
+#if defined(_MSC_VER)
+    __declspec(align(16)) float f[4];
+#else
+    float f[4] __attribute__((aligned(16)));
+#endif
+} RecompM128;
+#define RECOMP_M128 RecompM128
+#endif
 typedef union RecompXmm {
     float    f[4];
     double   d[2];
     uint32_t u[4];
     int32_t  i[4];
     uint64_t q[2];
-    __m128   m;
+    RECOMP_M128 m;
 } RecompXmm;
 #endif
 
@@ -382,7 +409,16 @@ typedef union RecompXmm {
  * thread gets its own from xbox_AllocThreadTib() and points g_fs_base at
  * it. */
 #define XBOX_TIB_MAIN       0x00004000
+/* Android: the register file is one TLS object (templates/runtime/recomp_regfile.h; the same decision as
+ * recomp_types.h makes). Windows and the other hosts keep the separate variables. */
+#if !defined(RECOMP_REGFILE) && !defined(RECOMP_NO_REGFILE) && defined(__ANDROID__) && !defined(_WIN32)
+#  define RECOMP_REGFILE 1
+#endif
+#if defined(RECOMP_REGFILE)
+#include "../../templates/runtime/recomp_regfile.h"
+#else
 extern RECOMP_TLS uint32_t g_fs_base;
+#endif
 #define XBOX_FS_BASE        g_fs_base
 
 #define XBOX_STACK_BASE     0x00780000

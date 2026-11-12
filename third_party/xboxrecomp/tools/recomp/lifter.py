@@ -3032,16 +3032,24 @@ class Lifter:
             if nops >= 2:
                 src = _fmt_operand_read(ops[1])
                 return [_sse_write(ops[0], f"(float)(int32_t){src}") + " /* cvtsi2ss */"]
-        if m in ("cvtss2si", "cvttss2si"):
+        # Float to int32 goes through RECOMP_CVT(T)_F2I32 rather than a C
+        # cast. The cast is undefined for NaN and out-of-range values, and the
+        # hosts disagree on what it does there: x86 returns 0x80000000 (the
+        # integer indefinite), arm64 fcvtzs saturates. On x86 the helper is
+        # the same cvtt instruction the cast compiled to; elsewhere it keeps
+        # the x86 answer. cvtss2si/cvtsd2si should round by MXCSR.RC, but the
+        # bare cast truncated them; RECOMP_CVTR_F2I32 keeps that truncation by
+        # default so existing builds behave exactly as before, and rounds
+        # properly with -DRECOMP_CVT_ROUND_MXCSR (see recomp_types.h).
+        if m in ("cvtss2si", "cvttss2si", "cvtsd2si", "cvttsd2si"):
             if nops >= 2:
-                return [_fmt_operand_write(ops[0], f"(int32_t){_sse_read(ops[1])}") + f" /* {m} */"]
+                helper = "RECOMP_CVTT_F2I32" if m.startswith("cvtt") else "RECOMP_CVTR_F2I32"
+                return [_fmt_operand_write(ops[0], f"{helper}({_sse_read(ops[1])})") + f" /* {m} */"]
         if m == "cvtsi2sd":
             if nops >= 2:
                 src = _fmt_operand_read(ops[1])
                 return [_sse_write(ops[0], f"(double)(int32_t){src}") + " /* cvtsi2sd */"]
-        if m in ("cvtsd2si", "cvttsd2si"):
-            if nops >= 2:
-                return [_fmt_operand_write(ops[0], f"(int32_t){_sse_read(ops[1])}") + f" /* {m} */"]
+
         if m == "cvtss2sd":
             if nops >= 2:
                 return [_sse_write(ops[0], f"(double){_sse_read(ops[1])}") + " /* cvtss2sd */"]

@@ -47,7 +47,11 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#if defined(__aarch64__) && !defined(_WIN32)
+#include "platform/win32_compat.h"
+#else
 #include <windows.h>
+#endif
 #include <xmmintrin.h>
 
 #include "kelvin_workers.h"
@@ -60,6 +64,15 @@
 
 static int spin_us_env(const char *env)
 {
+#if defined(__ANDROID__)
+    /* Quest: any budget 0..5000 us (blackvr.ini raster_spin_us). With the Vulkan backend the raster threads only shade
+     * the vertices of draws whose vertex program is not compiled yet, so they are idle almost always, and every
+     * microsecond spent spinning after a job is a core the XR runtime does not get. */
+    if (env && *env >= '0' && *env <= '9') {
+        int v = atoi(env);
+        return v > 5000 ? 5000 : v;
+    }
+#endif
     if (env && strcmp(env, "50") == 0) return 50;
     if (env && strcmp(env, "250") == 0) return 250;
     return KWORK_SPIN_US;
@@ -184,6 +197,15 @@ static LONG load(volatile LONG *v)
      * publication. */
 #ifdef _MSC_VER
     return ReadAcquire(v);
+#elif defined(__aarch64__)
+    /* SEQ_CST, not ACQUIRE: several waits are store-buffering handshakes
+     * (sleepers++ then read gen, against gen++ then read sleepers; busy++
+     * then read active, against active=0 then read busy). x86 forbids that
+     * reordering after a locked RMW; C11 does not for an acquire load, and
+     * with RCpc (-mcpu=cortex-a78c, armv8.3+) clang emits LDAPR, which may
+     * pass the preceding LDADDAL/SWPAL. A SEQ_CST load is always LDAR, the
+     * same instruction armv8.2-a acquire gives today, so it costs nothing. */
+    return __atomic_load_n(v, __ATOMIC_SEQ_CST);
 #else
     return __atomic_load_n(v, __ATOMIC_ACQUIRE);
 #endif
@@ -267,6 +289,8 @@ static LONG64 load64(volatile LONG64 *v)
 {
 #ifdef _MSC_VER
     return ReadAcquire64(v);
+#elif defined(__aarch64__)
+    return __atomic_load_n(v, __ATOMIC_SEQ_CST);   /* as load() */
 #else
     return __atomic_load_n(v, __ATOMIC_ACQUIRE);
 #endif

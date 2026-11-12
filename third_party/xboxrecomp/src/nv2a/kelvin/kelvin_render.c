@@ -313,9 +313,28 @@ static bool sync_semaphores(void)
     return on != 0;
 }
 
+#if defined(__aarch64__) && !defined(_WIN32)
+/* A store-release of a guest word the title polls. STLR needs natural
+ * alignment (x86 stores do not), so a misaligned word gets a release fence
+ * and a plain store instead, which orders the same. */
+static void semaphore_store_release(void *p, uint32_t v)
+{
+    if (!((uintptr_t)p & 3)) {
+        __atomic_store_n((uint32_t *)p, v, __ATOMIC_RELEASE);
+    } else {
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        memcpy(p, &v, 4);
+    }
+}
+#endif
+
 static void semaphore_write_thunk(uintptr_t where, uintptr_t value)
 {
+#if defined(__aarch64__) && !defined(_WIN32)
+    semaphore_store_release((void *)where, (uint32_t)value);
+#else
     *(volatile uint32_t *)where = (uint32_t)value;
+#endif
 }
 
 void kelvin_render_semaphore_release(KelvinState *pg, uint32_t value)
@@ -341,7 +360,13 @@ void kelvin_render_semaphore_release(KelvinState *pg, uint32_t value)
             return;
         }
         kelvin_render_sync_for(KT_SYNC_SEMAPHORE);
+#if defined(__aarch64__) && !defined(_WIN32)
+        /* Release: the surfaces the raster threads wrote (acquired by the
+         * sync above) are visible before the title can see the value. */
+        semaphore_store_release(kelvin_guest(va), value);
+#else
         *(volatile uint32_t *)kelvin_guest(va) = value;
+#endif
         return;
     }
     /* Behind every draw before it: their triangles are queued first. */

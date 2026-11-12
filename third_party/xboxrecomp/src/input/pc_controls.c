@@ -11,7 +11,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#if defined(__ANDROID__)
+#include "win32_android.h"   /* port/android/include */
+#else
 #include <windows.h>
+#endif
 
 /* BLACK's controls (names table 0x2AC290). The menu font draws the face buttons, White, Black and the d-pad
  * directions; triggers, START, BACK and the stick clicks are its blank button and stick with a mark on them. */

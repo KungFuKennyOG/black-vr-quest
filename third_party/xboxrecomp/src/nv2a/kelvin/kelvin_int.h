@@ -277,6 +277,24 @@ static inline uint32_t kelvin_f2u(float f)
     return v;
 }
 
+#if defined(__aarch64__) && !defined(_WIN32)
+/* Float -> integer as the x86-64 build converts, for the C casts whose operand can be out of
+ * range or NaN (UB in C; the hosts disagree). x86-64: (int) is CVTTSS2SI, giving INT32_MIN for
+ * out-of-range and NaN; (unsigned) is the 64-bit CVTTSS2SI with the low 32 bits kept (MSVC's
+ * default /fpcvt:BC, and gcc/clang), so -127.5 -> 0xFFFFFF81 and out-of-range/NaN -> 0.
+ * AArch64's FCVTZS/FCVTZU saturate (and FCVTZU takes negatives to 0) instead. In range, both
+ * are the plain truncation. */
+static inline int32_t kelvin_cvtt_i32(float x)
+{
+    return (x >= -2147483648.0f && x < 2147483648.0f) ? (int32_t)x : INT32_MIN;
+}
+static inline uint32_t kelvin_cvtt_u32(float x)
+{
+    return (x >= -9223372036854775808.0f && x < 9223372036854775808.0f)
+               ? (uint32_t)(uint64_t)(int64_t)x : 0u;
+}
+#endif
+
 /* Count an unimplemented feature, and say so the first time. */
 void kelvin_unsupported(int what, const char *detail, uint32_t value);
 
@@ -304,6 +322,13 @@ void kelvin_lock_yield(void);
 bool kelvin_lock_wanted(void);
 bool kelvin_mmio_start(KelvinState *pg);
 void kelvin_mmio_report(void);
+#if (defined(__aarch64__) || defined(XR_HOST_FAULT_GLUE)) && !defined(_WIN32)
+/* AArch64: the channel's DMA_PUT/GET words (USER page) and CACHE1 GET, with
+ * the ordering x86 gave for free: PUT read with acquire, GET published with
+ * release, through the write-trapped page's alias (kelvin_mmio.c). */
+uint32_t kelvin_user_r32_acquire(uint32_t offset);
+void kelvin_user_w32_release(uint32_t offset, uint32_t v);
+#endif
 /* Recompute the interrupt line after a source changed. Lock held. */
 void kelvin_irq_update(void);
 /* Before a method on channel `chid`: PGRAPH holds another channel's context,

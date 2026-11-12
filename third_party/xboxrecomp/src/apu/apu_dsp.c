@@ -434,6 +434,248 @@ static void dsp_reset_core(DSPState *dsp)
     if (dsp->engine_ready) mcpx_dsp_engine_reset(&dsp->engine);
 }
 
+/* RECOMP_APU_DSP_STATS=<prefix>: every 15000 frames (10 s) print each core's
+ * cycles used per frame and how often its frame ended in a halt, and write the
+ * JIT's block profile and P memory to <prefix>.{gp,ep}.{prof,pram}. Diagnostic;
+ * the profile's own clock reads slow the DSP while it is on. */
+static uint64_t s_dsp_ff_ticks, s_dsp_ff_skipped, s_dsp_ff_verified, s_dsp_ff_mismatch;
+
+typedef struct DspDiag {
+    uint64_t frames, used, halts;
+} DspDiag;
+static const char *dsp_diag_prefix(void)
+{
+    static int init;
+    static const char *p;
+    if (!init) {
+        p = getenv("RECOMP_APU_DSP_STATS");
+        if (p && !*p) p = NULL;
+        init = 1;
+    }
+    return p;
+}
+
+static void dsp_diag_frame(DSPState *dsp, int32_t budget_left, bool halted)
+{
+    static DspDiag diag[2];
+    DspDiag *g = &diag[dsp->is_gp ? 0 : 1];
+    const char *prefix = dsp_diag_prefix();
+    const char *core = dsp->is_gp ? "gp" : "ep";
+    char path[512];
+    if (!prefix) return;
+    if (!g->frames) {
+        snprintf(path, sizeof path, "%s.%s.prof", prefix, core);
+        dsp56300_dump_profile(dsp->engine.jit, path);   /* enables profiling */
+    }
+    g->frames++;
+    g->used += (uint64_t)((int64_t)DSP_FRAME_CYCLES - (budget_left > 0 ? budget_left : 0));
+    g->halts += halted;
+    if (g->frames % 15000 == 0) {
+        FILE *f;
+        fprintf(stderr, "[DSPSTAT] %s frames=%llu cycles/frame=%.0f of %u halted=%.1f%% pc=%06X "
+                "fastfwd ticks=%llu iterations=%llu verified=%llu mismatches=%llu\n",
+                core, (unsigned long long)g->frames, (double)g->used / g->frames, DSP_FRAME_CYCLES,
+                100.0 * g->halts / g->frames, dsp->core.pc,
+                (unsigned long long)s_dsp_ff_ticks, (unsigned long long)s_dsp_ff_skipped,
+                (unsigned long long)s_dsp_ff_verified, (unsigned long long)s_dsp_ff_mismatch);
+        snprintf(path, sizeof path, "%s.%s.prof", prefix, core);
+        dsp56300_dump_profile(dsp->engine.jit, path);
+        snprintf(path, sizeof path, "%s.%s.pram", prefix, core);
+        if ((f = fopen(path, "wb"))) {
+            fwrite(dsp->core.pram, sizeof(dsp->core.pram[0]), DSP_PRAM_SIZE, f);
+            fclose(f);
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------
+ * Idle-poll fast-forward.
+ *
+ * The EP's code halts at the end of its work and then waits in
+ *
+ *     head:   add  #xx,a              ; idle counter
+ *             jclr #n,x:$ffffc5,head  ; until the start-of-frame interrupt
+ *
+ * The EP's start-of-frame comes on one tick in eight, and only reaches the
+ * status register while the core is halted, so this model parks the EP in
+ * that loop: it then burned every one of the tick's 88,875 cycles, ~17,800
+ * two-instruction blocks per 32-sample tick, ~27 M JIT dispatches a second,
+ * ~95% of the APU frame thread (port/notes/perf.md 10).
+ *
+ * Nothing can change $ffffc5 while the JIT runs a tick with the APU lock held:
+ * it is dsp->interrupts | dma.pending_interrupts | the EOL bit, written only by
+ * the DSP's own peripheral writes (the loop makes none) and by the frame thread
+ * between ticks. The read itself has no side effect. So when the loop's bit is
+ * clear at the tick's start, the tick is that loop and nothing else, and the
+ * result is known: every iteration adds the same amount to the accumulator,
+ * costs the same cycles and leaves everything else alone (CCR aside, which the
+ * last add rewrites; L is sticky but only an overflow sets it, excluded below).
+ *
+ * The tick still runs on the JIT, in three parts that add up to the same
+ * budget: one real iteration (which also measures the per-iteration delta and
+ * cost, and checks that only the accumulator and CCR changed), a skip of all
+ * but the last two iterations (accumulator, cycle counter and budget advanced
+ * by that many), and the real last iterations, which leave the PC, CCR and the
+ * cycle overshoot exactly as the full run would. RECOMP_APU_DSP_FASTFWD=0
+ * turns it off; =verify runs the full loop and checks the prediction instead
+ * (for tests: no saving).
+ * ------------------------------------------------------------------------ */
+#define DSP_SR_CCR_FLAGS 0x3Fu   /* C V Z N U E: rewritten by every add */
+
+static int dsp_fastfwd_mode(void)
+{
+    static int mode = -1;   /* 0 off, 1 on, 2 verify */
+    if (mode < 0) {
+        const char *e = getenv("RECOMP_APU_DSP_FASTFWD");
+        if (e && *e == '0') mode = 0;
+        else if (e && (*e == 'v' || *e == 'V')) mode = 2;
+        else mode = 1;
+    }
+    return mode;
+}
+
+static int64_t dsp_acc_get(const Dsp56300State *s, bool b)
+{
+    uint32_t a2 = s->registers[b ? DSP56300_REG_B2 : DSP56300_REG_A2] & 0xFFu;
+    uint32_t a1 = s->registers[b ? DSP56300_REG_B1 : DSP56300_REG_A1] & 0xFFFFFFu;
+    uint32_t a0 = s->registers[b ? DSP56300_REG_B0 : DSP56300_REG_A0] & 0xFFFFFFu;
+    uint64_t u = ((uint64_t)a2 << 48) | ((uint64_t)a1 << 24) | a0;
+    if (u & (UINT64_C(1) << 55)) u |= ~((UINT64_C(1) << 56) - 1);   /* sign */
+    return (int64_t)u;
+}
+
+static void dsp_acc_set(Dsp56300State *s, bool b, int64_t v)
+{
+    uint64_t u = (uint64_t)v;
+    s->registers[b ? DSP56300_REG_B2 : DSP56300_REG_A2] = (uint32_t)(u >> 48) & 0xFFu;
+    s->registers[b ? DSP56300_REG_B1 : DSP56300_REG_A1] = (uint32_t)(u >> 24) & 0xFFFFFFu;
+    s->registers[b ? DSP56300_REG_B0 : DSP56300_REG_A0] = (uint32_t)u & 0xFFFFFFu;
+}
+
+static bool dsp_acc_canonical(const Dsp56300State *s, bool b)
+{
+    return s->registers[b ? DSP56300_REG_B2 : DSP56300_REG_A2] <= 0xFFu &&
+           s->registers[b ? DSP56300_REG_B1 : DSP56300_REG_A1] <= 0xFFFFFFu &&
+           s->registers[b ? DSP56300_REG_B0 : DSP56300_REG_A0] <= 0xFFFFFFu;
+}
+
+static bool dsp_quiescent(const Dsp56300State *s)
+{
+    return s->interrupts.state == 0 && !s->interrupts.pending_bits[0] &&
+           !s->interrupts.pending_bits[1] && !s->loop_rep && !s->pc_on_rep &&
+           !s->halt_requested && s->power_state == 0 &&
+           !(s->registers[DSP56300_REG_SR] & (1u << 15));   /* LF: no DO loop */
+}
+
+/* Is the core parked in the idle poll loop, with its exit bit clear? Returns
+ * the accumulator (0 = a, 1 = b) or -1. */
+static int dsp_idle_poll_match(DSPState *dsp, const Dsp56300State *s)
+{
+    uint32_t head = s->pc, w0, w1, w2, bit;
+    if (head + 2 >= DSP_PRAM_SIZE || !dsp_quiescent(s)) return -1;
+    w0 = dsp->core.pram[head] & 0xFFFFFFu;
+    w1 = dsp->core.pram[head + 1] & 0xFFFFFFu;
+    w2 = dsp->core.pram[head + 2] & 0xFFFFFFu;
+    if ((w0 & 0xFFC0F7u) != 0x014080u) return -1;      /* add #xx,a|b */
+    if ((w1 & 0xFFFFE0u) != 0x0A8580u) return -1;      /* jclr #n,x:$ffffc5,ea */
+    if (w2 != head) return -1;                         /* ... back to the add */
+    bit = w1 & 0x1Fu;
+    if (bit > 23 || (dsp_read_peripheral(dsp, 0xFFFFC5) >> bit) & 1u) return -1;
+    return (w0 & 0x8u) ? 1 : 0;
+}
+
+/* Only the accumulator and the CCR flags may differ after one iteration. */
+static bool dsp_iteration_clean(const Dsp56300State *a, const Dsp56300State *b,
+                                bool acc_b)
+{
+    for (int r = 0; r < DSP56300_REG_COUNT; ++r) {
+        uint32_t x = a->registers[r], y = b->registers[r];
+        if (r == (acc_b ? DSP56300_REG_B0 : DSP56300_REG_A0) ||
+            r == (acc_b ? DSP56300_REG_B1 : DSP56300_REG_A1) ||
+            r == (acc_b ? DSP56300_REG_B2 : DSP56300_REG_A2)) continue;
+        if (r == DSP56300_REG_SR) { x &= ~DSP_SR_CCR_FLAGS; y &= ~DSP_SR_CCR_FLAGS; }
+        if (x != y) return false;
+    }
+    return a->pc == b->pc && memcmp(a->stack, b->stack, sizeof(a->stack)) == 0 &&
+           memcmp(&a->interrupts, &b->interrupts, sizeof(a->interrupts)) == 0 &&
+           dsp_quiescent(b);
+}
+
+/* Run one tick of `cycles` (the state already prepared by dsp_run_frame). */
+static void dsp_run_tick(DSPState *dsp, int32_t cycles)
+{
+    Dsp56300Jit *jit = dsp->engine.jit;
+    Dsp56300State s0, s1;
+    int mode = dsp_fastfwd_mode();
+    int acc;
+    if (!mode) { dsp56300_run(jit, cycles); return; }
+    /* zeroed: the iteration check compares the interrupt block bytewise */
+    memset(&s0, 0, sizeof s0);
+    memset(&s1, 0, sizeof s1);
+    dsp56300_get_state(jit, &s0);
+    acc = dsp_idle_poll_match(dsp, &s0);
+    /* s0.cycle_budget <= 0 here: dsp_run_frame dropped any positive rest. */
+    if (acc < 0 || s0.cycle_budget > 0 || cycles <= 2 - s0.cycle_budget ||
+        !dsp_acc_canonical(&s0, acc)) {
+        dsp56300_run(jit, cycles);
+        return;
+    }
+    /* 1. One real iteration: bring the budget to exactly 1. */
+    int32_t first = 1 - s0.cycle_budget;
+    dsp56300_run(jit, first);
+    dsp56300_get_state(jit, &s1);
+    int32_t cost = (int32_t)(s1.cycle_count - s0.cycle_count);
+    int64_t delta = dsp_acc_get(&s1, acc) - dsp_acc_get(&s0, acc);
+    int32_t rest = cycles - first;
+    if (cost <= 0 || cost > 64 || delta <= 0 || delta > (INT64_C(1) << 40) ||
+        s1.cycle_budget != 1 - cost || !dsp_acc_canonical(&s1, acc) ||
+        !dsp_iteration_clean(&s0, &s1, acc) ||
+        (dsp_read_peripheral(dsp, 0xFFFFC5) >> (dsp->core.pram[s0.pc + 1] & 0x1Fu)) & 1u) {
+        dsp56300_run(jit, rest);   /* not the loop we know: run it as is */
+        return;
+    }
+    /* Iterations the JIT will run on the rest: while budget > 0. */
+    int64_t budget = (int64_t)s1.cycle_budget + rest;
+    int64_t n = budget > 0 ? (budget + cost - 1) / cost : 0;
+    int64_t skip = n - 2;
+    int64_t a1 = dsp_acc_get(&s1, acc);
+    const int64_t acc_max = (INT64_C(1) << 55) - 1;
+    if (skip <= 0 || a1 > acc_max - (n + 1) * delta) {   /* would overflow: real */
+        dsp56300_run(jit, rest);
+        return;
+    }
+    if (mode == 2) {
+        Dsp56300State s2;
+        memset(&s2, 0, sizeof s2);
+        dsp56300_run(jit, rest);
+        dsp56300_get_state(jit, &s2);
+        ++s_dsp_ff_verified;
+        if (!(s_dsp_ff_verified & (s_dsp_ff_verified - 1)) && s_dsp_ff_verified >= 1024)
+            fprintf(stderr, "[APU] DSP fast-forward verify: %llu ticks checked, %llu mismatches\n",
+                    (unsigned long long)s_dsp_ff_verified, (unsigned long long)s_dsp_ff_mismatch);
+        if (s2.pc != s1.pc || dsp_acc_get(&s2, acc) != a1 + n * delta ||
+            s2.cycle_count != s1.cycle_count + (uint32_t)(n * cost) ||
+            s2.cycle_budget != (int32_t)(budget - n * cost) ||
+            !dsp_iteration_clean(&s1, &s2, acc)) {
+            if (s_dsp_ff_mismatch++ < 8)
+                fprintf(stderr, "[APU] DSP fast-forward verify MISMATCH: pc %06X/%06X "
+                        "count %u/%u budget %d/%d\n", s1.pc, s2.pc, s2.cycle_count,
+                        s1.cycle_count + (uint32_t)(n * cost), s2.cycle_budget,
+                        (int32_t)(budget - n * cost));
+        }
+        return;
+    }
+    /* 2. Skip: what `skip` iterations would have done. */
+    dsp_acc_set(&s1, acc, a1 + skip * delta);
+    s1.cycle_count += (uint32_t)(skip * cost);
+    s1.cycle_budget -= (int32_t)(skip * cost);
+    dsp56300_set_state(jit, &s1);
+    /* 3. The last iterations, real. */
+    dsp56300_run(jit, rest);
+    ++s_dsp_ff_ticks;
+    s_dsp_ff_skipped += (uint64_t)skip;
+}
+
 static void dsp_run_frame(DSPState *dsp, bool start_frame)
 {
     Dsp56300State state;
@@ -454,7 +696,7 @@ static void dsp_run_frame(DSPState *dsp, bool start_frame)
     state.cycle_count = 0;
     state.halt_requested = false;
     dsp56300_set_state(dsp->engine.jit, &state);
-    dsp56300_run(dsp->engine.jit, (int32_t)DSP_FRAME_CYCLES);
+    dsp_run_tick(dsp, (int32_t)DSP_FRAME_CYCLES);
     dsp56300_get_state(dsp->engine.jit, &state);
     if (state.power_state != 0)
         dsp56300_set_halt_requested(dsp->engine.jit, true);
@@ -464,6 +706,8 @@ static void dsp_run_frame(DSPState *dsp, bool start_frame)
     dsp->core.is_idle = dsp56300_halt_requested(dsp->engine.jit);
     memcpy(dsp->core.registers, state.registers, sizeof(state.registers));
     memcpy(dsp->core.stack, state.stack, sizeof(state.stack));
+    if (dsp_diag_prefix())
+        dsp_diag_frame(dsp, state.cycle_budget, state.halt_requested);
 
     if (dsp->apu->trace_dsp_state) {
         const uint64_t trace_frame = ++dsp->trace_frame_count;

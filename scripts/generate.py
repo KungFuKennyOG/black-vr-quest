@@ -403,6 +403,14 @@ def title_hooks(name, body):
             raise ValueError("XMV branch hook missing")
         line = line.replace("if (_flags /* je: equal / zero */)", "if (_fa == 0)")
         body = body[:start] + f"    /* Native JE at 0x{location}: both predecessors carry the coefficient sign in _fa. */\n" + line + body[end:]
+    if name == "sub_0026CC10":
+        # D3D's push-buffer space wait re-reads the GPU's GET until enough is free; the host pusher is another
+        # thread, so spin briefly, then yield, then sleep (black_pb_space_wait, recomp_manual.c; perf.md 9).
+        body = replace_once(body, "    (void)_fa; (void)_fb; (void)_fas; (void)_fbs;\n",
+                            "    (void)_fa; (void)_fb; (void)_fas; (void)_fbs;\n"
+                            "    unsigned _pb_spin = 0; /* push-buffer space wait: black_pb_space_wait */\n")
+        body = replace_once(body, "    if (CMP_B(_fa, _fb)) goto loc_0026CD80; /* jb: below (unsigned <) */",
+                            "    if (CMP_B(_fa, _fb)) { black_pb_space_wait(++_pb_spin); goto loc_0026CD80; } /* jb: below (unsigned <); host wait hook */")
     if name == "sub_0026D0C0":
         line = next(line for line in body.splitlines() if "MEM32(l_eax + 0x100410) = l_ecx;" in line)
         body = replace_once(body, line, line + "\n    MEM32(l_eax + 0x100410) = l_ecx & ~0x10000u;      /* the flush completes at once */")
@@ -932,7 +940,7 @@ def run_disasm(toolkit, xbe, analysis, output, seed_files=None):
     command(toolkit, "tools.disasm", arguments)
 
 
-IDCT_PREFIX = '/* Locally generated XMV SSE2 kernel. Do not distribute this generated file. */\n#include <emmintrin.h>\n\nextern void sub_002420C8_gen(void);\nextern __declspec(thread) uint32_t g_ebp;\nextern __declspec(thread) uint32_t g_seh_ebp;\n\nstatic int black_idct_mode = -1;                 /* 0 generated, 1 native, 2 verify */\nstatic unsigned black_idct_verified, black_idct_bad;\n\n/* MMX pack/unpack on the low 64 bits of an SSE register */\nstatic __forceinline __m128i idct_pack_ssdw(__m128i a, __m128i b) { __m128i x = _mm_unpacklo_epi64(a, b); return _mm_packs_epi32(x, x); }\nstatic __forceinline __m128i idct_pack_uswb(__m128i a, __m128i b) { __m128i x = _mm_unpacklo_epi64(a, b); return _mm_packus_epi16(x, x); }\nstatic __forceinline __m128i idct_unpackhi_dq(__m128i a, __m128i b) { return _mm_unpacklo_epi32(_mm_srli_epi64(a, 32), _mm_srli_epi64(b, 32)); }\n#define pack_ssdw idct_pack_ssdw\n#define pack_uswb idct_pack_uswb\n#define unpackhi_dq idct_unpackhi_dq\n\ntypedef struct IdctOut { uint32_t eax, ecx, edx; } IdctOut;\n\n/* sp = guest esp at entry (the return address). Returns the registers the generated code leaves behind. */\nstatic IdctOut idct_native(uint32_t sp)\n{\n    uint8_t *mem = (uint8_t *)(uintptr_t)g_xbox_mem_offset;\n    uint32_t r_ebp = sp - 4;                              /* push ebp; mov ebp, esp */\n    uint32_t arg_dst = GUEST32(sp + 4), arg_stride = GUEST32(sp + 8), arg_coef = GUEST32(sp + 12);\n    uint32_t scratch = (r_ebp - 268) & 0xFFFFFFE0u;\n    uint32_t r_eax = 0, r_ebx = 0, r_ecx, r_edx, r_esi, r_edi;\n    __m128i m0 = _mm_setzero_si128(), m1 = m0, m2 = m0, m3 = m0, m4 = m0, m5 = m0, m6 = m0, m7 = m0;\n    IdctOut out;\n\n    r_esi = arg_coef;\n    r_edi = scratch;\n    for (r_ecx = 0xFFFFFFFCu; (int32_t)r_ecx < 0; ) {\n'
+IDCT_PREFIX = '/* Locally generated XMV SSE2 kernel. Do not distribute this generated file. */\n#include <emmintrin.h>\n\nextern void sub_002420C8_gen(void);\n#ifndef RECOMP_REGFILE /* Android: members of the register-file object */\nextern __declspec(thread) uint32_t g_ebp;\nextern __declspec(thread) uint32_t g_seh_ebp;\n#endif\n\nstatic int black_idct_mode = -1;                 /* 0 generated, 1 native, 2 verify */\nstatic unsigned black_idct_verified, black_idct_bad;\n\n/* MMX pack/unpack on the low 64 bits of an SSE register */\nstatic __forceinline __m128i idct_pack_ssdw(__m128i a, __m128i b) { __m128i x = _mm_unpacklo_epi64(a, b); return _mm_packs_epi32(x, x); }\nstatic __forceinline __m128i idct_pack_uswb(__m128i a, __m128i b) { __m128i x = _mm_unpacklo_epi64(a, b); return _mm_packus_epi16(x, x); }\nstatic __forceinline __m128i idct_unpackhi_dq(__m128i a, __m128i b) { return _mm_unpacklo_epi32(_mm_srli_epi64(a, 32), _mm_srli_epi64(b, 32)); }\n#define pack_ssdw idct_pack_ssdw\n#define pack_uswb idct_pack_uswb\n#define unpackhi_dq idct_unpackhi_dq\n\ntypedef struct IdctOut { uint32_t eax, ecx, edx; } IdctOut;\n\n/* sp = guest esp at entry (the return address). Returns the registers the generated code leaves behind. */\nstatic IdctOut idct_native(uint32_t sp)\n{\n    uint8_t *mem = (uint8_t *)(uintptr_t)g_xbox_mem_offset;\n    uint32_t r_ebp = sp - 4;                              /* push ebp; mov ebp, esp */\n    uint32_t arg_dst = GUEST32(sp + 4), arg_stride = GUEST32(sp + 8), arg_coef = GUEST32(sp + 12);\n    uint32_t scratch = (r_ebp - 268) & 0xFFFFFFE0u;\n    uint32_t r_eax = 0, r_ebx = 0, r_ecx, r_edx, r_esi, r_edi;\n    __m128i m0 = _mm_setzero_si128(), m1 = m0, m2 = m0, m3 = m0, m4 = m0, m5 = m0, m6 = m0, m7 = m0;\n    IdctOut out;\n\n    r_esi = arg_coef;\n    r_edi = scratch;\n    for (r_ecx = 0xFFFFFFFCu; (int32_t)r_ecx < 0; ) {\n'
 
 IDCT_MIDDLE = '\n    }\n    r_ecx = 0;\n    r_esi = scratch;\n    r_edi = arg_dst;\n    r_edx = arg_stride;\n    for (;;) {\n'
 
@@ -1002,6 +1010,7 @@ def main():
     declarations += "extern float black_tuning_spawn_health(uint32_t, float);\n"
     declarations += "extern float black_tuning_bullet_damage(uint32_t, uint32_t, float);\n"
     declarations += "extern unsigned black_tuning_headshot(uint32_t, uint32_t, unsigned, unsigned);\n"
+    declarations += "#if defined(_WIN32)\n#define black_pb_space_wait(n) ((void)0)\n#else\nextern void black_pb_space_wait(unsigned);\n#endif\n"
     for chunk in chunks:
         text = chunk.read_text(encoding="utf-8")
         text = rewrite_functions(text, promote_body)
