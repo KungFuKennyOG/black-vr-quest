@@ -1,5 +1,6 @@
 # xr-shell: Quest app shell, OpenXR, APK, game-side VR hooks
 
+Status 2026-11-12: VR controls (actions through the live action map, gestures) added, see Input.
 Status 2026-11-02: **the smoke APK builds, packages and signs**: `/root/black/build-quest/blackvr.apk`
 (924 KB, v3-verified, zipalign -p 16 OK, `aapt2 dump badging` clean). **Native tests: 4 suites
 pass** (math 139 checks, input 40, hooks 228, hooks with the opposite convention 228). Nothing
@@ -114,20 +115,153 @@ Comfort effects of this design:
 
 The OpenXR action set "gameplay" has per-hand subaction paths. Bindings are suggested for
 `oculus/touch_controller`, `meta/touch_controller_plus` (only when `XR_META_touch_controller_plus`
-is offered) and `khr/simple_controller`. The mapping is pure (`vr_input_map.h`), see README for the
-table. Notes:
+is offered) and `khr/simple_controller`. Pure, unit-tested cores: `vr_input_map.h` (buttons -> game
+actions -> pad) and `vr_gestures.h` (swing, duck, crouch sync, scope raise, two-handed aim); `vr_bridge.c`
+(`vrb_set_input`, XR thread) runs both every XR frame.
+
+### Actions, not buttons (2026-11-12)
+In gameplay (present mode STEREO or FLAT_SCOPE) the controllers produce BLACK's **actions**, and each
+action is pressed on whatever Xbox control the game's **live action map** (`[0x2F3BD4]`, 37 slots, read
+through `black_pc_input_resolver`, installed with `vr_set_action_resolver` by the game hook) gives its slot.
+All four presets (Default/Scout/Assault/Southpaw) and the player's own layout keep working; the move vector
+goes to the stick that "move forward" (slot 1) is on (the right one in Southpaw), the other stick stays
+centred. Menus and flat modes keep the button pad (`vr_map_menu_pad`): right stick passes through and also
+drives the d-pad, face buttons / triggers / Menu (START) pass through, right grip = Black, left grip = White.
+Buttons held across a gameplay <-> menu change act only after a release (the A that resumed does not reload;
+the Menu held for Back does not press START in the objectives screen).
+
+| Hand (right-handed; `left_handed = 1` mirrors) | Action | Slot (default preset) |
+|---|---|---|
+| right trigger | Fire (analog on a trigger) | 9 (RT) |
+| right A | Reload | 11 (A) |
+| right B, or a fast swing of the gun hand | Melee | 32 (B) |
+| right stick left/right | turn (snap 30° with 0.7/0.3 hysteresis, or smooth 120°/s), host-side | - |
+| right stick up / down | next / previous weapon, one step per push (on 0.7, re-arm under 0.3) | 14 / 15 (d-pad right / left) |
+| right stick up/down while the scope is up | the scope's zoom level | 35 (d-pad up) |
+| right stick click | Use / pick up / doors | 13 (X) |
+| right grip | nothing (`scope_raise = off`: held = scope, scoped weapons only) | - |
+| left stick | move (`locomotion = head | aim | offhand`) | 1..4 |
+| left stick click, or ducking | Crouch (the game's Toggle Crouch option is respected) | 12 (L3) |
+| left trigger | Grenade | 27 (LT) |
+| left grip near the gun | two-handed aim | - |
+| left X | Health pack | 33 (d-pad down) |
+| left Y tap / held 0.5 s | Suppressor / Fire mode (the tap acts on release only if not held) | 31 (Y) / 30 (d-pad up) |
+| left Menu tap / held 1 s | Pause / Back (objectives) | 25 (START) / 36 (BACK) |
+| both stick clicks 1 s | recentre (neither Crouch nor Use: a click only acts once the other stick has stayed up 60 ms) | - |
+| raising a scoped weapon to the eye | the scope (the aim intent, see below) | (16) |
+
+Taps (weapon steps, Y, Menu, swing melee) are pulses of 0.15 s with a 0.1 s gap, queued, and each lasts
+until the game has also rendered 2 frames (world cameras published), so a hitching game never misses one
+(pause and the menus read the pad once a frame). "Gameplay" for the controls is the mode the game hook last
+chose while a camera came in the last 3 s (the display's 250 ms freshness made them flap between the
+gameplay and menu mappings on slow frames); the game's state counts as known for 3 s likewise.
+
+**The unassigned slots** (the Controls page's list is `FE_ACTION_*` at 0x2927B4, built by 214820/214960 with
+the slot numbers): 34 (White) is **FE_NEXTMUSICTRACK**, the custom-soundtrack "next track" (1EC450 calls
+14FE40 on the first-person sound pool `[[2D0D60]+D3C8]`, 10-update cooldown); 35 (d-pad up) is the
+**scope zoom level** (1EC450, only for a scoped weapon, descriptor +C0: toggles weapon +102 between the two
+zoom levels, "sniper_SetMaxZoom/MinZoom"); 10 (Y) is read only in 1EC450's "any action pressed" check
+next to Fire/Melee/Grenade/weapons/Use (no action of its own); 26 (Black), 28 and 29 (d-pad up/down) have
+**no reader** in the generated code (no `[0x2F3BD4]` load followed by +68/+70/+74, no slot accessor call).
+The VR scheme leaves Black and White unmapped (White would skip a custom-soundtrack track); a harness run
+with `BLACKVR_DEBUG_GRIPS=1` pressed both in level 1: no observable effect (no intent, latch, weapon,
+crouch or mode change; White has no custom soundtrack to skip here).
+
+### The game's own state (`black_vr_input`, called from the `sub_001EC450` wrapper before the original)
+Component (1EC450 ECX) +8C actor, **+40 crouch** (toggled on a press edge when **+102 = Toggle Crouch**,
+else held), **+45 aim intent** with toggle latch +104; actor +29C weapon, +2A4 zoom; weapon +EC descriptor
+(**+C0 scoped**: aim then always toggles; +B4 / +B8 zoom levels, +BC zoom speed), **+105 aim engaged**,
++102 zoom level, +D8 state; shot record +F4 (+18 magazine, +C the PlayerParams block). Published to the
+shell each update (`vr_publish_game_input`, player one only: the actor of the VR look object).
+
+### Gestures (`vr_gestures.h`; every trigger is logged under the BlackVR tag with its measured values)
+- **Melee swing**: the gun hand's linear speed relative to the head (XrSpaceVelocity chained to the aim
+  space's xrLocateSpace when valid, else pose deltas; the head from pose deltas) above `melee_swing_speed`
+  (2.5 m/s) for >= 35 ms and >= 2 samples -> one Melee; 0.6 s cooldown, one per run; > 15 m/s is a tracking
+  jump. Tested negatives: walking 1.5 m/s, a 180°/s turn in place (1.6 m/s at 0.5 m), a reload-like 1.8 m/s
+  move, a one-frame 5 m/s spike. Log: `melee swing: X m/s`.
+- **Duck crouch**: standing head height taken at the first gameplay frame and on every recentre, raised
+  slowly (time constant 2 s) when you stand taller, never lowered. Crouch below `duck_ratio` (0.80) x
+  standing, stand above +0.08 (0.88). Without a floor (standing < 1 m: LOCAL space) the same fractions of an
+  assumed 1.65 m body. Log: `duck: crouch|stand (head, standing, thresholds, game crouch)`.
+- **Crouch sync**: Toggle Crouch on (the profile, component +102): one press per body edge when the
+  game's crouch (+40) differs, re-pressed (max 3) when the game did not follow within 0.6 s / 6 updates;
+  a crouch toggled by the stick click is left alone until the body itself ducks or stands. Toggle Crouch
+  off (hold): the crouch control is held while ducked. Game state unknown: one press per edge.
+- **Scope raise** (scoped weapons only): the rear sight (aim pose + (0, 5 cm up, 6 cm back)) within
+  `scope_raise_distance` (0.15 m) of an eye and the gun within 25° of the view -> up; down beyond 1.5x
+  the distance or 40°. The shell turns it into the **aim intent**; the hook writes component +45 with the
+  latch +104 held, so the native toggle can never flip it out of step, and writes 0 for every non-scoped
+  weapon (they never zoom, never get ADS slowdown or ADS animation). Up + zoom >= `scope_zoom` -> FLAT_SCOPE
+  as before. Log: `scope raise: up|down (sight distance, angle, scoped, aiming)`.
+- **Two-handed aim**: off-hand grip held while that hand is within 20 cm of the gun hand or of the point
+  30 cm ahead of it along the gun, and ahead of it -> the aim pose points from the gun hand to the off hand,
+  with the gun hand's roll, blended in over 0.1 s; released, behind the gun hand or > 0.9 m apart -> one-handed.
+  It replaces `VrFrameState.hand[aim].aim`, so the game's aim, the weapon placement and the gun latch (which
+  locates both hands at display time and applies the same math) all use it. Log: `two-hand on|off`.
+
+### Accuracy (`vr_accuracy`)
+BLACK's player spread has **no aim term**. 1CEF40 (called by the shot 1DBD50 from the weapon update 1EEFD0)
+spreads each shot by params +8 (Max Spread Angle) plus params +28 (Accuracy Fall Off Over Time) x
+min(weapon +E0 / params +2C, 1), where +E0 is the time the trigger has been held (1F0210: grows while
+weapon +D8 == 1), scaled by weapon **+E4**. The params are the weapon's PlayerParams block for the player
+(1C2760: owner type 2), and 1C2760 sets +E4 = 1.0 for every shot record; the only other writers of +E4 are
+the AI's behaviour states (194440: 0.5 / 0 for AI states 1D..1F and 2; 1A7F20: 1.0). Aiming (weapon +105,
+1BB110) changes only the zoom (actor +2A4, the lens +750) and the native ADS movement and animation.
+So `vr_accuracy = aim` (default) and `hip` both give the game's own spread, and the VR layer never needs
+the game's ADS to be accurate: nothing is hooked. The spread's inputs are in `VrGameInputState`
+(`BLACKVR_INPUT_TRACE=1` logs them).
+
+### Other notes
 - Narrowest runtime hook: `xbox_InputGetState`/`SetState` in `xinput_device.c` under `BLACK_VR`.
   Everything downstream is unchanged: `usb_gamepad_report` -> OHCI -> XAPI -> the game's action map,
   Controls pages and prompts, pc_input merge.
-- Right stick X never reaches the game in gameplay: it is the host turn (snap 30° with 0.7/0.3
-  hysteresis, or smooth 120°/s), handed to the game hook through `vr_consume_turn()`. Right stick Y
-  is also zero in gameplay (pitch comes from the hand/head). In flat modes both pass through and
-  also drive the d-pad.
 - `xinput_device.c` maps XInput LEFT_SHOULDER -> Xbox **Black** and RIGHT_SHOULDER -> **White**.
-  Its README table says the opposite, so I followed the code. Right grip -> Black, left grip -> White.
+  Its README table says the opposite, so I followed the code.
 - Rumble: the game's two motors -> left/right controller haptics (50 ms pulses, refreshed per frame).
 - Recentre: both stick clicks held 1 s, or the system recentre
-  (`XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING`). The origin is head yaw + position at that moment.
+  (`XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING`). The origin is head yaw + position at that moment;
+  the duck crouch's standing height is taken again.
+- `BLACKVR_DEBUG_GRIPS=1` (experiments only): in gameplay the right grip presses the game's own Aim control
+  (the VR scope logic stands down), the left grip Black, both grips White.
+- Untuned on a headset: every threshold above (swing speed / time, duck ratios, scope distance / angles,
+  two-hand distances, the rear-sight offset). The logs carry the measured values.
+
+### blackvr.ini (input)
+`turn`, `snap_degrees`, `smooth_degrees_per_second`, `deadzone`, `left_handed`, `aim`, plus:
+`locomotion = head | aim | offhand`, `vr_accuracy = aim | hip`, `melee_swing = on | off`,
+`melee_swing_speed` (1..10 m/s, 2.5), `duck_crouch = on | off`, `duck_ratio` (0.5..0.9, 0.80),
+`scope_raise = on | off`, `scope_raise_distance` (0.03..0.5 m, 0.15), `two_hand = on | off`.
+
+### Verification (2026-11-12)
+- `tests/xr_shell` (`/tmp/claude-0/xrt`): math 139, **input 736** (actions per button through two layouts,
+  analog fire / grenade, resolver missing, Use / Crouch clicks, Y and Menu tap vs hold, swing taps queued,
+  taps held through a slow game, weapon steps with hysteresis and double pushes, scope zoom step, snap and
+  smooth turn, recentre chord never crouching / using, left-handed mirror, menus unchanged, buttons held
+  across mode changes, swing true/false positives, duck hysteresis / recalibration / no-floor, crouch sync
+  toggle / hold / unknown / retries / slow game, scope raise hysteresis, two-hand math / roll / jitter /
+  engage-release, new ini keys), **hooks 447** in both conventions (incl. `black_vr_input` over synthetic RAM:
+  published state, the aim intent + latch, player two left alone).
+- x86 full game (`build-ctl-x86`, GRX_CONTROLS=1, scripted poses/velocities, `BLACKVR_INPUT_TRACE=1`), level 1
+  (logs `build-ctl-x86/run1..3.log`): resolver installed with the default preset (fire 23 RT, reload 16 A,
+  crouch 14 L3, use 18 X, weapon 3/2, grenade 22 LT, melee 17 B, health 1, suppressor 19, fire mode 0,
+  pause 12, back 13). **Fire**: magazine 15 -> 14 -> 13, fire intent +41. **Reload** (A): reload intent
+  +44 seen; the magazine stayed 13/15 (no refill seen: no reserve ammo yet, or the state never got there;
+  unverified). **Crouch**: stick click toggles the game's crouch 0 -> 1 -> 0 (Toggle Crouch on in this
+  profile); **duck**: head 1.12 m -> "duck: crouch", one press, game crouch 0 -> 1; standing -> one press,
+  1 -> 0; ducking while already crouched by the click: no press. **Melee**: B and the scripted 4 m/s swing
+  ("melee swing: 4.00 m/s") both set the melee intent +4B, weapon state 28 -> 29 (the melee). **Grenade**:
+  intent +43. **Health pack**: X sets latch +108 (1EA730 ran; no pack to use). **Suppressor**: Y tap ->
+  latch +107. **Fire mode**: Y hold -> d-pad up tap (the pistol has one mode). **Weapon next/prev**: the
+  d-pad taps go out (edge-read by 1F17F0) but the weapon in hand never changed (actor +2BA = 2, slot 0;
+  unverified: nothing to switch to found). **Use**: X goes out, no latch change (nothing usable in reach;
+  unverified). **Pause**: Menu tap -> FLAT (pause), B resumes. **Back**: Menu hold -> BACK tap goes out, no
+  mode change (objectives overlay not checked). **Scope raise** with the non-scoped starting weapon: "up" at
+  8 cm / 0 deg, aim stays 0 (never zooms). **Two-hand**: engages at 33 cm. **Spread**: hip and native aim
+  (debug grips: aiming 1, zoom 1.08 -> 1.59) fire with the same inputs: scale +E4 1.000, PlayerParams Max
+  Spread 0.0000 + 0.3000 over 10 s of firing.
+- Not verified: anything on a headset; a scoped weapon (none in level 1; the intent path is unit-tested);
+  reload refill, weapon switch, Use and Back effects as noted; the gesture thresholds' feel.
 
 ## Game-side hooks (`src/black_vr.inc`)
 

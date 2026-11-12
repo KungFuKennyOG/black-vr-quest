@@ -4858,6 +4858,9 @@ void sub_001EC450(void)
             }
         }
     }
+#ifdef BLACK_VR
+    black_vr_input(self);      /* VR controls: the game's crouch / scope state, the scope's aim intent */
+#endif
     fesetenv(&environment);
     _mm_setcsr(csr);
     sub_001EC450_gen();

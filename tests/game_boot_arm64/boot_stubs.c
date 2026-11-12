@@ -117,6 +117,10 @@ void vr_mark_world_pass(uint32_t va, int begin) { (void)va; (void)begin; }
 /* gun latch (port/notes/gun-latch.md) */
 void vr_publish_game_gun(const VrGameGun *gun) { (void)gun; }
 void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register) { (void)mvp; (void)constant_register; }
+/* VR controls (port/notes/xr-shell.md "Input") */
+void vr_set_action_resolver(int (*resolve)(int slot)) { (void)resolve; }
+void vr_publish_game_input(const VrGameInputState *s) { (void)s; }
+int  vr_game_aim_request(void) { return -1; }
 
 /* ---- liblog / libandroid / libaaudio (shared-only in the NDK) -------------------------------- */
 int __android_log_print(int prio, const char *tag, const char *fmt, ...)

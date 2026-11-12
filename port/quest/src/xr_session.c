@@ -337,7 +337,8 @@ static void input_sync(XrShell *s, XrTime t, double dt)
     XrActionsSyncInfo si = { XR_TYPE_ACTIONS_SYNC_INFO };
     VrTouchState ts;
     VrPose aim[2], grip[2];
-    int valid[2], h, active;
+    VrVec3 lin[2];
+    int valid[2], vel_ok[2], h, active;
     XrVector2f v;
     float rumble[2];
 
@@ -366,17 +367,27 @@ static void input_sync(XrShell *s, XrTime t, double dt)
     ts.menu = get_bool(s, s->act_menu, -1);
     for (h = 0; h < 2; h++) {
         XrSpaceLocation loc = { XR_TYPE_SPACE_LOCATION };
+        XrSpaceVelocity vel = { XR_TYPE_SPACE_VELOCITY };
         const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
         valid[h] = 0;
+        vel_ok[h] = 0;
+        lin[h] = vrm_v3(0, 0, 0);
         aim[h] = grip[h] = vrm_pose_identity();
+        loc.next = &vel;                         /* the melee swing detector's speed (vr_gestures.h) */
         if (XR_SUCCEEDED(xrLocateSpace(s->aim_space[h], s->world_space, t, &loc)) && (loc.locationFlags & need) == need) {
             aim[h] = to_vr(&loc.pose);
             valid[h] = 1;
+            if (vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
+                lin[h] = vrm_v3(vel.linearVelocity.x, vel.linearVelocity.y, vel.linearVelocity.z);
+                vel_ok[h] = 1;
+            }
         }
+        loc.next = NULL;
         loc.locationFlags = 0;
         if (XR_SUCCEEDED(xrLocateSpace(s->grip_space[h], s->world_space, t, &loc)) && (loc.locationFlags & need) == need)
             grip[h] = to_vr(&loc.pose);
     }
+    vrb_set_hand_velocity(lin, vel_ok);
     vrb_set_input(s, &ts, aim, grip, valid, dt);
 
     /* rumble: the game's two motors -> left / right controller */

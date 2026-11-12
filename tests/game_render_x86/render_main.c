@@ -27,7 +27,9 @@
  *   GRX_INPUT               button script "T:button[:hold]" comma-separated; T in seconds after the first
  *                           renderer frame, button one of menu (START) a b x y up down left right (right stick)
  *                           fwd (left stick forward), rt / lt (right / left trigger: rt fires in play), lc / rc
- *                           (thumbstick clicks; both held 2.5 s: a both-eye capture to <scratch>/root/shots); hold in s (0.5)
+ *                           (thumbstick clicks; both held 2.5 s: a both-eye capture to <scratch>/root/shots); hold in s (0.5);
+ *                           lg / rg (grips); gestures (GRX_CONTROLS=1 tracks both controllers): duck, swing, raise,
+ *                           twohand (see the controllers section)
  *   GRX_PROF=<file>         sample the game thread (grx_prof.c; GRX_PROF_US period, 250) for grx_prof.py
  *   GRX_FRAMECPU=<file>     the game thread's CPU time per Kelvin flip, for grx_framecpu.py
  *   GRX_INI                 extra blackvr.ini lines
@@ -39,6 +41,8 @@
  *                           game the old one), a settled frame (the game has caught up), and a debug-tint frame;
  *                           meta.json for gun_latch_check.py, which writes gunlatch_before.png / gunlatch_after.png.
  *   GRX_HAND=0              1: the right controller tracked (as GRX_GUN_TEST) without the step
+ *   GRX_CONTROLS=0          1: both controllers tracked, for the VR controls' gestures (BLACKVR_INPUT_TRACE=1 logs the
+ *                           game's side: intents, weapon state, magazine)
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -126,6 +130,7 @@ static XrVector3f q_rot(XrQuaternionf q, XrVector3f v)
     XrVector3f o = { r.x, r.y, r.z };
     return o;
 }
+static int button_down(const char *name);
 static void head_angles(int64_t t, double *yaw, double *pitch)
 {
     const int64_t r0 = s_rot_start_ns;
@@ -145,7 +150,7 @@ static void trajectory(int64_t t, XrPosef *head, XrPosef eye[2], XrFovf fov[2])
     qy.x = 0; qy.y = (float)sin(yaw / 2); qy.z = 0; qy.w = (float)cos(yaw / 2);
     qx.x = (float)sin(pitch / 2); qx.y = 0; qx.z = 0; qx.w = (float)cos(pitch / 2);
     head->orientation = q_mul(qy, qx);
-    head->position.x = 0.0f; head->position.y = 1.6f; head->position.z = 0.0f;
+    head->position.x = 0.0f; head->position.y = button_down("duck") ? 1.12f : 1.6f; head->position.z = 0.0f;
     for (e = 0; e < 2; e++) {
         XrVector3f off = { e == 0 ? -0.032f : 0.032f, 0.0f, 0.0f }, w = q_rot(head->orientation, off);
         eye[e].orientation = head->orientation;
@@ -156,22 +161,74 @@ static void trajectory(int64_t t, XrPosef *head, XrPosef eye[2], XrFovf fov[2])
     }
 }
 
-/* ---- the right controller (GRX_HAND / GRX_GUN_TEST): still, in front of the head; turned about the head on a step ---- */
-static int s_hand_on, s_gun_test;
+/* ---- the controllers (GRX_HAND / GRX_GUN_TEST / GRX_CONTROLS) ------------------------------------------------------
+ * The right controller still, in front of the head; turned about the head on a gun-latch step. With GRX_CONTROLS=1
+ * (or GRX_HAND) both are tracked and the script's gestures move them (port/notes/xr-shell.md "Input"):
+ *   raise    the right controller at the right eye, pointing along the view (scope raise)
+ *   swing    the right controller swept left at 4 m/s (pose deltas and XrSpaceVelocity), 0.6 m at most
+ *   twohand  the left controller 33 cm ahead of the right one along the gun, its grip held (two-handed aim)
+ *   duck     the head at 1.12 m instead of 1.6 m (trajectory above)                                                */
+static int s_hand_on, s_gun_test, s_controls;
 static volatile int s_gun_step;                  /* 0: the base pose; 1: turned by s_gun_yaw about the head centre */
 static double s_gun_yaw = 5.0 * M_PI / 180.0;
+static double s_swing_t0 = -1.0;
+static int button_down(const char *name);
+
+static void head_pose_at(XrTime t, XrPosef *head)
+{
+    XrPosef eye[2];
+    XrFovf fov[2];
+    trajectory(t, head, eye, fov);
+}
 
 static int hand_pose(int hand, int grip, XrTime t, XrPosef *pose)
 {
     const XrVector3f centre = { 0.0f, 1.6f, 0.0f }, base = { 0.12f, -0.22f, -0.35f };
     XrQuaternionf q = { 0, 0, 0, 1 };
     XrVector3f r;
-    (void)grip; (void)t;
-    if (!s_hand_on || hand != 1) return 0;
-    if (s_gun_step) { q.y = (float)sin(s_gun_yaw / 2); q.w = (float)cos(s_gun_yaw / 2); }
+    (void)grip;
+    if (!s_hand_on) return 0;
+    if (hand == 1 && button_down("raise")) {
+        /* the rear sight (aim pose + (0, 0.05, 0.06)) 8 cm in front of the right eye, along the head's view */
+        XrPosef h;
+        const XrVector3f off = { 0.032f, -0.05f, -0.14f };
+        head_pose_at(t, &h);
+        r = q_rot(h.orientation, off);
+        pose->orientation = h.orientation;
+        pose->position.x = h.position.x + r.x; pose->position.y = h.position.y + r.y; pose->position.z = h.position.z + r.z;
+        return 1;
+    }
+    if (hand == 1 && s_gun_step) { q.y = (float)sin(s_gun_yaw / 2); q.w = (float)cos(s_gun_yaw / 2); }
     r = q_rot(q, base);
     pose->orientation = q;
     pose->position.x = centre.x + r.x; pose->position.y = centre.y + r.y; pose->position.z = centre.z + r.z;
+    if (hand == 1) {
+        if (button_down("swing")) {
+            const double now = now_s();
+            double d;
+            if (s_swing_t0 < 0.0) s_swing_t0 = now;
+            d = 4.0 * (now - s_swing_t0);
+            pose->position.x -= (float)(d < 0.6 ? d : 0.6);
+        } else {
+            s_swing_t0 = -1.0;
+        }
+        return 1;
+    }
+    if (!s_controls) return 0;                    /* GRX_HAND / the gun-latch test: the right controller only */
+    if (button_down("twohand")) {                 /* ahead of the right controller along the gun, a little up */
+        pose->position.x = centre.x + base.x; pose->position.y = centre.y + base.y + 0.03f;
+        pose->position.z = centre.z + base.z - 0.33f;
+        return 1;
+    }
+    pose->position.x = centre.x - 0.15f; pose->position.y = centre.y - 0.25f; pose->position.z = centre.z - 0.30f;
+    return 1;
+}
+
+static int hand_velocity(int hand, int grip, XrTime t, XrVector3f *v)
+{
+    (void)grip; (void)t;
+    v->x = v->y = v->z = 0.0f;
+    if (hand == 1 && s_swing_t0 >= 0.0 && now_s() - s_swing_t0 < 0.15) v->x = -4.0f;
     return 1;
 }
 
@@ -181,6 +238,8 @@ static int hand_pose(int hand, int grip, XrTime t, XrPosef *pose)
 typedef struct Press { double t, hold; char button[16]; int captured_before, logged, done; uint64_t frame0; double t0; } Press;
 static Press s_press[64];
 static int s_npress;
+static int s_exact_hold;   /* GRX_EXACT_HOLD=1: release after exactly `hold` seconds (the VR controls' taps wait
+                            * for the game's input updates themselves) */
 static const char *k_default_script = "60:menu,120:a,180:a,240:a,300:a";
 
 static void parse_script(const char *spec)
@@ -217,7 +276,7 @@ static int button_down(const char *name)
                 fprintf(stderr, "[GRX] t=%.1fs: input %s pressed (script +%.0fs after the first frame, backend frame %llu)\n", el(),
                         name, s_press[i].t, (unsigned long long)st.frames);
             }
-            if (t - s_press[i].t0 >= s_press[i].hold && st.frames >= s_press[i].frame0 + 4) {
+            if (t - s_press[i].t0 >= s_press[i].hold && (s_exact_hold || st.frames >= s_press[i].frame0 + 4)) {
                 s_press[i].done = 1;
                 fprintf(stderr, "[GRX] t=%.1fs: input %s released (backend frame %llu)\n", el(), name, (unsigned long long)st.frames);
                 return 0;
@@ -259,6 +318,10 @@ static int input_vec2(const char *action, XrPath sub, XrVector2f *state)
 /* the triggers: "rt" (right, fire in play), "lt" (left); the fake runtime's XrPath is strlen+1 */
 static int input_float(const char *action, XrPath sub, float *state)
 {
+    if (!strcmp(action, "squeeze")) {                 /* the grips: "lg" / "rg"; "twohand" holds the left one */
+        *state = (sub == 17 && button_down("rg")) || (sub == 16 && (button_down("lg") || button_down("twohand"))) ? 1.0f : 0.0f;
+        return 1;
+    }
     if (strcmp(action, "trigger")) return 0;
     *state = (sub == 17 && button_down("rt")) || (sub == 16 && button_down("lt")) ? 1.0f : 0.0f;
     return 1;
@@ -865,7 +928,9 @@ int main(int argc, char **argv)
     s_eye_h = (uint32_t)envf("GRX_EYE_H", s_eye_h);
     s_multiview = (int)envf("GRX_MULTIVIEW", 1);
     s_gun_test = (int)envf("GRX_GUN_TEST", 0);
-    s_hand_on = s_gun_test || (int)envf("GRX_HAND", 0);
+    s_controls = (int)envf("GRX_CONTROLS", 0) && !s_gun_test;
+    s_exact_hold = (int)envf("GRX_EXACT_HOLD", 0);
+    s_hand_on = s_gun_test || (int)envf("GRX_HAND", 0) || s_controls;
     s_gun_yaw = envf("GRX_GUN_YAW", 5.0) * M_PI / 180.0;
     if (s_gun_test) { s_sway = 0; if (!getenv("GRX_ROT_AT")) s_rot_at = 1e9; }   /* the head holds still */
     s_sway = (int)envf("GRX_SWAY", s_sway);
@@ -905,7 +970,7 @@ int main(int argc, char **argv)
     fx_input_bool = input_bool;
     fx_input_vec2 = input_vec2;
     fx_input_float = input_float;
-    if (s_hand_on) fx_hand_pose = hand_pose;
+    if (s_hand_on) { fx_hand_pose = hand_pose; fx_hand_velocity = hand_velocity; }
     memset(&so, 0, sizeof(so));
     so.multiview = s_multiview;
     so.eye_w = s_eye_w; so.eye_h = s_eye_h;

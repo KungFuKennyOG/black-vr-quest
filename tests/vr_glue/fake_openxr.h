@@ -84,6 +84,8 @@ extern int (*fx_input_float)(const char *action, XrPath subaction, float *state)
 /* hand tracking (gun latch tests): when set, the stage pose of hand 0 (left) / 1 (right), aim (grip 0) or grip space,
  * at time t; return 1 when tracked. Unset: hands are never tracked (as before). */
 extern int (*fx_hand_pose)(int hand, int grip, XrTime t, XrPosef *pose);
+/* optional: the hand's linear velocity (XrSpaceVelocity chained to xrLocateSpace); unset or 0: not valid */
+extern int (*fx_hand_velocity)(int hand, int grip, XrTime t, XrVector3f *linear);
 
 /* instance extensions: what xrEnumerateInstanceExtensionProperties offers (the shell's optional ones, foveation
  * included unless fx_no_foveation is set before the shell asks) and what the FB foveation calls did */

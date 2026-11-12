@@ -21,6 +21,7 @@ int (*fx_input_bool)(const char *action, XrPath subaction, XrBool32 *state);
 int (*fx_input_vec2)(const char *action, XrPath subaction, XrVector2f *state);
 int (*fx_input_float)(const char *action, XrPath subaction, float *state);
 int (*fx_hand_pose)(int hand, int grip, XrTime t, XrPosef *pose);
+int (*fx_hand_velocity)(int hand, int grip, XrTime t, XrVector3f *linear);
 
 static FxSwapchain s_sc[FX_MAX_SWAPCHAINS];
 static XrEventDataSessionStateChanged s_events[16];
@@ -292,9 +293,15 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateSpace(XrSpace space, XrSpace base, XrTime
     loc->locationFlags = 0;
     if (base == FX_SPACE_STAGE && fx_hand_pose && action_space_kind(space, &hand, &grip)) {
         /* hands: tracked only when the test gives a pose */
-        if (fx_hand_pose(hand, grip, t, &loc->pose))
+        XrSpaceVelocity *vel = loc->next && ((XrSpaceVelocity *)loc->next)->type == XR_TYPE_SPACE_VELOCITY ?
+                               (XrSpaceVelocity *)loc->next : NULL;
+        if (vel) vel->velocityFlags = 0;
+        if (fx_hand_pose(hand, grip, t, &loc->pose)) {
             loc->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
                                  XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+            if (vel && fx_hand_velocity && fx_hand_velocity(hand, grip, t, &vel->linearVelocity))
+                vel->velocityFlags = XR_SPACE_VELOCITY_LINEAR_VALID_BIT;
+        }
         return XR_SUCCESS;
     }
     if (space != FX_SPACE_VIEW || base != FX_SPACE_STAGE || !fx_trajectory) return XR_SUCCESS;   /* hands: not tracked */

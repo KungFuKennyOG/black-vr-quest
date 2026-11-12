@@ -17,9 +17,20 @@
  *   snap_degrees      = 30
  *   smooth_degrees_per_second = 120
  *   deadzone          = 0.15
- *   left_handed       = 0
+ *   left_handed       = 0         ; 1 mirrors the controls (gun in the left hand)
  *   aim               = hand      ; hand | head
- *   locomotion        = head      ; head | aim  (direction the left stick moves you)
+ *   locomotion        = head      ; head | aim | offhand  (the direction the move stick moves you: where you look,
+ *                                 ; where the gun points, or where the off-hand controller points)
+ *   vr_accuracy       = aim       ; aim | hip: BLACK's player spread has no aim term (see port/notes/xr-shell.md),
+ *                                 ; so both give the game's own spread; aim never needs the game's ADS
+ *   melee_swing       = on        ; on | off: a fast swing of the gun hand is a melee attack
+ *   melee_swing_speed = 2.5       ; m/s (hand relative to the head) that counts as a swing
+ *   duck_crouch       = on        ; on | off: ducking crouches, standing up stands
+ *   duck_ratio        = 0.80      ; crouch below this x your standing head height (stand above it + 0.08)
+ *   scope_raise       = on        ; on | off: raising a scoped weapon to the eye looks through the scope
+ *                                 ; (off: hold the gun-hand grip for the scope)
+ *   scope_raise_distance = 0.15   ; metres from the gun's rear sight to an eye
+ *   two_hand          = on        ; on | off: off-hand grip near the gun steadies the aim (gun hand -> off hand)
  *   world_scale       = 1.0       ; game units per metre
  *   max_head_offset   = 0.5       ; metres the view may lean from the body
  *   aim_converge      = 10.0      ; metres: where the hand's ray crosses the game's shot
@@ -44,10 +55,11 @@
 #include <string.h>
 #include "../vr_bridge.h"
 #include "vr_input_map.h"
+#include "vr_gestures.h"
 
 #define VR_CONFIG_MAX_ENV 32
 
-enum { VR_LOCO_HEAD = 0, VR_LOCO_AIM = 1 };
+enum { VR_LOCO_HEAD = 0, VR_LOCO_AIM = 1, VR_LOCO_OFFHAND = 2 };
 /* XR_FB_foveation levels (XrFoveationLevelFB values) */
 enum { VR_FOVEATION_OFF = 0, VR_FOVEATION_LOW = 1, VR_FOVEATION_MEDIUM = 2, VR_FOVEATION_HIGH = 3 };
 
@@ -63,6 +75,7 @@ typedef struct {
     int   raster_spin_us;    /* -> RECOMP_KELVIN_SPIN_US */
     int   gun_latch;         /* 1: the weapon's draws follow the late-latched hand (gun-latch) */
     VrInputConfig input;
+    VrGestureConfig gest;    /* melee swing, duck crouch, scope raise, two-handed aim */
     VrGameConfig game;
     int   env_count;
     char  env[VR_CONFIG_MAX_ENV][160];
@@ -96,6 +109,7 @@ static inline void vr_config_defaults(VrShellConfig *c)
     c->hud_width_m = 2.4f;
     c->gun_latch = 1;
     vr_input_default_config(&c->input);
+    vrg_default_config(&c->gest);
     c->game.aim_mode = VR_AIM_HAND;
     c->game.aim_hand = 1;
     c->game.units_per_metre = 1.0f;
@@ -214,9 +228,23 @@ static inline int vr_config_line(VrShellConfig *c, const char *line_in)
     if (!strcmp(key, "locomotion")) {
         if (!strcmp(val, "head")) c->locomotion = VR_LOCO_HEAD;
         else if (!strcmp(val, "aim")) c->locomotion = VR_LOCO_AIM;
+        else if (!strcmp(val, "offhand") || !strcmp(val, "off_hand") || !strcmp(val, "controller")) c->locomotion = VR_LOCO_OFFHAND;
         else return 0;
         return 1;
     }
+    if (!strcmp(key, "vr_accuracy")) {
+        if (!strcmp(val, "aim")) c->input.accuracy = VR_ACCURACY_AIM;
+        else if (!strcmp(val, "hip")) c->input.accuracy = VR_ACCURACY_HIP;
+        else return 0;
+        return 1;
+    }
+    if (!strcmp(key, "melee_swing")) return vr_cfg_bool(val, &c->gest.melee_swing);
+    if (!strcmp(key, "melee_swing_speed")) { if (!vr_cfg_float(val, 1.0f, 10.0f, &f)) return 0; c->gest.swing_speed = f; return 1; }
+    if (!strcmp(key, "duck_crouch")) return vr_cfg_bool(val, &c->gest.duck_crouch);
+    if (!strcmp(key, "duck_ratio")) { if (!vr_cfg_float(val, 0.5f, 0.9f, &f)) return 0; c->gest.duck_ratio = f; return 1; }
+    if (!strcmp(key, "scope_raise")) return vr_cfg_bool(val, &c->gest.scope_raise);
+    if (!strcmp(key, "scope_raise_distance")) { if (!vr_cfg_float(val, 0.03f, 0.5f, &f)) return 0; c->gest.scope_distance = f; return 1; }
+    if (!strcmp(key, "two_hand")) return vr_cfg_bool(val, &c->gest.two_hand);
     if (!strcmp(key, "world_scale")) { if (!vr_cfg_float(val, 0.001f, 1000, &f)) return 0; c->game.units_per_metre = f; return 1; }
     if (!strcmp(key, "max_head_offset")) { if (!vr_cfg_float(val, 0, 3, &f)) return 0; c->game.max_head_offset_m = f; return 1; }
     if (!strcmp(key, "aim_converge")) { if (!vr_cfg_float(val, 0.5f, 1000, &f)) return 0; c->game.aim_converge_m = f; return 1; }

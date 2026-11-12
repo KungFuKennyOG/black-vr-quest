@@ -52,6 +52,8 @@ static uint32_t black_photo_world_camera(void)
 }
 static uint32_t xbox_PhysicalAddressOf(uint32_t va);
 void vr_mark_world_pass(uint32_t va, int begin);
+/* the live action map's resolver (recomp_manual.c): slot -> control, a fixed table here */
+int black_pc_input_resolver(int slot) { return slot == 12 ? 14 : slot == 9 ? 23 : -1; }
 #include "black_vr.extracted.inc"
 
 /* ---- the shell, faked ------------------------------------------------------------------- */
@@ -79,6 +81,13 @@ static int gun_count, vm_count, vm_reg = -1;
 static float vm_mvp[16];
 void vr_publish_game_gun(const VrGameGun *g) { pub_gun = *g; gun_count++; }
 void vr_mark_viewmodel_mvp(const float m[16], int reg) { memcpy(vm_mvp, m, sizeof(vm_mvp)); vm_reg = reg; vm_count++; }
+/* VR controls: the game's input state out, the scope's aim request in */
+static int (*got_resolver)(int);
+static VrGameInputState pub_in;
+static int pub_in_count, aim_request = -1;
+void vr_set_action_resolver(int (*r)(int)) { got_resolver = r; }
+void vr_publish_game_input(const VrGameInputState *st) { pub_in = *st; pub_in_count++; }
+int vr_game_aim_request(void) { return aim_request; }
 
 static float depth_a, depth_b;
 static void putf(uint32_t va, float v) { memcpy(ram + va, &v, 4); }
@@ -372,6 +381,38 @@ int main(void)
         black_vr_vm_pop();
         CHECK(vm_count == 2 && !memcmp(ram + UPLOAD, r, sizeof(r)));
         fs.hand[1].valid = 1;
+    }
+    /* the player's input update (1EC450): the game's crouch / Toggle Crouch / scope state goes out, the scope's
+     * aim intent comes in (latched against the native toggle); another player's component is left alone */
+    {
+#define COMP 0x00380000u
+#define WEAPON 0x00390000u
+#define DESC 0x003A0000u
+        CHECK(GUEST32(LOOK + 0x8Cu) == ZOOMOBJ);
+        GUEST32(COMP + 0x8Cu) = ZOOMOBJ;
+        GUEST32(ZOOMOBJ + 0x29Cu) = WEAPON;
+        GUEST32(WEAPON + 0xECu) = DESC;
+        GUEST8(COMP + 0x40u) = 1; GUEST8(COMP + 0x102u) = 1;
+        GUEST8(WEAPON + 0x105u) = 0; GUEST8(DESC + 0xC0u) = 1; putf(DESC + 0xB4u, 4.0f);
+        GUEST8(COMP + 0x45u) = 0; GUEST8(COMP + 0x104u) = 0;
+        aim_request = -1;
+        black_vr_input(COMP);
+        CHECK(got_resolver == black_pc_input_resolver && pub_in_count == 1);
+        CHECK(pub_in.valid && pub_in.crouched == 1 && pub_in.crouch_toggle == 1 && pub_in.scoped == 1 && !pub_in.aiming);
+        CHECK(pub_in.weapon == WEAPON && pub_in.max_zoom == 4.0f && pub_in.zoom == 1.0f);
+        CHECK(GUEST8(COMP + 0x45u) == 0 && GUEST8(COMP + 0x104u) == 0);    /* -1: the game's own */
+        aim_request = 1;
+        black_vr_input(COMP);
+        CHECK(GUEST8(COMP + 0x45u) == 1 && GUEST8(COMP + 0x104u) == 1);
+        aim_request = 0;
+        GUEST8(COMP + 0x104u) = 0;
+        black_vr_input(COMP);
+        CHECK(GUEST8(COMP + 0x45u) == 0 && GUEST8(COMP + 0x104u) == 1 && pub_in.serial == 3);
+        GUEST32(COMP + 0x8Cu) = ZOOMOBJ + 0x1000u;                         /* player two's actor */
+        aim_request = 1;
+        black_vr_input(COMP);
+        CHECK(pub_in_count == 3 && GUEST8(COMP + 0x45u) == 0);
+        aim_request = -1;
     }
     printf("xr_shell hooks: %u checks passed\n", checks);
     return 0;

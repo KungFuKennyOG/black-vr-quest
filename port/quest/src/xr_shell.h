@@ -212,6 +212,8 @@ void vrb_get_rumble(float *left, float *right);
 int  vrb_present_mode_now(void);
 void vrb_renderer_claim(XrShell *s);     /* the renderer takes the swapchains from the test pattern */
 void vrb_touch_debug(VrPadState *pad);   /* latest pad for the test pattern */
+/* the hands' linear velocities (stage, m/s) from XrSpaceVelocity, before vrb_set_input; valid 0: from pose deltas */
+void vrb_set_hand_velocity(const VrVec3 lin[2], const int valid[2]);
 int  xrs_now(XrShell *s, XrTime *t);
 void vrb_head_for_testpattern(VrPose hand_aim[2], int valid[2], float trigger[2]);
 

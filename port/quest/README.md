@@ -84,22 +84,34 @@ panel** means the game stopped during startup. The log says why: every check wri
 
 ## 4. Controls (Touch Plus)
 
+In play, the controllers press BLACK's own actions on whatever buttons the game's controller layout
+gives them (any of the four layouts, or your own from the Controls page). Right-handed
+(`left_handed = 1` mirrors everything):
+
 | Touch | Game |
 |---|---|
-| Left stick | move (relative to where you look; `locomotion = aim` moves where the gun points) |
+| Right trigger | fire |
+| Right A / B | reload / melee (a fast swing of the gun hand also melees) |
 | Right stick left/right | snap turn 30° (`turn = smooth` for smooth turning) |
-| Right trigger / left trigger | fire / aim (zoom) |
-| A / B / X / Y | A / B / X / Y |
-| Right grip / left grip | Black / White buttons |
-| Left stick click / right stick click | L3 / R3 (as the game's controller layout uses them) |
-| Menu (left) | Start / pause |
-| Left stick click + Y (hold) | Back (objectives) |
-| Both stick clicks (hold 1 s) | recentre the view (or use the Meta button long-press) |
-| Menus | right stick and the d-pad navigate; A confirms |
+| Right stick up / down | next / previous weapon (one per push); in a scope: the scope's zoom |
+| Right stick click | use / pick up / open doors |
+| Right grip | nothing (`scope_raise = off`: hold for the scope) |
+| Left stick | move (where you look; `locomotion = aim`: where the gun points, `offhand`: where the left controller points) |
+| Left stick click | crouch (as the game's Toggle Crouch option says) |
+| Duck / stand up | crouch / stand (`duck_crouch`, `duck_ratio`) |
+| Left trigger | grenade |
+| Left grip near the gun | hold the gun with both hands (steadier aim; `two_hand`) |
+| Left X | health pack |
+| Left Y tap / hold | suppressor / fire mode |
+| Menu (left) tap / hold 1 s | pause / objectives |
+| Raise a scoped weapon to your eye | look through the scope (`scope_raise`; other weapons never zoom) |
+| Both stick clicks (hold 1 s) | recentre the view and re-measure your standing height (or the Meta button long-press) |
+| Menus | right stick and the d-pad navigate; A confirms, B goes back, Menu = Start |
 
 You aim with the right controller. The game's own shot crosses the controller's ray 10 m
 ahead (`aim_converge`), and the first-person weapon is moved into your hand. `aim = head`
-aims with your head instead. All settings are in `blackvr.ini`.
+aims with your head instead. BLACK's bullet spread does not depend on aiming down the sights,
+so hip-fired shots are as accurate as the game ever makes them. All settings are in `blackvr.ini`.
 
 ## 5. Comfort
 

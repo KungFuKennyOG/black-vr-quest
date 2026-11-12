@@ -432,6 +432,47 @@ void vr_capture_request(void);
 int vr_capture_take(void);
 const char *vr_capture_dir(void);
 
+/* ======================================================================
+ * Additions (VR controls: actions resolved through the game's own action
+ * map, body gestures; port/notes/xr-shell.md "Input"). Everything above is
+ * unchanged.
+ * ====================================================================== */
+
+/* Game thread, once: the live action map's resolver (slot 0..36 -> BLACK's
+ * control id 0..27, -1 none; black_pc_input_resolver). The shell resolves the
+ * VR actions through it (XR thread); until it is set, gameplay sends nothing. */
+void vr_set_action_resolver(int (*resolve)(int slot));
+
+/* Game thread, each player input update (1EC450): the game's own state the
+ * VR controls keep in step with. */
+typedef struct {
+    int      valid;          /* the player's input component was seen */
+    int      crouched;       /* component +40: the game's crouch */
+    int      crouch_toggle;  /* component +102: the profile's Toggle Crouch */
+    int      aiming;         /* weapon +105: aim / scope engaged */
+    int      scoped;         /* the weapon's descriptor +C0: a scoped weapon */
+    float    max_zoom;       /* descriptor +B4 */
+    float    zoom;           /* actor +2A4 (1 = none) */
+    uint32_t weapon;         /* guest address of the weapon in hand */
+    uint32_t serial;         /* increments per publish */
+    /* diagnostics (logged with BLACKVR_INPUT_TRACE=1): the component's intents +40..+4F (+41 fire, +42/+43
+     * grenade, +45 aim, +4B melee), the weapon's state +D8 and its magazine [[weapon+F4]+18] */
+    uint8_t  intent[16];
+    uint8_t  inventory[2];   /* actor +2BA weapon slots, +2BB the slot in hand */
+    uint8_t  latch[16];      /* +100..+10F: options (+101..+103) and edge latches (+104 aim, +105 crouch, +107 suppressor, +108 health pack, +10B/+10C use) */
+    uint32_t weapon_state;
+    int      clip;
+    /* the shot spread's inputs (1CEF40): weapon +E4 (scale), +E0 (time firing); the shot record's
+     * [[weapon+F4]+C] params +8 (Max Spread Angle), +28 / +2C (Accuracy Fall Off Over Time / Time) */
+    float    spread_scale, fire_time, max_spread, spread_extra, spread_time;
+} VrGameInputState;
+void vr_publish_game_input(const VrGameInputState *s);
+
+/* Game thread, same place: the aim (scope) the VR controls want: -1 leave it
+ * to the game's own input, 0 off, 1 on. Written into the component's aim
+ * intent (+45, with the toggle latch +104 held) before the native update. */
+int vr_game_aim_request(void);
+
 #ifdef __cplusplus
 }
 #endif

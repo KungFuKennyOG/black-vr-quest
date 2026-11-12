@@ -256,6 +256,83 @@ static void black_vr_look(uint32_t look)
     }
 }
 
+/* ---- the player's input update (1EC450, ECX = the input component): VR controls ------------------- *
+ * Component (1EC450 self): +8C actor, +40 crouch (the game's own: toggled on a press edge when +102, the
+ * profile's Toggle Crouch, is set, else held), +45 aim intent with toggle latch +104, +102 Toggle Crouch.
+ * Actor +29C weapon, +2A4 zoom. Weapon +EC descriptor (+B4 first zoom, +B8 second, +C0 scoped: 1EC450 then
+ * always toggles the aim and reads slot 35 as the scope's zoom level), +105 aim engaged (1BB110).
+ * The VR layer resolves its actions through the live map (black_pc_input_resolver) and keeps crouch and scope
+ * in step with these; the scope's aim intent is written here, before the native update (as BLACK_PC_AIM's Hold
+ * mode seeds it): with the latch held the native toggle cannot flip it, and non-scoped weapons never aim. */
+int black_pc_input_resolver(int slot);
+static uint32_t bvr_input_serial;
+
+static void black_vr_input(uint32_t comp)
+{
+    VrGameInputState st;
+    uint32_t actor, weapon, desc;
+    int request;
+    static int logged_resolver;
+    if (!vr_active() || !black_pc_ram_span(comp, 0x108u)) return;
+    if (!logged_resolver) {
+        logged_resolver = 1;
+        vr_set_action_resolver(black_pc_input_resolver);
+        fprintf(stderr, "[BLACK_VR] VR actions resolve through the live action map: fire %d reload %d crouch %d use %d "
+                "weapon %d/%d grenade %d melee %d health %d suppressor %d fire mode %d pause %d back %d\n",
+                black_pc_input_resolver(9), black_pc_input_resolver(11), black_pc_input_resolver(12),
+                black_pc_input_resolver(13), black_pc_input_resolver(14), black_pc_input_resolver(15),
+                black_pc_input_resolver(27), black_pc_input_resolver(32), black_pc_input_resolver(33),
+                black_pc_input_resolver(31), black_pc_input_resolver(30), black_pc_input_resolver(25),
+                black_pc_input_resolver(36));
+    }
+    actor = GUEST32(comp + 0x8Cu);
+    /* player one only: the actor the look object (the VR aim's) belongs to */
+    if (!bvr.look || !black_pc_ram_span(bvr.look, 0x90u) || GUEST32(bvr.look + 0x8Cu) != actor ||
+        !black_pc_ram_span(actor, 0x2A8u))
+        return;
+    memset(&st, 0, sizeof(st));
+    st.valid = 1;
+    st.crouched = GUEST8(comp + 0x40u) != 0;
+    st.crouch_toggle = GUEST8(comp + 0x102u) != 0;
+    st.zoom = bvr_f32_ok(actor + 0x2A4u) ? bvr_f32(actor + 0x2A4u) : 1.0f;
+    memcpy(st.intent, (const void *)((uintptr_t)g_xbox_mem_offset + comp + 0x40u), sizeof(st.intent));
+    memcpy(st.latch, (const void *)((uintptr_t)g_xbox_mem_offset + comp + 0x100u), sizeof(st.latch));
+    st.clip = -1;
+    weapon = GUEST32(actor + 0x29Cu);
+    if (black_pc_ram_span(actor, 0x2BCu)) { st.inventory[0] = GUEST8(actor + 0x2BAu); st.inventory[1] = GUEST8(actor + 0x2BBu); }
+    if (black_pc_ram_span(weapon, 0x108u)) {
+        st.weapon = weapon;
+        st.aiming = GUEST8(weapon + 0x105u) != 0;
+        st.weapon_state = GUEST32(weapon + 0xD8u);
+        {
+            const uint32_t mag = GUEST32(weapon + 0xF4u);
+            if (black_pc_ram_span(mag, 0x1Au)) st.clip = *(const uint16_t *)((uintptr_t)g_xbox_mem_offset + mag + 0x18u);
+            if (black_pc_ram_span(mag, 0x10u)) {
+                const uint32_t prm = GUEST32(mag + 0xCu);
+                if (black_pc_ram_span(prm, 0x30u)) {
+                    st.max_spread = bvr_f32(prm + 8u);
+                    st.spread_extra = bvr_f32(prm + 0x28u);
+                    st.spread_time = bvr_f32(prm + 0x2Cu);
+                }
+            }
+        }
+        st.spread_scale = bvr_f32(weapon + 0xE4u);
+        st.fire_time = bvr_f32(weapon + 0xE0u);
+        desc = GUEST32(weapon + 0xECu);
+        if (black_pc_ram_span(desc, 0xC8u)) {
+            st.scoped = GUEST8(desc + 0xC0u) != 0;
+            st.max_zoom = bvr_f32_ok(desc + 0xB4u) ? bvr_f32(desc + 0xB4u) : 1.0f;
+        }
+    }
+    st.serial = ++bvr_input_serial;
+    vr_publish_game_input(&st);
+    request = vr_game_aim_request();
+    if (request >= 0 && (bvr.mode == VR_PRESENT_STEREO || bvr.mode == VR_PRESENT_FLAT_SCOPE)) {
+        GUEST8(comp + 0x45u) = (uint8_t)(request != 0);
+        GUEST8(comp + 0x104u) = 1u;
+    }
+}
+
 /* ---- after D2F40: the view becomes body * head ---------------------------------------------- */
 
 static void bvr_publish(uint32_t camera, int valid, const VrMat4 *w_view, const VrPose *head_stage, int64_t t)

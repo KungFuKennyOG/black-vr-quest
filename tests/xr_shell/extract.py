@@ -12,7 +12,7 @@ if manual.count('#include "black_vr.inc"') != 1:
     raise SystemExit("recomp_manual.c must include black_vr.inc exactly once")
 for hook in ("black_vr_camera_begin(camera);", "black_vr_camera_restore(camera);", "black_vr_camera_after(camera);",
              "black_vr_look(camera);", "black_vr_upload(upload);", "black_vr_vm_push(", "black_vr_vm_pop();",
-             "black_vr_world_mark(1);", "black_vr_world_mark(0);"):
+             "black_vr_world_mark(1);", "black_vr_world_mark(0);", "black_vr_input(self);"):
     if hook not in manual:
         raise SystemExit("missing hook call in recomp_manual.c: " + hook)
 start, end = vr.index("/* BEGIN BLACK_VR"), vr.index("/* END BLACK_VR */")

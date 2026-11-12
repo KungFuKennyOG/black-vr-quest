@@ -21,6 +21,7 @@
 #include <math.h>
 #include "xr_shell.h"
 #include "vr_game_math.h"
+#include "vr_gestures.h"
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -46,6 +47,7 @@ static VrGameCameraExt g_cam_ext[CAM_RING];
 static VrGameGun g_cam_gun[CAM_RING];           /* gun latch: the weapon pose published with each camera */
 static VrGameGun g_gun_pending;                 /* vr_publish_game_gun, taken by the next camera */
 static volatile int g_cam_idx = -1;
+static uint32_t g_cam_count;                    /* cameras published: the game's rendered frames (VR controls' taps) */
 static int64_t g_cam_time_ns;
 static volatile int g_present_mode = VR_PRESENT_FLAT_MENU;
 
@@ -120,15 +122,113 @@ void vrb_set_session(XrShell *s, int running, int focused)
     pthread_mutex_unlock(&g_lock);
 }
 
-void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim[2], const VrPose grip[2],
-                   const int valid[2], double dt)
+/* ---- VR controls (XR thread; the game's state from the game thread) ------------------------------------------- */
+static int (*volatile g_resolver)(int slot);
+static VrGameInputState g_game_in;
+static int64_t g_game_in_ns;
+static volatile int g_aim_request = -1;
+static VrSwing g_swing;
+static VrDuck g_duck;
+static VrCrouchSync g_csync;
+static VrScope g_scope;
+static VrTwoHand g_two;
+static VrVec3 g_hand_vel[2];
+static int g_hand_vel_ok[2];
+static int g_duck_recal = 1, g_was_in_game;
+static VrInputContext g_last_ctx;
+static int g_two_hand_on;                       /* the two-handed aim of the last input step (latch_gun) */
+
+void vr_set_action_resolver(int (*resolve)(int slot)) { g_resolver = resolve; }
+
+void vr_publish_game_input(const VrGameInputState *st)
+{
+    static VrGameInputState prev;
+    static int trace = -1, have;
+    if (trace < 0) { const char *e = getenv("BLACKVR_INPUT_TRACE"); trace = e && *e && strcmp(e, "0"); }
+    pthread_mutex_lock(&g_lock);
+    if (st) g_game_in = *st;
+    else memset(&g_game_in, 0, sizeof(g_game_in));
+    g_game_in_ns = mono_ns();
+    pthread_mutex_unlock(&g_lock);
+    if (!st) return;
+    /* the game's side of the VR controls, on change (device logs tune the gestures against these) */
+    if (!have || st->crouched != prev.crouched || st->crouch_toggle != prev.crouch_toggle || st->weapon != prev.weapon ||
+        st->aiming != prev.aiming || st->scoped != prev.scoped || memcmp(st->inventory, prev.inventory, 2))
+        XLOGI("game: crouch %d (toggle mode %d), weapon %08X (slot %u of %u) scoped %d (zoom %.2f), aiming %d",
+              st->crouched, st->crouch_toggle, st->weapon, st->inventory[1], st->inventory[0], st->scoped, st->max_zoom,
+              st->aiming);
+    if (trace && have && (memcmp(st->intent, prev.intent, sizeof(st->intent)) || st->weapon_state != prev.weapon_state ||
+                          st->clip != prev.clip || memcmp(st->latch, prev.latch, sizeof(st->latch)))) {
+        char hex[3 * 16 + 1], hex2[3 * 16 + 1];
+        int i;
+        for (i = 0; i < 16; i++) { snprintf(hex + 3 * i, 4, "%02X ", st->intent[i]); snprintf(hex2 + 3 * i, 4, "%02X ", st->latch[i]); }
+        XLOGI("game trace: +100..10F %s| intents +40..4F %s| weapon state %u, magazine %d, zoom %.2f, aiming %d, crouch %d, spread "
+              "scale %.3f max %.4f +%.4f over %.3f s (firing %.2f s)", hex2, hex, st->weapon_state, st->clip, st->zoom,
+              st->aiming, st->crouched, st->spread_scale, st->max_spread, st->spread_extra, st->spread_time, st->fire_time);
+    }
+    prev = *st;
+    have = 1;
+}
+
+int vr_game_aim_request(void) { return g_aim_request; }
+
+void vrb_set_hand_velocity(const VrVec3 lin[2], const int valid[2])
 {
     int h;
-    double move_rot = 0.0;
-    const int mode = vrb_present_mode_now();
-    const int in_game = mode == VR_PRESENT_STEREO || mode == VR_PRESENT_FLAT_SCOPE;
     pthread_mutex_lock(&g_lock);
+    for (h = 0; h < 2; h++) { g_hand_vel[h] = lin[h]; g_hand_vel_ok[h] = valid[h]; }
+    pthread_mutex_unlock(&g_lock);
+}
+
+static int resolve_slot(int slot)
+{
+    int (*r)(int) = g_resolver;
+    return r ? r(slot) : -1;
+}
+
+/* the yaw of a pose's forward in stage space (radians, positive = left), 0 when it points straight up/down */
+static int horizontal_yaw(VrQuat q, double *yaw)
+{
+    const VrVec3 f = vrm_q_rotate(q, vrm_v3(0, 0, -1));
+    if (f.x * f.x + f.z * f.z < 0.04f) return 0;
+    *yaw = atan2(-f.x, -f.z);
+    return 1;
+}
+
+void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2], const VrPose grip[2],
+                   const int valid[2], double dt)
+{
+    int h, gun, off, swing = 0, body_ducked = 0, game_known, scope = 0;
+    VrPose aim[2];
+    VrGameInputState gin;
+    VrInputContext ctx;
+    VrActionState act;
+    double move_rot = 0.0;
+    /* gameplay for the controls: the mode the game hook chose, while the game has published a camera in the last
+     * 3 s (the display's 250 ms freshness would flap the controls between gameplay and menus on a hitch) */
+    const int mode = g_present_mode;
+    int in_game;
+    const VrGestureConfig *gc = &s->cfg.gest;
+    pthread_mutex_lock(&g_lock);
+    in_game = (mode == VR_PRESENT_STEREO || mode == VR_PRESENT_FLAT_SCOPE) && g_cam_time_ns &&
+              mono_ns() - g_cam_time_ns < 3000000000LL;
     g_touch = *touch;
+    gun = s->cfg.game.aim_hand & 1;
+    off = gun ^ 1;
+    for (h = 0; h < 2; h++) aim[h] = aim_in[h];
+    gin = g_game_in;
+    game_known = gin.valid && g_game_in_ns && mono_ns() - g_game_in_ns < 3000000000LL;   /* as in_game */
+
+    /* two-handed aim: the gun hand's aim pose points at the off hand while its grip is held near the gun */
+    {
+        const int was = g_two.engaged;
+        const float off_grip = gun ? touch->lgrip : touch->rgrip;
+        aim[gun] = vrg_two_hand_update(&g_two, gc, valid[gun] && in_game, aim[gun], valid[off], aim[off].position,
+                                       off_grip > 0.6f, dt);
+        if (g_two.engaged != was)
+            XLOGI("two-hand %s (hands %.2f m apart)", g_two.engaged ? "on" : "off", g_two.last_dist);
+        g_two_hand_on = g_two.engaged;
+    }
     for (h = 0; h < 2; h++) {
         g_live.hand[h].aim = aim[h];
         g_live.hand[h].grip = grip[h];
@@ -136,17 +236,122 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim[2], c
     }
     g_trigger[0] = touch->lt;
     g_trigger[1] = touch->rt;
-    /* head-relative locomotion while the game's yaw follows the aim hand */
-    if (in_game && s->cfg.locomotion == VR_LOCO_HEAD && s->cfg.game.aim_mode == VR_AIM_HAND &&
-        valid[s->cfg.game.aim_hand] && g_have_origin) {
+
+    /* locomotion: the move stick turned from the game's yaw (the aim) to the head's or the off hand's */
+    if (in_game && g_have_origin && s->cfg.locomotion != VR_LOCO_AIM) {
         const VrPose head_rel = vgm_relative(g_origin, g_live.head);
-        const VrPose hand_rel = vgm_relative(g_origin, aim[s->cfg.game.aim_hand]);
-        double hy, hp, ay, ap;
-        vgm_dir_angles(vgm_aim_dir(0, head_rel, hand_rel, vrm_v3(0, 0, 0), 1.0f), &hy, &hp);
-        vgm_dir_angles(vgm_aim_dir(1, head_rel, hand_rel, vrm_v3(0, 0, 0), s->cfg.game.aim_converge_m), &ay, &ap);
-        move_rot = vrm_wrap_deg(hy - ay);
+        double ay = 0.0, ap, ry;
+        int ok = 1;
+        if (s->cfg.game.aim_mode == VR_AIM_HAND && valid[gun]) {
+            const VrPose hand_rel = vgm_relative(g_origin, aim[gun]);
+            vgm_dir_angles(vgm_aim_dir(1, head_rel, hand_rel, vrm_v3(0, 0, 0), s->cfg.game.aim_converge_m), &ay, &ap);
+        } else {
+            vgm_dir_angles(vgm_aim_dir(0, head_rel, head_rel, vrm_v3(0, 0, 0), 1.0f), &ay, &ap);
+        }
+        if (s->cfg.locomotion == VR_LOCO_OFFHAND) {
+            const VrPose off_rel = vgm_relative(g_origin, aim[off]);
+            double oy = 0.0;
+            ok = valid[off] && horizontal_yaw(off_rel.orientation, &oy);
+            ry = oy / VRM_DEG;
+            if (!ok) {                                  /* off hand untracked or pointing down: the head */
+                vgm_dir_angles(vgm_aim_dir(0, head_rel, head_rel, vrm_v3(0, 0, 0), 1.0f), &ry, &ap);
+                ok = 1;
+            }
+        } else {
+            vgm_dir_angles(vgm_aim_dir(0, head_rel, head_rel, vrm_v3(0, 0, 0), 1.0f), &ry, &ap);
+        }
+        if (ok) move_rot = vrm_wrap_deg(ry - ay);
     }
-    vr_map_pad(&s->cfg.input, &g_in_rt, touch, in_game, move_rot, dt, &g_live.pad);
+
+    /* gestures (gameplay only) */
+    if (in_game && !g_was_in_game && !g_duck.calibrated) g_duck_recal = 1;
+    if (in_game) {
+        const VrVec3 head_pos = g_live.head.position;
+        if (g_duck_recal && g_have_origin) {
+            vrg_duck_calibrate(&g_duck, head_pos.y);
+            g_duck_recal = 0;
+            XLOGI("duck: standing head height %.2f m (crouch below %.2f, stand above %.2f)", head_pos.y,
+                  head_pos.y >= 1.0f ? head_pos.y * gc->duck_ratio : head_pos.y - 1.65f * (1.0f - gc->duck_ratio),
+                  head_pos.y >= 1.0f ? head_pos.y * (gc->duck_ratio + 0.08f) : head_pos.y - 1.65f * (0.92f - gc->duck_ratio));
+        }
+        {
+            const int was = g_duck.ducked;
+            body_ducked = vrg_duck_update(&g_duck, gc, g_have_origin && !g_duck_recal, head_pos.y, dt);
+            if (body_ducked != was)
+                XLOGI("duck: %s (head %.2f m, standing %.2f, thresholds %.2f / %.2f, game crouch %d)",
+                      body_ducked ? "crouch" : "stand", g_duck.last_y, g_duck.standing, g_duck.threshold_lo,
+                      g_duck.threshold_hi, game_known ? gin.crouched : -1);
+        }
+        swing = vrg_swing_update(&g_swing, gc, valid[gun], aim_in[gun].position, head_pos, g_hand_vel_ok[gun],
+                                 g_hand_vel[gun], 0, vrm_v3(0, 0, 0), dt);
+        if (swing) XLOGI("melee swing: %.2f m/s (threshold %.2f)", g_swing.last_speed, gc->swing_speed);
+        {
+            VrVec3 eye[2], right = vrm_q_rotate(g_live.head.orientation, vrm_v3(1, 0, 0));
+            const VrVec3 fwd = vrm_q_rotate(g_live.head.orientation, vrm_v3(0, 0, -1));
+            const float half_ipd = (g_live.ipd_m > 0.0f ? g_live.ipd_m : 0.064f) * 0.5f;
+            const int was = g_scope.engaged;
+            eye[0] = vrm_sub(head_pos, vrm_scale(right, half_ipd));
+            eye[1] = vrm_add(head_pos, vrm_scale(right, half_ipd));
+            scope = vrg_scope_update(&g_scope, gc, valid[gun], aim[gun], eye, fwd);
+            if (scope != was)
+                XLOGI("scope raise: %s (sight %.3f m from the eye, %.1f deg off the view, weapon scoped %d, aiming %d)",
+                      scope ? "up" : "down", g_scope.last_dist, g_scope.last_angle_deg, game_known ? gin.scoped : -1,
+                      game_known ? gin.aiming : -1);
+        }
+    } else {
+        g_scope.engaged = 0;
+    }
+    g_was_in_game = in_game;
+
+    /* the aim intent the game hook writes: scoped weapons only; scope_raise off -> the gun hand's grip holds it */
+    if (!in_game || !game_known) g_aim_request = -1;
+    else if (!gin.scoped) g_aim_request = 0;
+    else if (gc->scope_raise) g_aim_request = scope;
+    else g_aim_request = (gun ? touch->rgrip : touch->lgrip) > 0.6f;
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.in_game = in_game;
+    ctx.move_rotate_deg = move_rot;
+    ctx.melee_swing = swing;
+    ctx.scope_up = in_game && game_known && gin.scoped && gin.aiming;
+    /* taps last 2 of the game's rendered frames (each has >= 1 input update; pause and menus read once a frame) */
+    ctx.ticks_valid = game_known;
+    ctx.game_ticks = g_cam_count;
+    {
+        const int before = g_csync.presses;
+        ctx.crouch_hold = in_game && gc->duck_crouch &&
+            vrg_crouch_sync(&g_csync, body_ducked, game_known ? gin.crouched : -1,
+                            game_known ? gin.crouch_toggle : -1, game_known, g_cam_count, dt);
+        if (g_csync.presses != before)
+            XLOGI("duck: crouch pressed (body %s, game crouch %d, try %d)", body_ducked ? "ducked" : "standing",
+                  game_known ? gin.crouched : -1, g_csync.tries);
+    }
+    vr_map_actions(&s->cfg.input, &g_in_rt, touch, &ctx, dt, &act);
+    if (g_in_rt.fired_mask) {
+        char line[160];
+        int i, n = 0;
+        line[0] = 0;
+        for (i = 0; i < VRA_COUNT && n < (int)sizeof(line) - 16; i++)
+            if (g_in_rt.fired_mask & VRA_BIT(i)) n += snprintf(line + n, sizeof(line) - (size_t)n, " %s->%d", k_vra_name[i],
+                                                             resolve_slot(k_vra_slot[i]));
+        XLOGI("action tap:%s", line);
+    }
+    /* gameplay needs the game's map; until its resolver is installed, a neutral pad */
+    if (act.in_game && !g_resolver) memset(&g_live.pad, 0, sizeof(g_live.pad));
+    else vr_actions_to_pad(&act, resolve_slot, &g_live.pad);
+    /* experiments (env BLACKVR_DEBUG_GRIPS=1, gameplay): right grip = the game's own Aim control (no VR scope
+     * logic), left grip = Black, both = White; the VR scheme leaves these unmapped */
+    if (act.in_game && g_resolver) {
+        static int dbg = -1;
+        if (dbg < 0) { const char *e = getenv("BLACKVR_DEBUG_GRIPS"); dbg = e && *e && strcmp(e, "0"); }
+        if (dbg) {
+            const int rg = touch->rgrip > 0.6f, lg = touch->lgrip > 0.6f;
+            if (rg && lg) vr_pad_press(&g_live.pad, 21, 1.0f);
+            else if (rg) { vr_pad_press(&g_live.pad, resolve_slot(16), 1.0f); g_aim_request = -1; }
+            else if (lg) vr_pad_press(&g_live.pad, 20, 1.0f);
+        }
+    }
+    g_last_ctx = ctx;
     if (g_in_rt.recentre_request) { g_in_rt.recentre_request = 0; g_recentre_pending = 1; }
     /* both-eye capture: both thumbsticks still held VR_CAPTURE_HOLD_S (the recentre chord fired at 1 s) */
     if (touch->lclick && touch->rclick) {
@@ -178,6 +383,7 @@ void vrb_on_xr_frame(XrShell *s, XrTime predicted, XrDuration period)
             g_origin = vgm_recentre_origin(h);
             g_have_origin = 1;
             g_recentre_pending = 0;
+            g_duck_recal = 1;                    /* the standing height is taken again */
             XLOGI("recentred at %.2f %.2f %.2f yaw %.1f", h.position.x, h.position.y, h.position.z,
                   vrm_q_yaw(h.orientation) / VRM_DEG);
         }
@@ -188,7 +394,7 @@ void vrb_on_xr_frame(XrShell *s, XrTime predicted, XrDuration period)
 void vrb_recentre_from(const VrPose *head)
 {
     pthread_mutex_lock(&g_lock);
-    if (head) { g_origin = vgm_recentre_origin(*head); g_have_origin = 1; }
+    if (head) { g_origin = vgm_recentre_origin(*head); g_have_origin = 1; g_duck_recal = 1; }
     else g_recentre_pending = 1;
     pthread_mutex_unlock(&g_lock);
 }
@@ -367,6 +573,7 @@ void vr_publish_game_camera_ex(const VrGameCamera *cam, const VrGameCameraExt *e
     memset(&g_gun_pending, 0, sizeof(g_gun_pending));
     g_cam_idx = next;
     g_cam_time_ns = mono_ns();
+    g_cam_count++;
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -522,6 +729,24 @@ static void latch_gun(XrShell *s, XrTime t)
         return;
     g_rgun.hand = pose_from_xr(&loc.pose);
     g_rgun.valid = 1;
+    {
+        /* two-handed aim: the weapon follows the gun hand -> off hand line at display time too */
+        int two;
+        float blend;
+        const int off = (in.hand_index & 1) ^ 1;
+        XrSpaceLocation lo = { XR_TYPE_SPACE_LOCATION };
+        pthread_mutex_lock(&g_lock);
+        two = g_two_hand_on;
+        blend = g_two.blend;
+        pthread_mutex_unlock(&g_lock);
+        if (two && s->aim_space[off] && XR_SUCCEEDED(xrLocateSpace(s->aim_space[off], s->world_space, t, &lo)) &&
+            (lo.locationFlags & need) == need) {
+            const VrPose offp = pose_from_xr(&lo.pose);
+            VrPose p = vrg_two_hand_pose(g_rgun.hand, offp.position);
+            if (blend < 1.0f) p.orientation = vrg_nlerp(g_rgun.hand.orientation, p.orientation, blend);
+            g_rgun.hand = p;
+        }
+    }
 }
 
 /* The renderer's frame: its camera (or the newest), and its presentation mode. */
