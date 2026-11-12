@@ -345,6 +345,11 @@ contention drew 396 frames in 60 s vs 264 without the backoff.
   Adreno has it) on the main-target multiview passes; not done (untestable on SwiftShader).
 - Already in the shell: refresh rate (XR_FB_display_refresh_rate), performance levels, thread hints.
 
+> Update (foveation.md): the "today FFR saves little ... not done" limit above is superseded. The Kelvin backend now
+> generates its own 2-layer fragment density map (centred on each eye's projection centre) and attaches it to the Kelvin
+> main passes only; `RECOMP_KVK_FDM=0/1` A/B-tests it and the ini `foveation` level sets the strength. Needs device
+> verification; see port/notes/foveation.md.
+
 > Update (device-preflight.md, bug 1): the FDM swapchain flag requires `VK_EXT_fragment_density_map` enabled on the
 > device; the shell now enables it where the GPU has it and leaves foveation off otherwise, so the SwiftShader runs
 > log "foveation: not used". The fake runtime enforces the rule.
