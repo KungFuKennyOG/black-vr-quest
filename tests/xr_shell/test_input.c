@@ -47,6 +47,44 @@ static void test_buttons(void)
     /* head-relative locomotion: the stick turned 90 degrees left becomes strafe-left */
     vr_map_pad(&c, &rt, &t, 1, 90.0, 1.0 / 72.0, &p);
     CHECK(p.thumb_lx < -32000 && abs(p.thumb_ly) < 200);
+
+    /* gameplay d-pad: right stick up -> d-pad RIGHT (switch weapon), down -> DOWN (health pack), no turn */
+    memset(&rt, 0, sizeof(rt)); memset(&t, 0, sizeof(t));
+    t.ry = 0.9f; t.rx = 0.2f;
+    vr_map_pad(&c, &rt, &t, 1, 0.0, 1.0 / 72.0, &p);
+    CHECK((p.buttons & VR_PAD_DPAD_RIGHT) && !(p.buttons & (VR_PAD_DPAD_UP | VR_PAD_DPAD_DOWN | VR_PAD_DPAD_LEFT)));
+    CHECK(rt.turn_accum_deg == 0.0 && p.thumb_ry == 0);
+    t.ry = -0.9f; t.rx = 0.0f;
+    vr_map_pad(&c, &rt, &t, 1, 0.0, 1.0 / 72.0, &p);
+    CHECK((p.buttons & VR_PAD_DPAD_DOWN) && !(p.buttons & VR_PAD_DPAD_RIGHT));
+    /* left grip + right stick: the full d-pad, no turning, and no White while it is used */
+    memset(&rt, 0, sizeof(rt)); memset(&t, 0, sizeof(t));
+    t.lgrip = 1.0f; t.ry = 0.9f;
+    vr_map_pad(&c, &rt, &t, 1, 0.0, 1.0 / 72.0, &p);
+    CHECK((p.buttons & VR_PAD_DPAD_UP) && !(p.buttons & VR_PAD_RIGHT_SHOULDER));
+    t.ry = 0.0f; t.rx = -1.0f;
+    vr_map_pad(&c, &rt, &t, 1, 0.0, 1.0 / 72.0, &p);
+    CHECK((p.buttons & VR_PAD_DPAD_LEFT) && rt.turn_accum_deg == 0.0);
+    t.lgrip = 0.0f;                                     /* released while the stick is still pushed: no snap */
+    vr_map_pad(&c, &rt, &t, 1, 0.0, 1.0 / 72.0, &p);
+    CHECK(rt.turn_accum_deg == 0.0 && !(p.buttons & VR_PAD_RIGHT_SHOULDER));
+    /* a grip tap without the stick: White as a short pulse on release */
+    memset(&rt, 0, sizeof(rt)); memset(&t, 0, sizeof(t));
+    t.lgrip = 1.0f;
+    vr_map_pad(&c, &rt, &t, 1, 0.0, 1.0 / 72.0, &p);
+    CHECK(!(p.buttons & VR_PAD_RIGHT_SHOULDER));
+    t.lgrip = 0.0f;
+    vr_map_pad(&c, &rt, &t, 1, 0.0, 1.0 / 72.0, &p);
+    CHECK(p.buttons & VR_PAD_RIGHT_SHOULDER);
+    {
+        int k, on = 0;
+        for (k = 0; k < 20; k++) { vr_map_pad(&c, &rt, &t, 1, 0.0, 1.0 / 72.0, &p); on += !!(p.buttons & VR_PAD_RIGHT_SHOULDER); }
+        CHECK(on >= 6 && on <= 9);                      /* ~0.12 s at 72 Hz, then off */
+    }
+    /* menus: the left grip is White while held, as before */
+    t.lgrip = 1.0f;
+    vr_map_pad(&c, &rt, &t, 0, 0.0, 1.0 / 72.0, &p);
+    CHECK(p.buttons & VR_PAD_RIGHT_SHOULDER);
 }
 
 static void test_snap_turn(void)

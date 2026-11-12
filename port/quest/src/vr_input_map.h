@@ -7,13 +7,15 @@
  *
  *   Left stick          -> left stick (move)               click -> L3 (sprint/crouch as the preset says)
  *   Right stick X       -> host turning (snap or smooth), NOT the game's look
- *   Right stick Y       -> nothing in gameplay (pitch comes from the head or the hand)
- *   Right stick click   -> R3 (melee in the default preset)
+ *   Right stick up/down -> d-pad RIGHT / DOWN in gameplay (switch weapon / health pack in BLACK's default layout)
+ *   Left grip + right stick -> the full d-pad (up = fire mode, left/right = switch weapon, down = health pack);
+ *                          a left grip tap with no direction -> White (cycle item)
+ *   Right stick click   -> R3 (aim / zoom in the default layout)
  *   Right trigger       -> right trigger (fire)
- *   Left trigger        -> left trigger (aim / zoom)
+ *   Left trigger        -> left trigger (grenade in the default layout)
  *   A / B / X / Y       -> A / B / X / Y
  *   Right grip          -> Black (Xbox analog button 4, VR_PAD_RIGHT_SHOULDER -> BLACK)
- *   Left grip           -> White (analog 5, VR_PAD_LEFT_SHOULDER -> WHITE)
+ *   Left grip           -> White (analog 5, VR_PAD_LEFT_SHOULDER -> WHITE); in gameplay a tap, see above
  *   Left menu button    -> START (pause)
  *   Left stick click + Y held 1 s -> BACK (objectives) ; both thumbsticks clicked 1 s -> recentre
  *   In menus (present mode != STEREO) the right stick drives the d-pad and right stick X goes
@@ -54,6 +56,10 @@ typedef struct {
     double back_hold_s, recentre_hold_s;
     int    back_fired, recentre_fired;
     int    recentre_request;  /* consumed by the shell */
+    /* the left grip as the d-pad modifier (gameplay): White is sent as a short pulse on a release that did not
+     * use the right stick as a d-pad */
+    int    dpad_grip_held, dpad_grip_used;
+    double white_pulse_s;
 } VrInputRuntime;
 
 static inline void vr_input_default_config(VrInputConfig *c)
@@ -135,7 +141,35 @@ static inline void vr_map_pad(const VrInputConfig *c, VrInputRuntime *rt, const 
     out->thumb_lx = vr_axis_to_s16(mx, c->deadzone);
     out->thumb_ly = vr_axis_to_s16(my, c->deadzone);
     if (in_game) {
-        vr_turn_step(c, rt, lx_turn, dt);
+        /* The d-pad (BLACK's default layout: right/left = switch weapon, up = fire mode, down = health pack).
+         * Right stick up/down are free in gameplay (pitch comes from the hand/head): a push past 0.6 on the
+         * vertical axis, dominant over the horizontal, holds d-pad RIGHT (up: switch weapon, the common one) or
+         * DOWN (health pack). Holding the left grip makes the right stick a full d-pad (up/down/left/right as
+         * pushed) and pauses turning; a grip press that used no direction sends White (cycle item) on release. */
+        const int grip = t->lgrip > 0.6f;
+        const float ax = fabsf(lx_turn), ay = fabsf(ly_look);
+        if (grip) {
+            uint16_t d = 0;
+            if (ay > 0.6f && ay >= ax) d = ly_look > 0.0f ? VR_PAD_DPAD_UP : VR_PAD_DPAD_DOWN;
+            else if (ax > 0.6f) d = lx_turn > 0.0f ? VR_PAD_DPAD_RIGHT : VR_PAD_DPAD_LEFT;
+            out->buttons |= d;
+            if (d) rt->dpad_grip_used = 1;
+            rt->dpad_grip_held = 1;
+            rt->snap_armed = 0;            /* no snap from a stick still pushed when the grip is let go */
+        } else {
+            if (rt->dpad_grip_held && !rt->dpad_grip_used) rt->white_pulse_s = 0.12;
+            rt->dpad_grip_held = rt->dpad_grip_used = 0;
+            if (ay > 0.6f && ay > ax * 1.2f) {
+                out->buttons |= ly_look > 0.0f ? VR_PAD_DPAD_RIGHT : VR_PAD_DPAD_DOWN;
+                rt->snap_armed = 0;        /* a diagonal push for the d-pad never also snaps */
+            } else {
+                vr_turn_step(c, rt, lx_turn, dt);
+            }
+        }
+        if (rt->white_pulse_s > 0.0) {
+            out->buttons |= VR_PAD_RIGHT_SHOULDER;   /* -> Xbox WHITE button */
+            rt->white_pulse_s -= dt;
+        }
         out->thumb_rx = 0;
         out->thumb_ry = 0;
     } else {
@@ -156,7 +190,8 @@ static inline void vr_map_pad(const VrInputConfig *c, VrInputRuntime *rt, const 
     if (t->y) out->buttons |= VR_PAD_Y;
     if (t->menu) out->buttons |= VR_PAD_START;
     if (t->rgrip > 0.6f) out->buttons |= VR_PAD_LEFT_SHOULDER;   /* -> Xbox BLACK button */
-    if (t->lgrip > 0.6f) out->buttons |= VR_PAD_RIGHT_SHOULDER;  /* -> Xbox WHITE button */
+    if (!in_game && t->lgrip > 0.6f) out->buttons |= VR_PAD_RIGHT_SHOULDER;  /* -> WHITE (in gameplay: above) */
+    if (!in_game) rt->dpad_grip_held = rt->dpad_grip_used = 0;
 
     /* chords */
     if (move_click && t->y) {
