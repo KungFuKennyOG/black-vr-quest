@@ -2892,8 +2892,12 @@ static void draw_now(const KGpuDraw *d)
     if (!G.ok || !d->icount || (!d->gvs && !d->vcount)) return;
     stereo_prepare();
     if (hud_starts(d)) {
+        static unsigned long long hud_logged;   /* every frame has one: log the first, then every 3600th */
         V.hud = true;
-        LOG("frame %llu: HUD begins", (unsigned long long)G.st.frames);
+        if (!hud_logged || G.st.frames - hud_logged >= 3600u || spritelog()) {
+            LOG("frame %llu: HUD begins", (unsigned long long)G.st.frames);
+            hud_logged = G.st.frames ? G.st.frames : 1u;
+        }
         if (spritelog()) {
             NpExt x;
             const bool ok = np_extent(d, &x);

@@ -15,15 +15,76 @@
  * All shared state below is guarded by g_lock (short critical sections, no
  * blocking calls inside). The VkQueue has its own recursive lock.
  */
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <pthread.h>
 #include "xr_shell.h"
 #include "vr_game_math.h"
 #include "vr_gestures.h"
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* ---- the shell's log lines: logcat, and the game's log file (xr_shell.h XLOGI) ---------------------------- */
+static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
+static VrLogSink g_log_sink;
+static char g_log_early[65536];      /* lines before the file opened: "(hh:mm:ss.mmm) text\n" each */
+static size_t g_log_early_n;
+
+void xlog_line(int prio, const char *fmt, ...)
+{
+    char line[1024];
+    VrLogSink sink = NULL;
+    va_list ap;
+    int n;
+    va_start(ap, fmt);
+    n = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if ((size_t)n >= sizeof(line)) n = (int)sizeof(line) - 1;
+    __android_log_print(prio, XLOG_TAG, "%s", line);
+    if (pthread_mutex_trylock(&g_log_lock) != 0) return;   /* never wait (a crash report may log from a handler) */
+    if (g_log_sink) {
+        sink = g_log_sink;
+    } else if (g_log_early_n + (size_t)n + 32u < sizeof(g_log_early)) {
+        struct timespec ts;
+        struct tm tmv;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        localtime_r(&ts.tv_sec, &tmv);
+        g_log_early_n += (size_t)snprintf(g_log_early + g_log_early_n, sizeof(g_log_early) - g_log_early_n,
+                                          "(%02d:%02d:%02d.%03ld) %s\n", tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+                                          ts.tv_nsec / 1000000, line);
+    }
+    pthread_mutex_unlock(&g_log_lock);
+    if (sink) sink(XLOG_TAG, line, (size_t)n);
+}
+
+void vr_log_sink(VrLogSink sink)
+{
+    char *early = NULL;
+    size_t n = 0;
+    pthread_mutex_lock(&g_log_lock);
+    g_log_sink = sink;
+    if (sink && g_log_early_n && (early = malloc(g_log_early_n))) {
+        memcpy(early, g_log_early, g_log_early_n);
+        n = g_log_early_n;
+    }
+    g_log_early_n = 0;
+    pthread_mutex_unlock(&g_log_lock);
+    if (early) {
+        size_t at = 0;
+        while (at < n) {
+            const char *nl = memchr(early + at, '\n', n - at);
+            const size_t len = nl ? (size_t)(nl - (early + at)) : n - at;
+            sink(XLOG_TAG, early + at, len);
+            at += len + 1u;
+        }
+        free(early);
+    }
+}
 
 /* ---- live state (XR thread writes) ---------------------------------------- */
 static VrFrameState g_live;
