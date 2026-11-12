@@ -184,15 +184,28 @@ say "6/6 Launch and record the log"
 LOG="$HERE/blackvr_log_$(date +%Y%m%d_%H%M%S).txt"
 adb shell am force-stop $PKG >/dev/null 2>&1
 adb logcat -c 2>/dev/null
+adb logcat -G 16M >/dev/null 2>&1   # a bigger device log buffer, so a busy game doesn't outrun the reader
 {
   echo "# BLACK VR log  $(date)"
   echo "# device: $model  build: $(adb shell getprop ro.build.fingerprint | tr -d '\r')"
   echo "# apk: $(shasum -a 256 "$APK" 2>/dev/null | cut -c1-16)"
   echo "# memory: $(adb shell cat /proc/meminfo | head -3 | tr -d '\r' | tr '\n' ' ')"
 } > "$LOG"
-adb logcat -b main,system,crash -v threadtime >> "$LOG" &
+# the reader can drop out ("logcat: Unexpected EOF") when the game logs a lot: restart it, from the newest line
+(
+  first=1
+  while true; do
+    if [ $first -eq 1 ]; then adb logcat -b main,system,crash -v threadtime 2>/dev/null
+    else echo "# --- log reader restarted $(date +%H:%M:%S); a few lines may be missing (the headset's own log has them) ---"
+         adb logcat -b main,system,crash -v threadtime -T 1 2>/dev/null; fi
+    first=0
+    adb get-state >/dev/null 2>&1 || sleep 2
+    sleep 1
+  done
+) >> "$LOG" &
 LOGPID=$!
-trap 'kill $LOGPID 2>/dev/null; summarize; echo; say "Log saved: $LOG"; echo "   Send this file back in the chat, plus one line on what you saw."; exit 0' INT TERM
+stop_reader() { pkill -P $LOGPID 2>/dev/null; kill $LOGPID 2>/dev/null; }
+trap 'stop_reader; summarize; echo; say "Log saved: $LOG"; echo "   Send this file back in the chat, plus one line on what you saw."; exit 0' INT TERM
 sleep 1
 adb shell am start -n $PKG/android.app.NativeActivity >/dev/null 2>&1 \
   || adb shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
@@ -205,7 +218,7 @@ while kill -0 $LOGPID 2>/dev/null; do
     if ! adb shell pidof $PKG >/dev/null 2>&1; then
       echo "   the app is no longer running (crash or exit)."
       sleep 2   # let the crash buffer flush into the log
-      kill $LOGPID 2>/dev/null
+      stop_reader
       summarize
       say "Log saved: $LOG"
       echo "   Send this file back in the chat, plus one line on what you saw."
