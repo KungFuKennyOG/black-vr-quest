@@ -663,3 +663,119 @@ rebuilt and ctest 3/3 pass. That ctest stops at the first GPU touch (~0.5 s), be
 two 120 s runs with `BOOT_STOP_AT_GPU=0` above (fast-forward on / verify) are the ones that exercise the change. Both
 ran to the time limit, no crash. `tests/apu_spatial`, which links the whole runtime, does not configure on this host
 (no SDL2). The other APU suites extract apu_core.c / apu_xaudio2.c functions, which this change does not touch.
+
+## 11. Pusher (`bx-pusher`) profile and optimisation pass (2026-11-11/12)
+
+Nothing committed. Headset evidence: `bx-pusher` 75-98% of a big core, game 38-50 fps in busier level-1 scenes,
+30-35k draws/s. The pusher thread is the pushbuffer decoder *and* the whole Vulkan backend (with `kvk` there is no
+async GPU thread: `kgpu_async_active()` is false), so its time is decode + draw setup + recording + submit.
+
+### 11.1 Tools (test-only)
+
+- `grx_prof.c`: `GRX_PROF_PUSH=<file>` samples `bx-pusher` like `GRX_PROF_APU` (user-time task clock; the APU/pusher
+  threads now share one table of named threads). `grx_prof.py` reads it unchanged.
+- `build-push-x86` (configured like `build-perf-x86`, plus `-g` for line attribution; no codegen change).
+  `prof/ab.sh <tag> [binary] [secs]`: the input script of 9.1 with the right trigger held in bursts (`215:rt:8, 240:rt:8,
+  270:rt:10, 310:rt:10, 360:rt:10, 410:rt:8`), 60 Hz, 416x448 eyes, 500 us samples, `RECOMP_KGPU_PIPE_ASYNC=1`.
+  `prof/tools/buckets.py` (exclusive cost buckets), `lines.py` (self samples by source line), `summary.py`
+  (ms per level-1 flip, us per draw), `firstown.py` (driver/libc time by our calling function).
+- Harness artifact found: `kelvin_vk` is built by its own CMakeLists without `__ANDROID__`, so pipelines were created
+  synchronously on the pusher (0.6-1.0 ms per level-1 flip of SwiftShader JIT). On the Quest they are async; runs
+  from b2 on set `RECOMP_KGPU_PIPE_ASYNC=1`, and the tables below leave pipeline creation out.
+- New `KvkStats` counters (production, harmless; printed in the `[KVK] frames` line): `tset_writes`,
+  `tset_flushes` (cached sets dropped because a view/sampler they name was released), `np_vertices` /
+  `np_cache_hits` (classifier emulator runs / per-draw reuses), `tex_sig_bytes`.
+
+### 11.2 Where the pusher's time went (x86, level 1, baseline runs b1/b2: 543/525 draws, ~160k words per flip)
+
+User CPU per level-1 flip, b1 (b2 within 10%):
+
+| # | Cost | ms/flip | share |
+|---|---|---|---|
+| 1 | **Texture descriptor sets** (`tset_get`: `vkAllocateDescriptorSets` + `vkUpdateDescriptorSets`): the cache was emptied at every `frame_begin` and is direct-mapped, so ~264 of ~464 draws per frame wrote a fresh set (0 flushes: all misses from the reset and collisions). SwiftShader charges ~23 us per write | 6.5 | 47% |
+| 2 | `draw_now` itself: vertex-range copies into the ring, u32->u16 index conversion, the `tex_get` probe (texture addresses are 4 KiB aligned, so the home slot depended only on format/size), surface scans, combiner constants | 1.75 | 13% |
+| 3 | The pusher's word loop (`kelvin_thread` self). ~35% of it is the **idle spin** (kelvin.c 830-838: 3000 `pause` + `sched_yield`) | 1.4 | 10% |
+| 4 | Texture content signature (`tex_signature`: every used texture re-hashed once per kick; ~3 MB/frame) | 0.70 | 5% |
+| 5 | Method handlers (`kelvin_pgraph_method` and below). Histogram (`RECOMP_KELVIN_METHODSTAT`): `INLINE_ARRAY` 0x1818 and `ARRAY_ELEMENT16` 0x1800 are ~95% of words and already batched; constants (0xB80..) ~2% | 0.66 | 5% |
+| 6 | Kelvin draw setup (`kpix_setup`, `ktex_setup`, `kvsh_begin_draw`, `gpu_draw_gvs`) | 0.59 | 4% |
+| 7 | Command binds / dynamic state (incl. one `vkCmdBindIndexBuffer` per draw: each draw's indices had their own offset) | 0.50 | 4% |
+| 8 | **VR classifier** (`screen_effect` -> `np_extent`, renderer.md section 11): per evaluated vertex a 4.3 KB `memset` + 3 KB constants `memcpy` + 16 input fetches. ~1,400-2,500 vertex evaluations per frame (20-100 sprite candidates) | 0.48 (1.0-1.16 while firing) | 3-7% |
+| 9 | Flip/submit/frame begin; constants upload (`upload_dedup`); surfaces/passes | 0.32 / 0.26 / 0.10 | |
+
+Per draw: **24.6 us (b1), 23.7 us (b2)**, of which ~12 us is SwiftShader's descriptor writes. The headset's driver
+costs differ (Adreno writes a descriptor set for ~1-3 us), so only the non-driver part transfers directly.
+
+### 11.3 Changes (`XR/src/nv2a/kelvin/vk/kvk_backend.c` unless noted; all platforms that build kvk; Windows builds d3d11)
+
+| # | Change | Exactness |
+|---|---|---|
+| 1 | **Persistent texture descriptor sets.** 1024 x 4-way cache (LRU per bucket) of sets from one `FREE_DESCRIPTOR_SET` pool (8192 sets), kept across frames. A set is dropped when a view or sampler it names is released (`tset_forget`, called from `img_release`, the sampler eviction and the two eye-view destroy sites incl. `kvk_vr_layers.inc`), or on bucket eviction; dropped sets are freed through the dead list when the frame retires (`DEAD_TSET`). Pool full or fragmented: the old per-frame pools (`tset_alloc_frame`). `frame_begin` / `tex_free` / sampler eviction no longer clear the whole cache | Sets are immutable once written and keyed by the exact 4 views + 4 samplers; a handle is purged before its deferred destruction can let the driver reuse it. `RECOMP_KVK_TSET_VERIFY=1` checks on every hit that each handle is still owned by a live surface/texture/eye view/sampler |
+| 2 | **Classifier fast path** (`np_eval`): for a program with no constant writes and no relative or out-of-range constant reads (scanned per draw), the emulator reads the draw's constants in place; per vertex only outputs/temps/a0 are zeroed and only the inputs the program reads are fetched; an element's result is reused within the draw (64-entry memo). Anything else takes the old code (`np_pos_ref`). Same inputs, same operations in the same order, so the same oPos bits | `RECOMP_KVK_NP_VERIFY=1` runs the reference for every fast evaluation and logs mismatches |
+| 3 | Index buffer bound once per chunk/type/pass at offset 0; each draw passes `firstIndex = ib_off / index size` (`ib_off` is 4-aligned). `draw_tint` takes the same `firstIndex` | Same index bytes fetched |
+| 4 | `surf_get_ex`: the last colour/depth result is returned when it matches all fields (at most one used entry per va/depth/hud, so the scan would return it); `vkGetPhysicalDeviceFormatProperties` only for a new surface. `surf_for_texture`/`surf_find`: a 256-bit filter of used surface addresses (rebuilt when `surf_gen` changes) skips both 64-entry scans for ordinary textures | No false negatives; same entry returned |
+| 5 | `tex_get`'s slot hash is mixed before the modulo; restrict-qualified index conversion | Where an entry lives does not change what a lookup returns |
+
+Pusher word loop, PUT/GET publication and their memory ordering: untouched. No shader or pipeline-state change, so
+the shipped `kgpu-cache` needs no pruning.
+
+### 11.4 Results (x86, same script; level-1 flips from the first stereo frame; pipeline creation left out)
+
+| Run | Binary | draws/flip | pusher ms/flip (median / p95) | us/draw |
+|---|---|---|---|---|
+| b1 | before (sync pipelines) | 543 | 13.34 (13.5 / 21.0) | 24.6 |
+| b2 | before | 525 | 12.46 (12.5 / 19.0) | 23.7 |
+| a1 | changes 1-3 | 657 | 7.46 (7.0 / 11.0) | 11.4 |
+| a2 | 1-4 | 531 | 5.91 (6.0 / 10.0) | 11.1 |
+| a3 | 1-5 (final but log text) | 621 | 6.94 (6.5 / 10.5) | 11.2 |
+
+- **Per draw -54% on x86** (24 -> 11 us). Descriptor writes: ~264 per frame -> 972 in a whole run (~0 per level-1
+  frame); `tset_get` 6.2-6.5 -> 0.13-0.15 ms/flip.
+- Classifier: in a3's last 131 flips (102 sprite draws, 7,764 vertex lookups per frame, 33% reused) it cost
+  0.57 ms/flip; at the old ~0.46 us per vertex the same work is ~3.6 ms/flip. About 0.11 us per evaluated vertex
+  (~4x), ~6x per lookup.
+- Non-driver per-draw time: 12.0 us (b2) -> 10.9-11.0 us (a2/a3), from 2, 4 and 5.
+- What remains (a3, ms/flip): `draw_now` copies/conversion 1.70, word loop 1.47 (idle spin ~35% of it), method
+  handlers 0.76, texture signature 0.72, Kelvin draw setup 0.67, binds 0.54, classifier 0.27, constants 0.27,
+  flip/submit 0.27, descriptor sets 0.14.
+
+### 11.5 Equivalence
+
+- **Verify run v1** (`RECOMP_KVK_NP_VERIFY=1 RECOMP_KVK_TSET_VERIFY=1`, 420 s, menus + level 1 with firing):
+  **655,360 classifier vertices checked against the reference, 0 mismatches; 311,296 cache hits checked, 0 stale handles.**
+- tests/kelvin_vk (`/root/build/kvk-tests`, pixel comparisons) 5/5; tests/vr_glue 2/2: 386 + 390 checks, including every
+  sprite / glow / light-shaft / full-screen / glare-target classification check of renderer.md 11, also with both
+  verify modes on.
+- Harness captures: frame PNGs that do not depend on game timing are byte-identical before/after (first flat frame,
+  `0005_before-a3`, the first stereo HUD layer); the others differ between any two runs of the same binary (time-driven
+  input and animation), so they are not a test.
+- All runs (a1-a3, v1, f1) reach level 1 in stereo (multiview), fire, no `[CRASH]`.
+
+### 11.6 Quest 3 estimate (unmeasured)
+
+- x86 has about the A78's per-clock speed for this code, so the non-driver savings carry over: ~1 us per draw plus the
+  classifier, **~0.7 ms/frame at 700 draws, 1-3 ms/frame in effect-heavy scenes** (explosions, smoke, firing).
+- Driver savings depend on Adreno: ~260-400 descriptor allocate+update pairs per frame (~1-3 us each: **0.3-1.2 ms**) and
+  one `vkCmdBindIndexBuffer` per draw (**~0.2-0.4 ms** at 700 draws).
+- Together **~1.5-4.5 ms of a ~16-20 ms pusher frame**, more in combat: roughly 10-25% less pusher time. Whether that
+  holds 60 fps depends on how much of the measured 75-98% is work.
+- **The HEARTBEAT % overstates the work.** When the pusher has nothing to do (PUT == GET, or a flip stall waiting
+  for vblank) it spins: 3000 `pause`/`yield` then `sched_yield`, again and again, so an idle pusher reads ~100% of a core.
+  On x86 the spin is ~0.3-0.5 ms/flip of user time even though the pusher mostly blocks in SwiftShader's fence waits. On the headset,
+  where the GPU is fast, the spin is likely a large part of the 75-98%.
+- **First thing to run on the device:** `env RECOMP_KELVIN_TIMING=1` in blackvr.ini. `[KELVIN] ms per flip` then
+  splits "pusher" (inside `pusher_run`, fence waits included) from "no words: for PUT / flip / ack" (idle-spin wall
+  time). simpleperf on `bx-pusher` shows the driver share.
+
+### 11.7 Not done / follow-ups
+
+- **The idle spin.** A futex wake from the PUT trap (kelvin_mmio.c) instead of `pause`/`sched_yield` would free the
+  core and make the CPU numbers mean work. It changes pusher wake-up latency and touches the PUT/GET path, so it was
+  left for a decision.
+- Vertex data is copied into the ring for every draw (~1 ms/flip). A cross-frame vertex-buffer cache would need a
+  content hash about as costly as the copy, but would save write bandwidth to uncached memory on the Quest.
+- Texture signatures are recomputed once per kick (~3 MB/frame). Doing it less often needs proof that guest texture
+  memory changes only at flips, which we do not have.
+- Constants: `upload_dedup` compares 3 KB per draw (0.27 ms/flip). A version counter set by every constants writer
+  would remove that compare, but every writer has to be found.
+- Moving recording to a second thread: not needed for these gains. Ordering (GET publication behind the draws) makes
+  it a larger change.

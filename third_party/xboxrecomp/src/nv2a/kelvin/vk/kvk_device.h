@@ -83,6 +83,10 @@ typedef struct KvkStats {
     uint64_t sprite_draws;      /* stereo: screen-space effect draws corrected per eye (kvk_backend.c screen_effect) */
     uint64_t fullscreen_draws;  /* stereo: non-perspective world-pass draws left pixel-aligned as full-screen passes */
     uint64_t offscreen_stereo_draws;  /* stereo: draws into camera-aligned offscreen targets (the glare chain) corrected */
+    /* pusher cost counters (port/notes/perf.md section 11): texture descriptor sets written, cached sets dropped
+     * because a view or sampler they name was released, NV2A vertex-emulator runs of the screen-space classifier and
+     * its per-draw reuses, guest texture bytes hashed */
+    uint64_t tset_writes, tset_flushes, np_vertices, np_cache_hits, tex_sig_bytes;
 } KvkStats;
 void kvk_get_stats(KvkStats *out);
 

@@ -208,6 +208,7 @@ static void vrl_capture_free(void)
         if (!q->view || q->img != s_cap.img.img) continue;
         if (q->fb[0]) vkDestroyFramebuffer(G.dev, q->fb[0], NULL);
         if (q->fb[1]) vkDestroyFramebuffer(G.dev, q->fb[1], NULL);
+        tset_forget(q->view, VK_NULL_HANDLE);
         vkDestroyImageView(G.dev, q->view, NULL);
         memset(q, 0, sizeof(*q));
     }

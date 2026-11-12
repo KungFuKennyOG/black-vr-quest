@@ -81,10 +81,19 @@
 #define KVK_FB_MAX 128
 #define KVK_RP_MAX 64
 #define KVK_SMP_MAX 256
-#define KVK_TSET_CACHE 512
+/* texture descriptor sets, kept across frames (port/notes/perf.md section 11): 4-way buckets, one pool that can free */
+#define KVK_TSET_WAYS 4
+#define KVK_TSET_BUCKETS 1024
+#define KVK_TSET_CACHE (KVK_TSET_BUCKETS * KVK_TSET_WAYS)
+#define KVK_TSET_POOL_SETS (KVK_TSET_CACHE + 4096)     /* the cache, plus evicted sets waiting for their frame */
 #define KVK_EYEVIEW_MAX 16
 #define KVK_STEREO_BYTES 272u
 
+#if defined(_MSC_VER)
+#define KVK_RESTRICT __restrict
+#else
+#define KVK_RESTRICT __restrict__
+#endif
 #define LOG(...) do { fprintf(stderr, "[KVK] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 #define VKOK(expr) ((expr) == VK_SUCCESS)
 
@@ -150,7 +159,7 @@ typedef struct KvkImage {
     VkImageLayout layout;
 } KvkImage;
 
-enum { DEAD_IMAGE = 1, DEAD_BUF, DEAD_FB, DEAD_SAMPLER };
+enum { DEAD_IMAGE = 1, DEAD_BUF, DEAD_FB, DEAD_SAMPLER, DEAD_TSET };
 typedef struct KvkDead { int kind; KvkImage im; KvkBuf b; uint64_t h; } KvkDead;
 
 typedef struct KvkChunk {
@@ -235,7 +244,7 @@ typedef struct KvkPipe { bool used; KvkPipeKey key; VkPipeline pipe; int state; 
 typedef struct KvkRp { bool used; VkFormat cf, df; uint32_t views; int cload, dload; VkRenderPass rp; } KvkRp;
 typedef struct KvkFb { bool used; VkImageView c, d; VkRenderPass rp; uint32_t w, h; VkFramebuffer fb; } KvkFb;
 typedef struct KvkSmp { bool used; uint64_t key; VkSampler s; } KvkSmp;
-typedef struct KvkTset { bool used; VkImageView v[4]; VkSampler s[4]; VkDescriptorSet set; } KvkTset;
+typedef struct KvkTset { bool used; VkImageView v[4]; VkSampler s[4]; VkDescriptorSet set; uint64_t stamp; } KvkTset;
 typedef struct KvkEyeView { VkImage img; uint32_t layer, layers; VkFormat fmt; VkImageView view; VkFramebuffer fb[2]; VkRenderPass rp[2]; uint32_t w, h; } KvkEyeView;
 
 static struct {
@@ -268,9 +277,13 @@ static struct {
     KvkFb fb[KVK_FB_MAX];
     KvkSmp smp[KVK_SMP_MAX];
     KvkTset tset[KVK_TSET_CACHE];
+    VkDescriptorPool tset_pool;     /* the cached sets (FREE_DESCRIPTOR_SET); per-frame pools are the fallback */
+    uint64_t tset_stamp;
     KvkEyeView eyeview[KVK_EYEVIEW_MAX];
     KvkImage fb_copy;
     uint64_t epoch, clock, wseq, surf_gen;
+    uint64_t surf_va_gen, surf_va_bits[4];  /* a filter of the used surfaces' addresses, as of surf_gen (surf_va_maybe) */
+    KvkSurf *surf_last[2];                   /* surf_get_ex's last colour / depth result */
     unsigned int host_w, host_h, hud_w, hud_h;
     KvkStats st;
     pthread_mutex_t qlock_internal;
@@ -490,6 +503,7 @@ static void defer(const KvkDead *d)
 }
 
 static void fb_forget_view(VkImageView v);
+static void tset_forget(VkImageView v, VkSampler s);
 
 static void img_release(KvkImage *im)
 {
@@ -497,6 +511,8 @@ static void img_release(KvkImage *im)
     if (!im->img) return;
     fb_forget_view(im->att);
     if (im->view != im->att) fb_forget_view(im->view);
+    tset_forget(im->view, VK_NULL_HANDLE);
+    if (im->att && im->att != im->view) tset_forget(im->att, VK_NULL_HANDLE);
     memset(&d, 0, sizeof(d));
     d.kind = DEAD_IMAGE;
     d.im = *im;
@@ -514,6 +530,8 @@ static void run_dead(KvkFrame *f)
         case DEAD_BUF: buf_destroy(&d->b); break;
         case DEAD_FB: vkDestroyFramebuffer(G.dev, (VkFramebuffer)(uintptr_t)d->h, NULL); break;
         case DEAD_SAMPLER: vkDestroySampler(G.dev, (VkSampler)(uintptr_t)d->h, NULL); break;
+        case DEAD_TSET: { VkDescriptorSet ds = (VkDescriptorSet)(uintptr_t)d->h;
+                          vkFreeDescriptorSets(G.dev, G.tset_pool, 1, &ds); } break;
         }
     }
     f->ndead = 0;
@@ -697,7 +715,6 @@ static void frame_begin(void)
     f->ucb_open = false;
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(f->cb, &bi);
-    memset(G.tset, 0, sizeof(G.tset));
     last_reset();
     memset(&P, 0, sizeof(P));
 }
@@ -1611,7 +1628,7 @@ static VkSampler sampler_get(const KTexture *t)
         memset(&dd, 0, sizeof(dd));
         dd.kind = DEAD_SAMPLER; dd.h = (uint64_t)(uintptr_t)slot->s;
         defer(&dd);
-        memset(G.tset, 0, sizeof(G.tset));
+        tset_forget(VK_NULL_HANDLE, slot->s);
         slot->used = false;
     }
     kvk_filter(t->min_filter, t->mag_filter, &mn, &mg, &mip, &lod0);
@@ -1636,17 +1653,12 @@ static VkSampler sampler_get(const KTexture *t)
     return slot->s;
 }
 
-static VkDescriptorSet tset_get(const VkImageView v[4], const VkSampler s[4])
+/* A set from the frame's own pools (reset when the frame slot is reused): the fallback when the cache's pool is full. */
+static VkDescriptorSet tset_alloc_frame(void)
 {
     KvkFrame *f = cur_frame();
-    uint64_t h = kvk_hash64(v, 4 * sizeof(v[0])) ^ (kvk_hash64(s, 4 * sizeof(s[0])) * 31u);
-    unsigned int slot = (unsigned int)(h % KVK_TSET_CACHE), i;
-    KvkTset *e = &G.tset[slot];
     VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-    VkDescriptorImageInfo ii[4];
-    VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     VkDescriptorSet set = VK_NULL_HANDLE;
-    if (e->used && !memcmp(e->v, v, sizeof(e->v)) && !memcmp(e->s, s, sizeof(e->s))) return e->set;
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &G.dsl1;
     for (;;) {
@@ -1661,9 +1673,103 @@ static VkDescriptorSet tset_get(const VkImageView v[4], const VkSampler s[4])
             f->ntpool++;
         }
         ai.descriptorPool = f->tpool[f->curtpool];
-        if (VKOK(vkAllocateDescriptorSets(G.dev, &ai, &set))) break;
+        if (VKOK(vkAllocateDescriptorSets(G.dev, &ai, &set))) return set;
         f->curtpool++;
     }
+}
+
+static void tset_drop(KvkTset *e)
+{
+    KvkDead dd;
+    memset(&dd, 0, sizeof(dd));
+    dd.kind = DEAD_TSET; dd.h = (uint64_t)(uintptr_t)e->set;   /* frames in flight may still use it */
+    defer(&dd);
+    memset(e, 0, sizeof(*e));
+}
+
+/* A view or sampler is going away (its destruction is deferred until the frames using it retire, after which the
+ * driver may hand its handle out again): no cached set naming it may be used from now on. */
+static void tset_forget(VkImageView v, VkSampler s)
+{
+    unsigned int i, k;
+    if (!G.tset_pool || (!v && !s)) return;
+    for (i = 0; i < KVK_TSET_CACHE; i++) {
+        KvkTset *e = &G.tset[i];
+        if (!e->used) continue;
+        for (k = 0; k < 4; k++) {
+            if ((v && e->v[k] == v) || (s && e->s[k] == s)) { tset_drop(e); G.st.tset_flushes++; break; }
+        }
+    }
+}
+
+/* The texture descriptor set for these views and samplers. Sets are immutable once written and live in a cache that
+ * survives frames (before, the cache was emptied at every frame and a set written again for nearly every draw: ~260
+ * vkAllocateDescriptorSets + vkUpdateDescriptorSets per level-1 frame). An entry is dropped when a view or sampler it
+ * names is released (tset_forget) or when its bucket is full (least recently used); dropped sets are freed when the
+ * frame retires. */
+/* RECOMP_KVK_TSET_VERIFY=1: every cache hit checks that each view and sampler of the set is still alive (owned by a
+ * surface, texture, the backend or an eye view): a stale handle would mean a set outlived what it names. */
+static int s_tset_verify = -1;
+static uint64_t s_tset_checked, s_tset_stale;
+static bool tset_view_alive(VkImageView v)
+{
+    unsigned int i;
+    if (v == G.dummy.view || v == G.fb_copy.view) return true;
+    for (i = 0; i < KVK_MAX_SURF; i++)
+        if (G.surf[i].used && (G.surf[i].im.view == v || G.surf[i].im.att == v || G.surf[i].conv.view == v)) return true;
+    for (i = 0; i < KVK_TEX_SLOTS; i++) if (G.tex[i].used && G.tex[i].im.view == v) return true;
+    for (i = 0; i < KVK_EYEVIEW_MAX; i++) if (G.eyeview[i].view == v) return true;
+    return false;
+}
+static bool tset_sampler_alive(VkSampler s)
+{
+    unsigned int i;
+    if (s == G.smp_linear || s == G.smp_nearest) return true;
+    for (i = 0; i < KVK_SMP_MAX; i++) if (G.smp[i].used && G.smp[i].s == s) return true;
+    return false;
+}
+static void tset_verify_hit(const KvkTset *q)
+{
+    unsigned int k;
+    bool ok = true;
+    for (k = 0; k < 4; k++) ok = ok && tset_view_alive(q->v[k]) && tset_sampler_alive(q->s[k]);
+    s_tset_checked++;
+    if (!ok && s_tset_stale++ < 8) LOG("TSET verify: cached set %p names a released view or sampler", (void *)q->set);
+    if (!(s_tset_checked & 0x3FFFu))
+        LOG("TSET verify: %llu hits checked, %llu stale", (unsigned long long)s_tset_checked, (unsigned long long)s_tset_stale);
+}
+
+static VkDescriptorSet tset_get(const VkImageView v[4], const VkSampler s[4])
+{
+    uint64_t h = kvk_hash64(v, 4 * sizeof(v[0])) ^ (kvk_hash64(s, 4 * sizeof(s[0])) * 31u);
+    KvkTset *b = &G.tset[(unsigned int)(h % KVK_TSET_BUCKETS) * KVK_TSET_WAYS], *e = NULL;
+    VkDescriptorImageInfo ii[4];
+    VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    bool cached = false;
+    unsigned int i;
+    for (i = 0; i < KVK_TSET_WAYS; i++) {
+        KvkTset *q = &b[i];
+        if (q->used && !memcmp(q->v, v, sizeof(q->v)) && !memcmp(q->s, s, sizeof(q->s))) {
+            if (s_tset_verify < 0) { const char *ev = getenv("RECOMP_KVK_TSET_VERIFY"); s_tset_verify = ev && *ev && *ev != '0'; }
+            if (s_tset_verify > 0) tset_verify_hit(q);
+            q->stamp = ++G.tset_stamp;
+            return q->set;
+        }
+    }
+    if (G.tset_pool) {
+        VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        for (i = 0; i < KVK_TSET_WAYS; i++) {
+            if (!b[i].used) { e = &b[i]; break; }
+            if (!e || b[i].stamp < e->stamp) e = &b[i];
+        }
+        if (e->used) tset_drop(e);
+        ai.descriptorPool = G.tset_pool;
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &G.dsl1;
+        cached = VKOK(vkAllocateDescriptorSets(G.dev, &ai, &set));
+    }
+    if (!cached && !(set = tset_alloc_frame())) return VK_NULL_HANDLE;
     for (i = 0; i < 4; i++) {
         ii[i].sampler = s[i];
         ii[i].imageView = v[i];
@@ -1675,10 +1781,14 @@ static VkDescriptorSet tset_get(const VkImageView v[4], const VkSampler s[4])
     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w.pImageInfo = ii;
     vkUpdateDescriptorSets(G.dev, 1, &w, 0, NULL);
-    e->used = true;
-    memcpy(e->v, v, sizeof(e->v));
-    memcpy(e->s, s, sizeof(e->s));
-    e->set = set;
+    G.st.tset_writes++;
+    if (cached) {
+        e->used = true;
+        memcpy(e->v, v, sizeof(e->v));
+        memcpy(e->s, s, sizeof(e->s));
+        e->set = set;
+        e->stamp = ++G.tset_stamp;
+    }
     return set;
 }
 
@@ -1726,8 +1836,17 @@ static KvkSurf *surf_get_ex(const KelvinTarget *t, bool depth, unsigned int form
     if (!is_main(gw, gh)) hud = false;
     if (is_main(gw, gh)) { hw = hud ? G.hud_w : G.host_w; hh = hud ? G.hud_h : G.host_h; }
     else { hw = gw; hh = gh; }
-    fmt = depth ? G.depth_fmt : surf_color_format(format, &bpp);
     layers = hud ? 1 : G.layers;
+    {
+        /* The same surface as the last call (most draws): at most one used entry has this va/depth/hud, so the
+         * scan below would return this one. */
+        KvkSurf *q = G.surf_last[depth];
+        if (q && q->used && q->va == va && q->depth == depth && q->hud == hud && q->pitch == pitch && q->gw == gw &&
+            q->gh == gh && q->format == (depth ? 0 : format) && q->swz == t->swizzled && q->hw == hw && q->hh == hh) {
+            q->clock = ++G.clock;
+            return q;
+        }
+    }
     for (i = 0; i < KVK_MAX_SURF; i++) {
         KvkSurf *q = &G.surf[i];
         if (!q->used) { if (!s) s = q; continue; }
@@ -1735,6 +1854,7 @@ static KvkSurf *surf_get_ex(const KelvinTarget *t, bool depth, unsigned int form
             if (q->pitch == pitch && q->gw == gw && q->gh == gh && q->format == (depth ? 0 : format) &&
                 q->swz == t->swizzled && q->hw == hw && q->hh == hh) {
                 q->clock = ++G.clock;
+                G.surf_last[depth] = q;
                 return q;
             }
             surf_free(q);
@@ -1744,6 +1864,7 @@ static KvkSurf *surf_get_ex(const KelvinTarget *t, bool depth, unsigned int form
         if (!victim || q->clock < victim->clock) victim = q;
     }
     if (!s) { surf_free(victim); s = victim; }
+    fmt = depth ? G.depth_fmt : surf_color_format(format, &bpp);    /* only a new surface needs it */
     if (!img_create(&s->im, fmt, hw, hh, layers, 1,
                     depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
                           : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -1756,6 +1877,7 @@ static KvkSurf *surf_get_ex(const KelvinTarget *t, bool depth, unsigned int form
     s->format = depth ? 0 : format;
     s->gw = gw; s->gh = gh; s->hw = hw; s->hh = hh; s->bpp = bpp;
     s->clock = ++G.clock;
+    G.surf_last[depth] = s;
     /* a fresh colour surface starts black (transparent for the HUD), depth at the far plane */
     if (depth) {
         s->pending = PC_DEPTH | PC_STENCIL;
@@ -1807,9 +1929,26 @@ static void surf_for_read(KvkSurf *s)
     barrier(cmd(), &s->im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
+/* Whether a used surface may have this address (no false negatives): most textures are not render targets, and both
+ * lookups below would otherwise scan the whole table for each texture stage of each draw. */
+static unsigned int surf_va_bit(uint32_t va) { return (va * 2654435761u) >> 24; }
+static bool surf_va_maybe(uint32_t va)
+{
+    const unsigned int b = surf_va_bit(va);
+    if (G.surf_va_gen != G.surf_gen) {
+        unsigned int i;
+        memset(G.surf_va_bits, 0, sizeof(G.surf_va_bits));
+        for (i = 0; i < KVK_MAX_SURF; i++)
+            if (G.surf[i].used) { const unsigned int k = surf_va_bit(G.surf[i].va); G.surf_va_bits[k >> 6] |= 1ull << (k & 63); }
+        G.surf_va_gen = G.surf_gen;
+    }
+    return (G.surf_va_bits[b >> 6] >> (b & 63)) & 1u;
+}
+
 static KvkSurf *surf_for_texture(const KTexture *t)
 {
     unsigned int i;
+    if (!surf_va_maybe(t->base)) return NULL;
     for (i = 0; i < KVK_MAX_SURF; i++) {
         KvkSurf *s = &G.surf[i];
         if (!s->used || s->depth || s->va != t->base || s->hud != (V.hud && is_main(s->gw, s->gh))) continue;
@@ -1827,6 +1966,7 @@ static KvkSurf *surf_for_texture(const KTexture *t)
 static KvkSurf *surf_find(uint32_t va, bool depth)
 {
     unsigned int i;
+    if (!surf_va_maybe(va)) return NULL;
     for (i = 0; i < KVK_MAX_SURF; i++) {
         KvkSurf *s = &G.surf[i];
         if (s->used && s->va == va && s->depth == depth && s->hud == (V.hud && is_main(s->gw, s->gh))) return s;
@@ -2041,13 +2181,13 @@ static void push(const KvkPush *pc)
 
 static void tex_free(KvkTex *e)
 {
-    img_release(&e->im);
+    img_release(&e->im);                    /* forgets the sets naming its view (tset_forget) */
     memset(e, 0, sizeof(*e));
-    memset(G.tset, 0, sizeof(G.tset));
 }
 
 static void tex_signature(const KTexture *t, uint32_t span, uint64_t sig[2])
 {
+    G.st.tex_sig_bytes += span;
     sig_bytes(t->mem, span, sig);
     if (t->kind == TK_I8 && t->palette_mem) {
         uint64_t p[2];
@@ -2078,6 +2218,10 @@ static VkImageView tex_get(const KTexture *t)
     if (!t->valid || !t->mem || t->cubemap || !t->width || !t->height) return VK_NULL_HANDLE;
     span = texture_span(t);
     h = (t->base * 2654435761u) ^ (t->color_format * 40503u) ^ (t->width * 977u) ^ (t->height * 131u);
+    /* Mixed down before the modulo: texture addresses are 4 KiB aligned, so the product above has zero low bits and
+     * the home slot depended only on format and size -- long probe runs for every draw (perf.md section 11). Where an
+     * entry lives does not change what a lookup returns. */
+    h ^= h >> 16; h *= 0x7FEB352Du; h ^= h >> 15; h *= 0x846CA68Bu; h ^= h >> 16;
     for (probes = 0, slot = h % KVK_TEX_SLOTS; probes < KVK_TEX_SLOTS; probes++, slot = (slot + 1) % KVK_TEX_SLOTS) {
         KvkTex *q = &G.tex[slot];
         if (!q->used) { if (!e) e = q; break; }
@@ -2366,7 +2510,9 @@ static void np_attr(const KGpuAttrSrc *as, uint32_t e, float r[4])
 typedef struct NpExt { float x0, y0, x1, y1, z0, z1, area, tri_max; uint32_t n; } NpExt;
 #define NP_MAX_TRIS 32
 
-static bool np_pos(const KGpuDraw *d, uint32_t e, float o[4])
+/* The reference evaluation of one element's oPos: a fresh, zeroed emulator state with the draw's 192 constants
+ * copied in and all 16 inputs fetched (what np_extent did per vertex before the fast path; RECOMP_KVK_NP_VERIFY). */
+static bool np_pos_ref(const KGpuDraw *d, uint32_t e, float o[4])
 {
     if (!d->gvs) {
         const float *p;
@@ -2388,21 +2534,125 @@ static bool np_pos(const KGpuDraw *d, uint32_t e, float o[4])
     }
 }
 
+/* One draw's evaluator for np_extent (port/notes/perf.md section 11). The reference above clears 4.3 KB of emulator
+ * state, copies the 3 KB of constants and fetches all 16 inputs for every vertex. For a program that never writes a
+ * constant and never reads one relatively (so every constant it reads is inside c0..c191), the emulator reads the
+ * constants in place; per vertex only the registers a program can read before writing them are reset to the
+ * reference's zeros (temporaries, outputs, a0), and only the inputs it reads are fetched -- the same values in, the
+ * same operations in the same order, so the same oPos bit for bit. Any other program takes the reference path. An
+ * element's result is reused within the draw (indexed lists name a quad's corners twice). */
+#define NP_MEMO 64
+typedef struct NpEval {
+    const KGpuDraw *d;
+    bool fast;
+    uint32_t inputs;                         /* bit a: the program reads v<a> */
+    Nv2aVshCPUFullExecutionState fs;         /* fast path: input/output/temp/a0 only (context_regs unused) */
+    Nv2aVshExecutionState st;
+    uint32_t memo_e[NP_MEMO];
+    float memo_o[NP_MEMO][4];
+    bool memo_ok[NP_MEMO], memo_used[NP_MEMO];
+} NpEval;
+
+static int s_np_verify = -1;                /* RECOMP_KVK_NP_VERIFY=1: every fast result checked against the reference */
+static uint64_t s_np_verified, s_np_mismatch;
+
+static void np_eval_init(NpEval *ev, const KGpuDraw *d)
+{
+    const Nv2aVshStep *step;
+    ev->d = d;
+    ev->fast = false;
+    ev->inputs = 0;
+    memset(ev->memo_used, 0, sizeof(ev->memo_used));
+    if (s_np_verify < 0) { const char *e = getenv("RECOMP_KVK_NP_VERIFY"); s_np_verify = e && *e && *e != '0'; }
+    if (!d->gvs || !d->gvs->program || !((const Nv2aVshProgram *)d->gvs->program)->steps) return;
+    ev->fast = true;
+    for (step = ((const Nv2aVshProgram *)d->gvs->program)->steps;; step++) {
+        const Nv2aVshOperation *ops[2];
+        int o, k;
+        ops[0] = &step->mac; ops[1] = &step->ilu;
+        for (o = 0; o < 2; o++) {
+            if (!ops[o]->opcode) continue;
+            for (k = 0; k < 2; k++) if (ops[o]->outputs[k].type == NV2ART_CONTEXT) ev->fast = false;
+            for (k = 0; k < 3; k++) {
+                const Nv2aVshInput *in = &ops[o]->inputs[k];
+                if (o == 1 && k > 0) break;                          /* the ILU reads one input */
+                if (in->type == NV2ART_NONE) { if (o == 0) break; continue; }
+                if (in->type == NV2ART_CONTEXT && (in->is_relative || in->index >= 192)) ev->fast = false;
+                if (in->type == NV2ART_INPUT) ev->inputs |= 1u << (in->index & 15);
+            }
+        }
+        if (step->is_final) break;
+    }
+    if (ev->fast) {
+        ev->st = nv2a_vsh_emu_initialize_full_execution_state(&ev->fs);
+        ev->st.context_regs = (float *)(uintptr_t)d->gvs->constants;   /* read only: no CONTEXT output (above) */
+    }
+}
+
+static bool np_eval(NpEval *ev, uint32_t e, float o[4])
+{
+    const KGpuDraw *d = ev->d;
+    const unsigned m = (e ^ (e >> 6)) & (NP_MEMO - 1);
+    bool ok;
+    if (!d->gvs) return np_pos_ref(d, e, o);
+    if (ev->memo_used[m] && ev->memo_e[m] == e) {
+        memcpy(o, ev->memo_o[m], 16);
+        G.st.np_cache_hits++;
+        return ev->memo_ok[m];
+    }
+    G.st.np_vertices++;
+    if (ev->fast) {
+        uint32_t in = ev->inputs;
+        memset(ev->fs.output_regs, 0, sizeof(ev->fs.output_regs));
+        memset(ev->fs.temp_regs, 0, sizeof(ev->fs.temp_regs));
+        memset(ev->fs.address_reg, 0, sizeof(ev->fs.address_reg));
+        while (in) {
+            const int a = __builtin_ctz(in);
+            in &= in - 1;
+            np_attr(&d->gvs->attr[a], e, &ev->fs.input_regs[a * 4]);
+        }
+        nv2a_vsh_emu_execute(&ev->st, (const Nv2aVshProgram *)d->gvs->program);
+        memcpy(o, &ev->fs.output_regs[0], 16);
+        ok = isfinite(o[0]) && isfinite(o[1]);
+        if (s_np_verify > 0) {
+            float r[4];
+            const bool rok = np_pos_ref(d, e, r);
+            s_np_verified++;
+            if (rok != ok || memcmp(r, o, 16)) {
+                if (s_np_mismatch++ < 8)
+                    LOG("NP verify: vs %08X element %u: fast %d (%g %g %g %g) reference %d (%g %g %g %g)", d->gvs->hash, e,
+                        ok, (double)o[0], (double)o[1], (double)o[2], (double)o[3], rok, (double)r[0], (double)r[1],
+                        (double)r[2], (double)r[3]);
+            }
+            if (!(s_np_verified & 0xFFFFu))
+                LOG("NP verify: %llu vertices checked, %llu mismatches", (unsigned long long)s_np_verified,
+                    (unsigned long long)s_np_mismatch);
+        }
+    } else {
+        ok = np_pos_ref(d, e, o);
+    }
+    ev->memo_used[m] = true; ev->memo_e[m] = e; ev->memo_ok[m] = ok;
+    memcpy(ev->memo_o[m], o, 16);
+    return ok;
+}
+
 static bool np_extent(const KGpuDraw *d, NpExt *x)
 {
     const bool strip = d->topology == KG_TOPO_STRIP;
     uint32_t i, ntri = 0, tri_total, k;
     float v[3][4];
     int have = 0;
+    static NpEval ev;                                                /* pusher thread only */
     memset(x, 0, sizeof(*x));
     x->x0 = x->y0 = x->z0 = 1e30f; x->x1 = x->y1 = x->z1 = -1e30f;
     if (!d->indices || d->icount < 3 || (d->gvs && !d->gvs->constants)) return false;
     tri_total = strip ? d->icount - 2 : d->icount / 3;
+    np_eval_init(&ev, d);
     for (i = 0; i < d->icount && ntri < NP_MAX_TRIS; i++) {
         const uint32_t e = d->indices[i];
         float o[4];
         if (e == 0xFFFFFFFFu) { have = 0; continue; }                 /* strip restart */
-        if (!np_pos(d, e, o)) return false;
+        if (!np_eval(&ev, e, o)) return false;
         if (o[0] < x->x0) x->x0 = o[0];
         if (o[0] > x->x1) x->x1 = o[0];
         if (o[1] < x->y0) x->y0 = o[1];
@@ -2542,7 +2792,7 @@ static bool sprite_debug(void)
 
 /* BLACKVR_GUN_LATCH_DEBUG (the glue's kvk_vr_viewmodel_tint): the draw again, flat translucent colour, depth-tested
  * against itself, so the classified draws show. A debug aid only (synchronous pipeline, not in the manifest). */
-static void draw_tint(const KvkPipeDesc *pd0, const KvkPush *pc0, uint32_t icount, uint32_t c)
+static void draw_tint(const KvkPipeDesc *pd0, const KvkPush *pc0, uint32_t icount, uint32_t first, uint32_t c)
 {
     KvkPipeDesc pd;
     KvkPush pc;
@@ -2563,7 +2813,7 @@ static void draw_tint(const KvkPipeDesc *pd0, const KvkPush *pc0, uint32_t icoun
     pc.p0[2] = (float)((c >> 16) & 0xFF) / 255.0f; pc.p0[3] = (float)(c >> 24) / 255.0f;
     bind_pipe(pipe);
     push(&pc);
-    vkCmdDrawIndexed(cmd(), icount, 1, 0, 0, 0);
+    vkCmdDrawIndexed(cmd(), icount, 1, first, 0, 0);
 }
 
 /* RECOMP_KVK_VMLOG=<n>: for n stereo frames, from the one after the first frame with a weapon draw (or the 60th), one line per draw
@@ -2632,7 +2882,7 @@ static void draw_now(const KGpuDraw *d)
     VkPipeline pipe;
     VkDescriptorSet s1;
     VkDeviceSize total, vab_bytes = 0, off, ib_off;
-    uint32_t vab_words = 0;
+    uint32_t vab_words = 0, ib_first = 0;
     KvkPush push_c;
     VkViewport vp;
     VkRect2D sc;
@@ -2930,8 +3180,11 @@ static void draw_now(const KGpuDraw *d)
         size_t ib_bytes = (size_t)d->icount * (short_idx ? 2 : 4);
         uint8_t *p = ring_take(ib_bytes, 4, &ib_off);
         if (short_idx) {
-            uint16_t *w = (uint16_t *)p;
-            for (i = 0; i < d->icount; i++) w[i] = (uint16_t)d->indices[i];
+            uint16_t *KVK_RESTRICT w = (uint16_t *)p;               /* the ring never overlaps the caller's indices */
+            const uint32_t *KVK_RESTRICT src = d->indices;
+            const uint32_t n = d->icount;
+            uint32_t k;
+            for (k = 0; k < n; k++) w[k] = (uint16_t)src[k];
         } else {
             memcpy(p, d->indices, ib_bytes);
         }
@@ -2969,18 +3222,22 @@ static void draw_now(const KGpuDraw *d)
     push_c.dflags[1] = vab_words;
     push(&push_c);
     {
+        /* The chunk is bound once at offset 0 (again only for another chunk, index type or pass) and each draw names
+         * its indices by firstIndex: ib_off is a multiple of 4, so of either index size. One vkCmdBindIndexBuffer per
+         * draw less (port/notes/perf.md section 11). */
         VkBuffer ib = cur_frame()->chunk[cur_frame()->cur].b.buf;
         VkIndexType it = short_idx ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
-        if (P.ib != ib || P.ib_off != ib_off || P.ibt != it) {
-            vkCmdBindIndexBuffer(cmd(), ib, ib_off, it);
-            P.ib = ib; P.ib_off = ib_off; P.ibt = it;
+        if (P.ib != ib || P.ib_off != 0 || P.ibt != it) {
+            vkCmdBindIndexBuffer(cmd(), ib, 0, it);
+            P.ib = ib; P.ib_off = 0; P.ibt = it;
         }
+        ib_first = (uint32_t)(ib_off / (short_idx ? 2u : 4u));
     }
-    vkCmdDrawIndexed(cmd(), d->icount, 1, 0, 0, 0);
-    if (vm && cs) draw_tint(&pd, &push_c, d->icount, kvk_vr_viewmodel_tint());
+    vkCmdDrawIndexed(cmd(), d->icount, 1, ib_first, 0, 0);
+    if (vm && cs) draw_tint(&pd, &push_c, d->icount, ib_first, kvk_vr_viewmodel_tint());
     /* BLACKVR_SPRITE_DEBUG=1: corrected screen-space effects green, blended non-perspective world-pass draws left as
      * they are red (full-screen passes among them; the HUD is never tinted) */
-    if (cs && is_main(cs->gw, cs->gh) && (sprite || np_tint) && sprite_debug()) draw_tint(&pd, &push_c, d->icount, sprite ? 0x6000FF00u : 0x600000FFu);
+    if (cs && is_main(cs->gw, cs->gh) && (sprite || np_tint) && sprite_debug()) draw_tint(&pd, &push_c, d->icount, ib_first, sprite ? 0x6000FF00u : 0x600000FFu);
     if (cs) { cs->ver++; cs->wseq = ++G.wseq; }
     if (zs && (ps->depth_write || ps->stencil_write)) { zs->ver++; zs->wseq = ++G.wseq; }
     G.st.draws++;
@@ -3122,7 +3379,7 @@ static KvkEyeView *eye_view(VkImage img, uint32_t layer, uint32_t layers, VkForm
             KvkEyeView *q = &G.eyeview[i];
             if (q->fb[0]) vkDestroyFramebuffer(G.dev, q->fb[0], NULL);
             if (q->fb[1]) vkDestroyFramebuffer(G.dev, q->fb[1], NULL);
-            if (q->view) vkDestroyImageView(G.dev, q->view, NULL);
+            if (q->view) { tset_forget(q->view, VK_NULL_HANDLE); vkDestroyImageView(G.dev, q->view, NULL); }
             memset(q, 0, sizeof(*q));
         }
         e = &G.eyeview[0];
@@ -3356,7 +3613,18 @@ static bool init_layouts(void)
     dpi.maxSets = KVK_FRAMES * KVK_CHUNKS;
     dpi.poolSizeCount = 2;
     dpi.pPoolSizes = ps;
-    return VKOK(vkCreateDescriptorPool(G.dev, &dpi, NULL, &G.set0_pool));
+    if (!VKOK(vkCreateDescriptorPool(G.dev, &dpi, NULL, &G.set0_pool))) return false;
+    {
+        /* the texture-set cache's pool; without it every set comes from the per-frame pools (tset_alloc_frame) */
+        VkDescriptorPoolSize tp = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 * KVK_TSET_POOL_SETS };
+        VkDescriptorPoolCreateInfo ti = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        ti.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        ti.maxSets = KVK_TSET_POOL_SETS;
+        ti.poolSizeCount = 1;
+        ti.pPoolSizes = &tp;
+        if (!VKOK(vkCreateDescriptorPool(G.dev, &ti, NULL, &G.tset_pool))) G.tset_pool = VK_NULL_HANDLE;
+    }
+    return true;
 }
 
 static bool init_frames(void)
@@ -3562,13 +3830,16 @@ void kgpu_report(void)
 {
     if (!G.ok) return;
     LOG("frames %llu draws %llu (gpu vertices %llu, ubershader %llu, world %llu, stereo %llu, sprites %llu, hud %llu, "
-        "skipped %llu) tris %llu clears %llu passes %llu pipelines %llu vs %llu ps %llu uploads %llu",
+        "skipped %llu) tris %llu clears %llu passes %llu pipelines %llu vs %llu ps %llu uploads %llu | tsets %llu "
+        "(dropped %llu) np vertices %llu (reused %llu) tex hashed %llu MB",
         (unsigned long long)G.st.frames, (unsigned long long)G.st.draws, (unsigned long long)G.st.gvs_draws,
         (unsigned long long)G.st.uber_draws, (unsigned long long)G.st.world_draws,
         (unsigned long long)G.st.stereo_draws, (unsigned long long)G.st.sprite_draws, (unsigned long long)G.st.hud_draws,
         (unsigned long long)G.st.skipped, (unsigned long long)G.st.tris, (unsigned long long)G.st.clears, (unsigned long long)G.st.passes,
         (unsigned long long)G.st.pipelines, (unsigned long long)G.st.vs_compiled, (unsigned long long)G.st.ps_compiled,
-        (unsigned long long)G.st.tex_uploads);
+        (unsigned long long)G.st.tex_uploads, (unsigned long long)G.st.tset_writes, (unsigned long long)G.st.tset_flushes,
+        (unsigned long long)G.st.np_vertices, (unsigned long long)G.st.np_cache_hits,
+        (unsigned long long)(G.st.tex_sig_bytes >> 20));
 }
 
 void kgpu_note_kick(void) { G.epoch++; }
@@ -3735,6 +4006,7 @@ void kvk_shutdown(void)
     }
     if (G.pcache) vkDestroyPipelineCache(G.dev, G.pcache, NULL);
     vkDestroyDescriptorPool(G.dev, G.set0_pool, NULL);
+    if (G.tset_pool) vkDestroyDescriptorPool(G.dev, G.tset_pool, NULL);
     vkDestroyPipelineLayout(G.dev, G.layout, NULL);
     vkDestroyDescriptorSetLayout(G.dev, G.dsl0, NULL);
     vkDestroyDescriptorSetLayout(G.dev, G.dsl1, NULL);
