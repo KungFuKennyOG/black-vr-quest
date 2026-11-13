@@ -21,24 +21,38 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
 - `vra_apply` collapses palette matrices to a single point (the posed wrist joint):
   - `arms = hands` (default): Shoulder/Elbow/twist of both arms fold into their wrist. The hand stays.
   - the off hand hidden: every bone of the left arm folds to its wrist, so its triangles have no area.
-- `left_hand = tracked` (default): the game's left hand follows the off controller, also while the two-handed grip is
-  engaged (the controller is then on the gun, so the glove is on the foregrip). The game's own off-hand pose is not
+- `left_hand = tracked` (default): the game's left hand follows the off controller; while the two-handed grip is
+  engaged it snaps onto the gun line: straight ahead of the gun hand at the off controller's distance (at least 8 cm),
+  with the gun hand's orientation, so it mirrors the right hand's grip further along the gun. A short haptic tick on
+  the off hand when the grip engages. The game's own off-hand pose is not
   used there: for the rifles it keeps the left wrist about 0.55 m low and level with the camera, out of view
   (harness, inventory weapon 5446152380DB8000). `grip`: the game's pose, shown only while gripping. `always`: the
   game's pose. `never`: hidden.
-- How the tracked hand is placed: the stock arms are mirror images across model x = 0 (bind pose checked on the gun
-  models). The game thread computes A = K^-1 * rel * S * K (`vgm_off_hand_mirror`): K = the gun hand's frame from the
-  weapon's model space (the same chain the weapon re-target uses), rel = gun hand from off hand (LH, game units),
-  S = flip x. It is recorded with the weapon MVP (`vr_mark_viewmodel_offhand`). The renderer moves the left wrist to
+- **Auto-grip** (`hand_auto = on`, default): each gun model holds the game's right hand somewhere else relative to the
+  fixed `vm_offset`, so the right hand did not sit on the player's hand (rifles: far back). The renderer measures the
+  game's right wrist in the gun hand's aim frame (via K, below) and integrates the error to `wrist_offset` (metres,
+  OpenXR aim space, default 0 -0.03 0.10) into a per-weapon grip correction; the game thread adds it to the grip
+  offset (`vr_set_grip_correction` / `vr_grip_correction`). Fast for the first ~2 s of a weapon (gain 0.08), then slow
+  (0.01, error limited to 5 cm a step) so recoil and reload animations do not drag the gun. Harness, rifle: the wrist
+  went from 11 cm right / 7 cm low of target to exactly on it within 120 draws. `vm_offset` is now only the
+  starting guess.
+- How the tracked hand is placed (render thread, from the late latch, so it moves at display rate): the stock arms
+  are mirror images across model x = 0 (bind pose checked on the gun models). The game thread records
+  K = hand_from_model (`vgm_weapon_hand_frame`: the gun hand's aim frame from the weapon's model space, the same chain
+  the weapon re-target uses) with the weapon MVP (`vr_mark_viewmodel_offhand`). The latch locates the off hand at the
+  eyes' display time (`VrRenderGun.off`). The renderer forms rel = gun hand from off hand (`vgm_off_hand_rel`, snapped
+  while gripping) and A = K^-1 * rel * S * K (`vgm_off_hand_mirror`, S = flip x), moves the left wrist to
   A * (posed right wrist) * mirror, where mirror = bind_rt^-1 * S * bind_lft, and the whole left arm rigidly with it,
   so the game's own finger pose is kept. Then the cut is applied as usual.
-- Gun bones, the right hand and all other constants are never touched. The cut end tapers into a cuff.
+- The right hand and the gun bones are never edited (auto-grip moves the whole weapon through the grip offset). The cut end tapers into a cuff.
 
 ## Settings (blackvr.ini)
 | key | values | default |
 |---|---|---|
 | `arms` | `hands` / `full` | `hands` |
 | `left_hand` | `tracked` / `grip` / `always` / `never` | `tracked` |
+| `hand_auto` | `on` / `off` | `on` |
+| `wrist_offset` | metres from the controller's aim pose to your wrist: right, up, back | `0 -0.03 0.10` |
 
 ## Tests
 - `tests/xr_shell/test_arms.c` (50 checks): name roles in the SMG order, joints from inverse binds, the cut is seamless

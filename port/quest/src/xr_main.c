@@ -84,6 +84,8 @@ static const char k_default_ini[] =
     "hud_width = 2.4          ; metres (4:3)\n"
     "arms = hands             ; hands: the arms end at the wrists | full: the game's whole arms\n"
     "left_hand = tracked      ; tracked: follows your off controller | grip | always | never\n"
+    "hand_auto = on           ; on: the game's right hand is placed on your hand for every gun (measured)\n"
+    "wrist_offset = 0 -0.03 0.10 ; metres from the controller to your wrist: right, up, back\n"
     "haptic_fire = 0.7        ; 0..1: shot pulse on the gun hand (0 = off); the game's own rumble (hits) stays\n"
     "gun_latch = on           ; on | off: the weapon follows the controller at display time\n"
     "# env RECOMP_BLACK_HZ=60\n"

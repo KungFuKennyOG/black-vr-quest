@@ -405,9 +405,14 @@ const VrGameGun *vr_game_gun(void);   /* the one stored with the newest camera (
  * renderer moves a draw only when its position is made through one of
  * these bit for bit. The renderer implements it; the shell has a no-op. */
 void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register);
-/* Game thread, with the weapon mesh's MVP (after vr_mark_viewmodel_mvp): the off-hand mirror A (row-major 4x4,
- * column vectors) in the weapon's model space, for the first-person arms (vgm_off_hand_mirror). */
-void vr_mark_viewmodel_offhand(const float a[16]);
+/* Game thread, with the weapon mesh's MVP (after vr_mark_viewmodel_mvp): K = hand_from_model (row-major 4x4,
+ * column vectors; LH, game units), the gun hand's aim frame from the weapon's model space (vgm_weapon_hand_frame),
+ * for the first-person arms. */
+void vr_mark_viewmodel_offhand(const float k[16]);
+/* First-person arms -> game thread: the auto-grip correction (game units, added to the weapon's grip offset) so the
+ * game's right wrist lands at blackvr.ini wrist_offset from the controller (port/notes/arms.md). */
+void vr_set_grip_correction(const float c[3]);
+void vr_grip_correction(float c[3]);
 
 /* --- The weapon's late latch (render thread) --------------------------------
  * vr_set_render_gun(): what the frame being drawn placed its weapon at
@@ -418,8 +423,10 @@ void vr_mark_viewmodel_offhand(const float a[16]);
 typedef struct {
     VrPose   game_hand;     /* VrGameGun.hand of the frame */
     VrPose   hand;          /* the late latch's */
+    VrPose   off;           /* the off hand's aim pose, same latch (first-person arms) */
     int      hand_index;
     int      valid;
+    int      off_valid;
     uint64_t serial;        /* == VrRenderPose.serial of the latch */
 } VrRenderGun;
 void vr_set_render_gun(const VrGameGun *gun);
@@ -437,6 +444,8 @@ enum { VR_LEFT_HAND_GRIP = 0, VR_LEFT_HAND_ALWAYS = 1, VR_LEFT_HAND_NEVER = 2, V
 /* First-person arms (render thread; port/notes/arms.md): cut = blackvr.ini arms (hands), mode = left_hand
  * (VR_LEFT_HAND_*), engaged = the two-handed grip is on now. */
 void vr_arms_state(int *cut, int *mode, int *engaged);
+/* hand_auto (1: auto-grip on) and wrist_offset (metres, OpenXR aim space of the gun hand: x right, y up, z back) */
+void vr_arms_grip_config(int *hand_auto, float wrist_offset_m[3]);
 
 /* --- Both-eye capture (debug; port/notes/renderer.md section 12) -------------
  * A request (both thumbsticks held VR_CAPTURE_HOLD_S -- past the 1 s recentre

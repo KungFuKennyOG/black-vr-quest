@@ -51,6 +51,7 @@
 #include "kvk_stereo.h"
 #include "kvk_vr_hooks.h"
 #include "vr_arms.h"
+#include "vr_game_math.h"
 #include "vr_bridge.h"
 #include "vr_math.h"
 
@@ -75,7 +76,7 @@ typedef struct GlueCam {
     uint32_t serial;         /* the mark's number (a slot is checked against it before its live MVP list is read) */
     int nvm;                 /* weapon MVPs recorded so far for this frame (grows after the mark, read live) */
     GlueVm vm[GLUE_VM_MAX];
-    float offhand[16];       /* first-person arms: the off-hand mirror (vr_mark_viewmodel_offhand) */
+    float offhand[16];       /* first-person arms: K = hand_from_model (vr_mark_viewmodel_offhand) */
     int offhand_ok;
 } GlueCam;
 
@@ -410,6 +411,8 @@ typedef struct {
     int ok;                     /* 1: rig valid, 0: not a known model (do nothing) */
     uint64_t P;                 /* the model root (rechecked each use: memory is reused across levels) */
     unsigned retry;             /* a miss is retried after this many uses */
+    float corr[3];              /* auto-grip correction for this weapon (game units) */
+    unsigned corr_n;            /* measurements so far */
     VrArmRig rig;
 } ArmsEntry;
 
@@ -460,26 +463,82 @@ static int arms_load(ArmsEntry *e, const void *vdata)
     return 1;
 }
 
+/* The posed joint of bone k (model space) */
+static void arms_joint(const VrArmRig *rig, const float *constants, int k, float out[3])
+{
+    const float *r = vra_rows((float *)constants, k);
+    int i;
+    for (i = 0; i < 3; i++)
+        out[i] = r[i * 4] * rig->joint[k][0] + r[i * 4 + 1] * rig->joint[k][1] + r[i * 4 + 2] * rig->joint[k][2] + r[i * 4 + 3];
+}
+
+/* Auto-grip: where the game's right wrist is in the gun hand's aim frame (via K) vs where it should be (wrist_offset);
+ * the error is integrated per weapon into the grip correction the game thread adds to the weapon's grip offset. */
+static void arms_auto_grip(ArmsEntry *e, const float *constants, VrMat4 k)
+{
+    int hand_auto, i;
+    float wo[3], p[3], h[3], target[3], err[3], gain;
+    const float upm = vr_game_config()->units_per_metre;
+    vr_arms_grip_config(&hand_auto, wo);
+    if (!hand_auto) {
+        const float zero[3] = { 0.0f, 0.0f, 0.0f };
+        vr_set_grip_correction(zero);
+        return;
+    }
+    arms_joint(&e->rig, constants, e->rig.wrist[VRA_RIGHT], p);
+    for (i = 0; i < 3; i++) h[i] = VRM_AT(k, i, 0) * p[0] + VRM_AT(k, i, 1) * p[1] + VRM_AT(k, i, 2) * p[2] + VRM_AT(k, i, 3);
+    target[0] = wo[0] * upm; target[1] = wo[1] * upm; target[2] = -wo[2] * upm;   /* OpenXR z back -> LH z forward */
+    /* fast for the first ~2 s of a weapon, then slow and limited so recoil and reload animations do not drag the gun */
+    gain = e->corr_n < 120u ? 0.08f : 0.01f;
+    for (i = 0; i < 3; i++) {
+        err[i] = h[i] - target[i];
+        if (e->corr_n >= 120u) {
+            const float lim = 0.05f * upm;
+            if (err[i] > lim) err[i] = lim;
+            if (err[i] < -lim) err[i] = -lim;
+        }
+        if (!(err[i] == err[i])) return;
+        e->corr[i] += gain * err[i];
+        if (e->corr[i] > 0.6f * upm) e->corr[i] = 0.6f * upm;
+        if (e->corr[i] < -0.6f * upm) e->corr[i] = -0.6f * upm;
+    }
+    e->corr_n++;
+    vr_set_grip_correction(e->corr);
+    if (e->corr_n == 1u || e->corr_n == 120u || e->corr_n % 3600u == 0u)
+        GLOG("arms: auto-grip n %u wrist in hand frame %.3f %.3f %.3f m (target %.3f %.3f %.3f) correction %.3f %.3f %.3f m",
+             e->corr_n, h[0] / upm, h[1] / upm, h[2] / upm, target[0] / upm, target[1] / upm, target[2] / upm,
+             e->corr[0] / upm, e->corr[1] / upm, e->corr[2] / upm);
+}
+
 bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
 {
     ArmsEntry *e = NULL;
-    int cut, mode, engaged, show_off, place = 0, i;
-    float off[16];
+    int cut, mode, engaged, show_off, have_k = 0, place = 0, i;
+    static int last_engaged;
+    float kf[16], off[16];
+    VrMat4 k;
     if (!g_on || !constants || !vertex_data || !&g_xbox_mem_offset) return false;
     vr_arms_state(&cut, &mode, &engaged);
-    /* the off hand: tracked -> at the off controller, also while gripping (the controller is then on the gun: the game's
-     * own off-hand pose is not on the gun for every weapon, e.g. its rifles keep the left hand at the hip); grip -> the
-     * game's pose, only while gripping; always -> the game's pose; never -> hidden */
+    /* the off hand: tracked -> at the off controller (late latch), snapped onto the gun line while gripping two-handed;
+     * grip -> the game's pose, only while gripping; always -> the game's pose; never -> hidden */
     show_off = mode == VR_LEFT_HAND_ALWAYS || (mode == VR_LEFT_HAND_GRIP && engaged);
-    if (mode == VR_LEFT_HAND_TRACKED && F.marked) {
+    if (F.marked) {
         pthread_mutex_lock(&g_ring_lock);
         if (g_ring[F.slot].serial == F.mark.serial && g_ring[F.slot].offhand_ok) {
-            memcpy(off, g_ring[F.slot].offhand, sizeof(off));
-            place = 1;
+            memcpy(kf, g_ring[F.slot].offhand, sizeof(kf));
+            have_k = 1;
         }
         pthread_mutex_unlock(&g_ring_lock);
     }
-    if (!cut && show_off) return false;                 /* the game's arms, unchanged */
+    if (have_k) {
+        int r, c;
+        for (r = 0; r < 4; r++) for (c = 0; c < 4; c++) VRM_AT(k, r, c) = kf[r * 4 + c];
+    }
+    if (engaged && !last_engaged) {   /* the off hand takes the gun: a short tick on it */
+        const VrRenderGun *g = vr_render_gun();
+        vr_game_haptic((g->hand_index & 1) ^ 1, 0.8f, 30u);
+    }
+    last_engaged = engaged;
     for (i = 0; i < ARMS_CACHE; i++) if (g_arms[i].vdata == vertex_data) { e = &g_arms[i]; break; }
     if (e && e->ok && !(arms_span(e->P, 0x70) && arms_u32(e->P + 0x10) == 0xB8000000u &&
                         arms_u32(e->P + 0x14) == 0x95820AD4u && arms_u32(e->P + 0x5C) == (uint32_t)e->rig.n))
@@ -493,27 +552,34 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
         e->retry = 120;
     }
     if (!e->ok) return false;
-    /* the model's right arm holds the gun (the gun hand, whichever controller it is on); its left is the off hand */
+    if (have_k && e->rig.wrist[VRA_RIGHT] >= 0) arms_auto_grip(e, constants, k);
+    if (mode == VR_LEFT_HAND_TRACKED && have_k) {
+        const VrRenderGun *g = vr_render_gun();
+        VrMat4 a;
+        if (g->valid && g->off_valid &&
+            vgm_off_hand_mirror(k, vgm_off_hand_rel(g->hand, g->off, engaged, vr_game_config()->units_per_metre), &a)) {
+            int r, c;
+            for (r = 0; r < 4; r++) for (c = 0; c < 4; c++) off[r * 4 + c] = VRM_AT(a, r, c);
+            place = 1;
+        }
+    }
+    if (!cut && show_off && !place) return false;      /* the game's arms, unchanged */
     {
         static unsigned logged, changes;
-        static int last_engaged = -1;
+        static int last_logged_engaged = -1;
         int placed = place && vra_place_off_hand(&e->rig, constants, off);
-        if (engaged != last_engaged && changes < 16) { changes++; last_engaged = engaged; logged = 0; }
+        if (engaged != last_logged_engaged && changes < 16) { changes++; last_logged_engaged = engaged; logged = 0; }
         if (logged < 3) {
-            const float *rl = vra_rows(constants, e->rig.wrist[0]), *rr = vra_rows(constants, e->rig.wrist[1]);
-            logged++;
-            const float *jl = e->rig.joint[e->rig.wrist[0]], *jr = e->rig.joint[e->rig.wrist[1]];
             float pl[3], pr[3];
-            int r2;
-            for (r2 = 0; r2 < 3; r2++) {
-                pl[r2] = rl[r2 * 4] * jl[0] + rl[r2 * 4 + 1] * jl[1] + rl[r2 * 4 + 2] * jl[2] + rl[r2 * 4 + 3];
-                pr[r2] = rr[r2 * 4] * jr[0] + rr[r2 * 4 + 1] * jr[1] + rr[r2 * 4 + 2] * jr[2] + rr[r2 * 4 + 3];
-            }
-            GLOG("arms: off hand mode %d gripping %d mirror %d placed %d | wrists (model) L %.3f %.3f %.3f  R %.3f %.3f %.3f",
-                 mode, engaged, place, placed, pl[0], pl[1], pl[2], pr[0], pr[1], pr[2]);
+            logged++;
+            arms_joint(&e->rig, constants, e->rig.wrist[0], pl);
+            arms_joint(&e->rig, constants, e->rig.wrist[1], pr);
+            GLOG("arms: off hand mode %d gripping %d hand frame %d placed %d | wrists (model) L %.3f %.3f %.3f  R %.3f %.3f %.3f",
+                 mode, engaged, have_k, placed, pl[0], pl[1], pl[2], pr[0], pr[1], pr[2]);
         }
         if (placed) show_off = 1;
     }
+    /* the model's right arm holds the gun (the gun hand, whichever controller it is on); its left is the off hand */
     return vra_apply(&e->rig, constants, cut, show_off, 1) > 0 || place;
 }
 

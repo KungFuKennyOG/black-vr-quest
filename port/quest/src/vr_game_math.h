@@ -420,21 +420,42 @@ static inline int vgm_mvp_modelview(const float r[16], double clip_y_sign, VrMat
     return 1;
 }
 
-/* The off hand for the first-person arms (port/notes/arms.md): A, in the weapon's model space, takes the gun hand's
- * pose to the off hand's, mirrored left/right. K = hand_from_model (the gun hand's LH aim frame, game units:
- * K = back(grip) * entity_from_world * world_from_head * MV, the same chain vgm_weapon_to_hand re-targets with),
- * rel = gun_hand_from_off_hand (LH, game units), S = diag(-1, 1, 1): A = K^-1 * rel * S * K. */
-static inline int vgm_off_hand_mirror(VrMat4 world_from_head, VrMat4 world_from_entity, VrVec3 grip_units, VrMat4 mv,
-                                      VrMat4 rel, VrMat4 *a)
+/* The gun hand's aim frame from the weapon's model space (first-person arms, port/notes/arms.md): K = hand_from_model
+ * (LH, game units) = back(grip) * entity_from_world * world_from_head * MV, the chain vgm_weapon_to_hand re-targets
+ * the weapon with (a model point p lands at world_from_hand * K * p). */
+static inline int vgm_weapon_hand_frame(VrMat4 world_from_head, VrMat4 world_from_entity, VrVec3 grip_units, VrMat4 mv,
+                                        VrMat4 *k)
 {
-    VrMat4 entity_from_world, k, k_inv, s = vrm_m4_identity(), back = vrm_m4_identity();
+    VrMat4 entity_from_world, back = vrm_m4_identity();
     if (!vrm_m4_inverse(world_from_entity, &entity_from_world)) return 0;
     VRM_AT(back, 0, 3) = -grip_units.x; VRM_AT(back, 1, 3) = -grip_units.y; VRM_AT(back, 2, 3) = -grip_units.z;
-    k = vrm_m4_mul(back, vrm_m4_mul(entity_from_world, vrm_m4_mul(world_from_head, mv)));
+    *k = vrm_m4_mul(back, vrm_m4_mul(entity_from_world, vrm_m4_mul(world_from_head, mv)));
+    return 1;
+}
+
+/* The off-hand mirror in model space: A = K^-1 * rel * S * K, rel = gun_hand_from_off_hand (LH, game units),
+ * S = diag(-1, 1, 1): takes the gun hand's pose to the off hand's, mirrored left/right. */
+static inline int vgm_off_hand_mirror(VrMat4 k, VrMat4 rel, VrMat4 *a)
+{
+    VrMat4 k_inv, s = vrm_m4_identity();
     if (!vrm_m4_inverse(k, &k_inv)) return 0;
     VRM_AT(s, 0, 0) = -1.0f;
     *a = vrm_m4_mul(k_inv, vrm_m4_mul(rel, vrm_m4_mul(s, k)));
     return 1;
+}
+
+/* The off hand relative to the gun hand (OpenXR stage poses, both at one time), for the arms: snapped onto the gun
+ * line while gripping two-handed (straight ahead of the gun hand, same orientation: the off hand then mirrors the
+ * gun hand's grip, further along the gun), as LH game units. */
+static inline VrMat4 vgm_off_hand_rel(VrPose gun, VrPose off, int gripping, float units_per_metre)
+{
+    VrPose rel = vrm_pose_mul(vrm_pose_inv(gun), off);
+    if (gripping) {
+        const float ahead = rel.position.z < -0.08f ? rel.position.z : -0.08f;   /* OpenXR: forward is -z */
+        rel.position = vrm_v3(0.0f, 0.0f, ahead);
+        rel.orientation = vrm_q(0.0f, 0.0f, 0.0f, 1.0f);
+    }
+    return vgm_lh_from_pose(rel, units_per_metre);
 }
 
 /* The view axes a world MVP was built with (unit vectors in the draw's model

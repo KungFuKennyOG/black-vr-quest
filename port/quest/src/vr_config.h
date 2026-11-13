@@ -46,6 +46,9 @@
  *   left_hand         = tracked   ; tracked: the game's off hand follows the off controller (on the gun while
  *                                 ; gripping two-handed) | grip: the game's pose, shown only while gripping
  *                                 ; | always: the game's pose | never (port/notes/arms.md)
+ *   hand_auto         = on        ; on: the gun is placed so the game's right wrist sits at wrist_offset from the
+ *                                 ; controller, measured per weapon (vm_offset is then only the starting guess)
+ *   wrist_offset      = 0 -0.03 0.10 ; metres, controller aim space: x right, y up, z back
  *   haptic_fire       = 0.7       ; 0..1: shot pulse on the gun hand's controller (0 = off; the game's own rumble stays)
  *   gun_latch         = on        ; on | off: the first-person weapon follows the hand pose latched at display
  *                                 ; time, not the game frame's (port/notes/gun-latch.md); env
@@ -84,6 +87,8 @@ typedef struct {
     float haptic_fire;       /* 0..1: strength of the shot pulse on the gun hand (0 off) */
     int   arms_cut;          /* 1: first-person arms end at the wrists (arms = hands) */
     int   left_hand;         /* VR_LEFT_HAND_* */
+    int   hand_auto;         /* 1: the gun is moved so the game's right wrist sits at wrist_offset from the controller */
+    float wrist_offset_m[3]; /* the wrist in the gun hand's OpenXR aim space (x right, y up, z back), metres */
     int   foveation;         /* VR_FOVEATION_* */
     int   game_hz;           /* 30 | 60 -> RECOMP_BLACK_HZ / RECOMP_BLACK_60HZ */
     int   raster_workers;    /* -> RECOMP_KELVIN_THREADS = workers + 1 */
@@ -126,6 +131,10 @@ static inline void vr_config_defaults(VrShellConfig *c)
     c->haptic_fire = 0.7f;
     c->arms_cut = 1;
     c->left_hand = VR_LEFT_HAND_TRACKED;
+    c->hand_auto = 1;
+    c->wrist_offset_m[0] = 0.0f;
+    c->wrist_offset_m[1] = -0.03f;
+    c->wrist_offset_m[2] = 0.10f;
     c->gun_latch = 1;
     vr_input_default_config(&c->input);
     vrg_default_config(&c->gest);
@@ -228,6 +237,14 @@ static inline int vr_config_line(VrShellConfig *c, const char *line_in)
         if (!strcmp(val, "hands") || !strcmp(val, "cut")) c->arms_cut = 1;
         else if (!strcmp(val, "full")) c->arms_cut = 0;
         else return 0;
+        return 1;
+    }
+    if (!strcmp(key, "hand_auto")) return vr_cfg_bool(val, &c->hand_auto);
+    if (!strcmp(key, "wrist_offset")) {
+        float v[3];
+        int b;
+        if (sscanf(val, "%f %f %f", &v[0], &v[1], &v[2]) != 3) return 0;
+        for (b = 0; b < 3; b++) { if (!(v[b] >= -0.5f && v[b] <= 0.5f)) return 0; c->wrist_offset_m[b] = v[b]; }
         return 1;
     }
     if (!strcmp(key, "left_hand")) {

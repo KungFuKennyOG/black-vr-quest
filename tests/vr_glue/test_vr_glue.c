@@ -1849,6 +1849,18 @@ static int run(int multiview)
             vr_arms_state(&cut, &mode, &engaged);
             CHECK(cut == 1 && mode == VR_LEFT_HAND_TRACKED, "back to the defaults");
         }
+        /* auto-grip: hand_auto and wrist_offset */
+        {
+            int ha = -1;
+            float wo[3];
+            vr_arms_grip_config(&ha, wo);
+            CHECK(ha == 1 && wo[0] == 0.0f && wo[1] == -0.03f && wo[2] == 0.10f, "hand_auto on, wrist_offset 0 -0.03 0.10");
+            CHECK(shell_config_line("wrist_offset = 0.01 -0.05 0.12") && shell_config_line("hand_auto = off"), "parse");
+            vr_arms_grip_config(&ha, wo);
+            CHECK(ha == 0 && wo[0] == 0.01f && wo[1] == -0.05f && wo[2] == 0.12f, "hand_auto off, wrist_offset set");
+            CHECK(!shell_config_line("wrist_offset = 0 0") && !shell_config_line("wrist_offset = 0 0 3"), "bad wrist_offset refused");
+            CHECK(shell_config_line("wrist_offset = 0 -0.03 0.10") && shell_config_line("hand_auto = on"), "back to defaults");
+        }
         CHECK(vr_gun_latch_config()->enabled == 1 && vr_gun_latch_config()->debug_tint == (tinting ? 0x80FFFF00u : 0u),
               "gun latch config: on, debug tint %08X", vr_gun_latch_config()->debug_tint);
         gun_setup();

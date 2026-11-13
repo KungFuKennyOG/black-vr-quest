@@ -28,7 +28,7 @@ __attribute__((weak)) int vr_renderer_init(const VrVulkanContext *ctx) { (void)c
 __attribute__((weak)) void vr_renderer_shutdown(void) {}
 __attribute__((weak)) void vr_mark_world_pass(uint32_t pushbuffer_va, int begin) { (void)pushbuffer_va; (void)begin; }
 __attribute__((weak)) void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register) { (void)mvp; (void)constant_register; }
-__attribute__((weak)) void vr_mark_viewmodel_offhand(const float a[16]) { (void)a; }
+__attribute__((weak)) void vr_mark_viewmodel_offhand(const float k[16]) { (void)k; }
 
 static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name)
 {

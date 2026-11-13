@@ -801,6 +801,28 @@ void vr_set_render_gun(const VrGameGun *gun)
 
 const VrRenderGun *vr_render_gun(void) { return &g_rgun; }
 
+static float g_grip_corr[3];
+
+void vr_set_grip_correction(const float c[3])
+{
+    pthread_mutex_lock(&g_lock);
+    memcpy(g_grip_corr, c, sizeof(g_grip_corr));
+    pthread_mutex_unlock(&g_lock);
+}
+
+void vr_grip_correction(float c[3])
+{
+    pthread_mutex_lock(&g_lock);
+    memcpy(c, g_grip_corr, sizeof(g_grip_corr));
+    pthread_mutex_unlock(&g_lock);
+}
+
+void vr_arms_grip_config(int *hand_auto, float wrist_offset_m[3])
+{
+    *hand_auto = g_xr.cfg.hand_auto;
+    memcpy(wrist_offset_m, g_xr.cfg.wrist_offset_m, 3 * sizeof(float));
+}
+
 void vr_arms_state(int *cut, int *mode, int *engaged)
 {
     *cut = g_xr.cfg.arms_cut;
@@ -846,6 +868,16 @@ static void latch_gun(XrShell *s, XrTime t)
         return;
     g_rgun.hand = pose_from_xr(&loc.pose);
     g_rgun.valid = 1;
+    {
+        /* the off hand at the same display time (first-person arms) */
+        XrSpaceLocation lo = { XR_TYPE_SPACE_LOCATION };
+        const int off = (in.hand_index & 1) ^ 1;
+        if (s->aim_space[off] && XR_SUCCEEDED(xrLocateSpace(s->aim_space[off], s->world_space, t, &lo)) &&
+            (lo.locationFlags & need) == need) {
+            g_rgun.off = pose_from_xr(&lo.pose);
+            g_rgun.off_valid = 1;
+        }
+    }
     {
         /* two-handed aim: the weapon follows the gun hand -> off hand line at display time too */
         int two;
