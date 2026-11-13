@@ -47,6 +47,9 @@
  *                           the gesture sway moves it 0.15 m left and right over 12 s while held
  *   GRX_CONTROLS=0          1: both controllers tracked, for the VR controls' gestures (BLACKVR_INPUT_TRACE=1 logs the
  *                           game's side: intents, weapon state, magazine)
+ * Run-time press file <frames>/press: "button" or "button:hold" per line presses now; "cap" captures the next
+ * presented frame (tag cap); "quit" ends the run as the time budget does (final capture, RESULT line). The whole-game
+ * sweep driver (sweep_drive.py) uses it.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -1076,7 +1079,15 @@ int main(int argc, char **argv)
                     double hold = 0.0;
                     /* "button" or "button:hold" (released after exactly `hold` seconds) */
                     const int got = sscanf(line, "%15[a-z]:%lf", b, &hold);
-                    if (got >= 1) {
+                    if (got >= 1 && !strcmp(b, "quit")) {
+                        /* "quit" (sweep_drive.py): end the run now, as at the time budget (final capture, RESULT) */
+                        fprintf(stderr, "[GRX] t=%.1fs: quit requested by the press file\n", el());
+                        s_limit = 0.0;
+                    } else if (got >= 1 && !strcmp(b, "cap")) {
+                        /* "cap": capture the next presented frame (tag "cap") */
+                        s_cap.want_tag = "cap";
+                        s_cap.want = 1;
+                    } else if (got >= 1) {
                         Press *np = &s_press[s_npress++];
                         memset(np, 0, sizeof(*np));
                         np->t = now_s() - s_first_frame_t; np->hold = got == 2 && hold > 0.0 ? hold : 0.5; np->captured_before = 1;

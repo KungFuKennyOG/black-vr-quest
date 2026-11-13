@@ -317,6 +317,18 @@ recomp_manual.c hook calls (all `#ifdef BLACK_VR`):
   The custom-FOV policy stands down in stereo. Zoom ≥ `scope_zoom` (2.5) -> FLAT_SCOPE: the game
   renders its own zoomed lens flat, shown as a head-locked window. "Scripted FOV zoom outside
   scopes" is thus neutralised for gameplay. Scripted cameras are flat anyway.
+  For a scoped weapon (descriptor +C0) the threshold is at most 2.0 (2026-11-13): the sniper's X2 is
+  2.33, and in STEREO its full-screen scope mask went to the HUD quad as an opaque black panel
+  (sweep issue 2). The 1.10 of the raise animation stays STEREO.
+- **Look freshness** (2026-11-13): STEREO needs the look integrator to have run within the last 6
+  world cameras (`BVR_LOOK_STALE_CAMS`; two frames of level_07, which builds three per frame). It was
+  250 ms of wall time, which turned one gameplay frame flat after any hitch of 0.25 s or more (sweep
+  issue 3). `BLACKVR_TEST_LOOK_STALE_MS` adds a wall-clock limit for tests; unset, none.
+- **Body yaw at a STEREO start** (2026-11-13): the look integrator runs before the world camera's
+  decision and skips while the view is flat, so the first STEREO camera after a flat stretch (level
+  start, checkpoint, menu) built its view from an unset or old body yaw: the first frame of every level
+  faced 55-96 deg off (sweep issue 1). `black_vr_camera_after_world` now steps the body yaw from the
+  game's facing first (the look's own step: unset -> anchored; a change of 20 deg or more absorbed).
 - **Self-checks** (logged once):
   - **Screen-right convention:** the RW right row is the screen's left (docs/photo-mode.md). This
     is confirmed by 32 static world-draw MVPs whose view axes match the head frame, and flipped after 8 contrary ones.
