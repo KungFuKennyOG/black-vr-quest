@@ -21,28 +21,42 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
 - `vra_apply` collapses palette matrices to a single point (the posed wrist joint):
   - `arms = hands` (default): Shoulder/Elbow/twist of both arms fold into their wrist. The hand stays.
   - the off hand hidden: every bone of the left arm folds to its wrist, so its triangles have no area.
-- `left_hand = grip` (default): the game's left hand shows only while the two-handed grip is engaged (`g_two.engaged`,
-  the existing two_hand gesture). `always` / `never` force it.
+- `left_hand = tracked` (default): the game's left hand follows the off controller, and takes the game's own pose on
+  the gun while the two-handed grip is engaged (`g_two.engaged`). `grip`: shown only while gripping. `always`: the
+  game's pose. `never`: hidden.
+- How the tracked hand is placed: the stock arms are mirror images across model x = 0 (bind pose checked on the gun
+  models). The game thread computes A = K^-1 * rel * S * K (`vgm_off_hand_mirror`): K = the gun hand's frame from the
+  weapon's model space (the same chain the weapon re-target uses), rel = gun hand from off hand (LH, game units),
+  S = flip x. It is recorded with the weapon MVP (`vr_mark_viewmodel_offhand`). The renderer moves the left wrist to
+  A * (posed right wrist) * mirror, where mirror = bind_rt^-1 * S * bind_lft, and the whole left arm rigidly with it,
+  so the game's own finger pose is kept. Then the cut is applied as usual.
 - Gun bones, the right hand and all other constants are never touched. The cut end tapers into a cuff.
 
 ## Settings (blackvr.ini)
 | key | values | default |
 |---|---|---|
 | `arms` | `hands` / `full` | `hands` |
-| `left_hand` | `grip` / `always` / `never` | `grip` |
+| `left_hand` | `tracked` / `grip` / `always` / `never` | `tracked` |
 
 ## Tests
 - `tests/xr_shell/test_arms.c` (50 checks): name roles in the SMG order, joints from inverse binds, the cut is seamless
   at the wrist, upper arms fold to the wrist, a hidden hand folds to one point, nothing else changes, no-arm models
   untouched.
+- `test_arms.c` also checks the placement (87 checks in all): a mirror-image controller puts the left wrist exactly on
+  its bind frame, a moved controller moves the wrist by the same amount, the fingers keep their pose, the right arm
+  and gun bones are untouched.
+- Harness, `GRX_CONTROLS=1` (both controllers tracked): the game's left hand shows at the left controller, cut at the
+  wrist, beside the pistol.
 - Harness (level 1 pistol): one-handed, the forearms and the left hand are gone and the right hand grips the gun;
   `left_hand = always`, both hands on the gun, both cut.
 
 ## Not verified
 - Guns other than the pistol in the harness: the test-weapon hook (`RECOMP_BLACK_TEST_WEAPON`, now any 16-hex-digit
   inventory ID) was refused by the game's own check in level 1. Check the UZI, rifles, shotgun and RPG on the headset.
-- The left hand during reloads (`grip` hides it unless the two-handed grip is on; `left_hand = always` shows the reload
-  hand).
+- The left hand during reloads: with `tracked` it stays at your controller (the game's reload animation moves its
+  fingers but not its place); `always` shows the game's own reload hand.
+- The tracked hand's exact fit on the controller is a mirror of the right hand's fit (set by the grip offset); it is
+  not tuned on the headset yet.
 - The model of a left-handed player (`left_handed = 1`): the model's right arm is always treated as the gun hand.
 
 ## Debug switches added

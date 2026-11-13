@@ -402,6 +402,41 @@ static inline int vgm_mvp_retarget(float r[16], VrMat4 yv, double clip_y_sign)
     return 1;
 }
 
+/* The model-view (view LH from model, game units) a weapon MVP was built with: P^-1 * MVP, as vgm_mvp_retarget
+ * factors it. Returns 0 if the MVP does not calibrate. */
+static inline int vgm_mvp_modelview(const float r[16], double clip_y_sign, VrMat4 *mv)
+{
+    VgmClipCal c;
+    int j;
+    if (!vgm_clip_calibrate(r, &c)) return 0;
+    if (clip_y_sign < 0.0) c.p11 = -c.p11;
+    *mv = vrm_m4_identity();
+    for (j = 0; j < 4; j++) {
+        VRM_AT(*mv, 0, j) = (float)(((double)r[j] - c.p02 * r[12 + j]) / c.p00);
+        VRM_AT(*mv, 1, j) = (float)(((double)r[4 + j] - c.p12 * r[12 + j]) / c.p11);
+        VRM_AT(*mv, 2, j) = r[12 + j];
+        VRM_AT(*mv, 3, j) = j == 3 ? 1.0f : 0.0f;
+    }
+    return 1;
+}
+
+/* The off hand for the first-person arms (port/notes/arms.md): A, in the weapon's model space, takes the gun hand's
+ * pose to the off hand's, mirrored left/right. K = hand_from_model (the gun hand's LH aim frame, game units:
+ * K = back(grip) * entity_from_world * world_from_head * MV, the same chain vgm_weapon_to_hand re-targets with),
+ * rel = gun_hand_from_off_hand (LH, game units), S = diag(-1, 1, 1): A = K^-1 * rel * S * K. */
+static inline int vgm_off_hand_mirror(VrMat4 world_from_head, VrMat4 world_from_entity, VrVec3 grip_units, VrMat4 mv,
+                                      VrMat4 rel, VrMat4 *a)
+{
+    VrMat4 entity_from_world, k, k_inv, s = vrm_m4_identity(), back = vrm_m4_identity();
+    if (!vrm_m4_inverse(world_from_entity, &entity_from_world)) return 0;
+    VRM_AT(back, 0, 3) = -grip_units.x; VRM_AT(back, 1, 3) = -grip_units.y; VRM_AT(back, 2, 3) = -grip_units.z;
+    k = vrm_m4_mul(back, vrm_m4_mul(entity_from_world, vrm_m4_mul(world_from_head, mv)));
+    if (!vrm_m4_inverse(k, &k_inv)) return 0;
+    VRM_AT(s, 0, 0) = -1.0f;
+    *a = vrm_m4_mul(k_inv, vrm_m4_mul(rel, vrm_m4_mul(s, k)));
+    return 1;
+}
+
 /* The view axes a world MVP was built with (unit vectors in the draw's model
  * space): x = screen right, y = clip +y, z = forward. For a draw whose model
  * rotation is identity these are the camera's world axes. */

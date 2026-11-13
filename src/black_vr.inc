@@ -65,6 +65,9 @@ typedef struct BlackVr {
     /* this frame */
     VrMat4 w_entity, w_head, w_hand, yv;
     int yv_ok;
+    VrMat4 off_rel;                   /* gun_hand_from_off_hand (LH, game units), for the first-person arms */
+    VrVec3 grip;                      /* the weapon's grip offset (game units) */
+    int off_ok;
     float hx, hy;
     float depth_a, depth_b;
     int depth_ok, calib_this_frame;
@@ -405,6 +408,7 @@ static void black_vr_camera_after_world(uint32_t camera)
     {
         BVR_FP_BEGIN;
         bvr.yv_ok = 0;
+        bvr.off_ok = 0;
         bvr.calib_this_frame = 0;
         frame = bvr_frame(camera);
         if (bvr.mode != VR_PRESENT_STEREO || !frame || !bvr.look || !bvr_f32_ok(bvr.look + 0x18u)) {
@@ -468,6 +472,13 @@ static void black_vr_camera_after_world(uint32_t camera)
             const VrVec3 grip = vrm_scale(vrm_v3(cfg->vm_offset_m[0], cfg->vm_offset_m[1], cfg->vm_offset_m[2]),
                                           cfg->units_per_metre);
             bvr.yv_ok = vgm_weapon_to_hand(bvr.w_head, bvr.w_entity, bvr.w_hand, grip, &bvr.yv);
+            bvr.grip = grip;
+            /* the off controller relative to the gun hand, for the first-person arms (port/notes/arms.md) */
+            if (bvr.yv_ok && f->hand[(cfg->aim_hand & 1) ^ 1].valid) {
+                const VrPose rel = vrm_pose_mul(vrm_pose_inv(f->hand[cfg->aim_hand & 1].aim), f->hand[(cfg->aim_hand & 1) ^ 1].aim);
+                bvr.off_rel = vgm_lh_from_pose(rel, cfg->units_per_metre);
+                bvr.off_ok = 1;
+            }
         }
 
         /* both RwCamera frame matrices, as photo mode replaces them */
@@ -544,9 +555,17 @@ static void black_vr_upload_at(uint32_t upload, int reg)
     {
         BVR_FP_BEGIN;
         if (black_vr_vm_draw) {
+            VrMat4 mv, a;
+            const int have_mv = reg == 10 && bvr.off_ok && vgm_mvp_modelview(r, bvr.clip_y_sign, &mv);
             if (bvr.yv_ok && bvr.hand_locked && vgm_mvp_retarget(r, bvr.yv, bvr.clip_y_sign)) {
                 memcpy((void *)((uintptr_t)g_xbox_mem_offset + upload), r, sizeof(r));
                 vr_mark_viewmodel_mvp(r, reg);          /* gun latch: exactly what reaches c[reg..reg+3] */
+                if (have_mv && vgm_off_hand_mirror(bvr.w_head, bvr.w_entity, bvr.grip, mv, bvr.off_rel, &a)) {
+                    float rm[16];
+                    int i2, j2;
+                    for (i2 = 0; i2 < 4; i2++) for (j2 = 0; j2 < 4; j2++) rm[i2 * 4 + j2] = VRM_AT(a, i2, j2);
+                    vr_mark_viewmodel_offhand(rm);
+                }
             }
         } else {
             bvr.calib_this_frame++;

@@ -1835,6 +1835,20 @@ static int run(int multiview)
             CHECK(st == 0.0f, "haptic_fire = 0: no pulse");
             shell_config_line("haptic_fire = 0.7");
         }
+        /* first-person arms: arms and left_hand (port/notes/arms.md) */
+        {
+            int cut = -1, mode = -1, engaged = -1;
+            vr_arms_state(&cut, &mode, &engaged);
+            CHECK(cut == 1 && mode == VR_LEFT_HAND_TRACKED && engaged == 0, "arms: defaults hands / tracked / not gripping");
+            CHECK(shell_config_line("left_hand = grip") && shell_config_line("arms = full"), "arms / left_hand parse");
+            vr_arms_state(&cut, &mode, &engaged);
+            CHECK(cut == 0 && mode == VR_LEFT_HAND_GRIP, "arms = full, left_hand = grip");
+            CHECK(!shell_config_line("left_hand = sometimes") && !shell_config_line("arms = some"), "bad values refused");
+            CHECK(shell_config_line("left_hand = always") && shell_config_line("left_hand = never") &&
+                  shell_config_line("left_hand = tracked") && shell_config_line("arms = hands"), "all values parse");
+            vr_arms_state(&cut, &mode, &engaged);
+            CHECK(cut == 1 && mode == VR_LEFT_HAND_TRACKED, "back to the defaults");
+        }
         CHECK(vr_gun_latch_config()->enabled == 1 && vr_gun_latch_config()->debug_tint == (tinting ? 0x80FFFF00u : 0u),
               "gun latch config: on, debug tint %08X", vr_gun_latch_config()->debug_tint);
         gun_setup();

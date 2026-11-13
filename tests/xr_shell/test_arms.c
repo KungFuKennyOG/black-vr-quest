@@ -130,6 +130,75 @@ int main(void)
     CHECK(!memcmp(c + (VRA_PALETTE_BASE + 3 * idx("Elbow_rt")) * 4, base + (VRA_PALETTE_BASE + 3 * idx("Elbow_rt")) * 4,
                   12 * sizeof(float)));
 
+    /* the off hand at the controller (vra_place_off_hand). A mirror-symmetric rig: the left bones are the right ones
+     * mirrored across model x = 0, the bones' own axes mirrored too (as the stock arms). */
+    {
+        float ibm[NB][16], cm[192 * 4], a[16];
+        VrArmRig rm;
+        int j;
+        for (k = 0; k < NB; k++) memcpy(ibm[k], ib[k], sizeof(ibm[k]));
+        {
+            /* left wrist bind = S * right wrist bind * Q (a bone axis convention of its own: x flipped and a turn) */
+            const int wl = idx("Wrist_lft"), wr = idx("Wrist_rt");
+            float br[12], bl[12], q[12] = { -0.0f, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0 }, inv[12];
+            q[0] = 0.0f; q[1] = -1.0f; q[4] = -1.0f; q[5] = 0.0f;           /* det -1 with S: a proper left frame */
+            CHECK(vra_bind_from_inverse_bind(ib[wr], br));
+            for (j = 0; j < 12; j++) bl[j] = br[j];
+            for (j = 0; j < 4; j++) bl[j] = -bl[j];
+            vra_m34_mul(bl, q, bl);
+            CHECK(vra_m34_inv(bl, inv));
+            /* back to an inverse bind in row-vector form */
+            memset(ibm[wl], 0, sizeof(ibm[wl]));
+            for (j = 0; j < 3; j++) { ibm[wl][j * 4 + 0] = inv[0 * 4 + j]; ibm[wl][j * 4 + 1] = inv[1 * 4 + j]; ibm[wl][j * 4 + 2] = inv[2 * 4 + j]; }
+            ibm[wl][12] = inv[3]; ibm[wl][13] = inv[7]; ibm[wl][14] = inv[11]; ibm[wl][15] = 1.0f;
+        }
+        CHECK(vra_build_rig(&rm, k_names, (const float (*)[16])ibm, NB) == 1 && rm.mirror_ok);
+        {   /* the rebuilt left bind is what was set */
+            float bl2[12], br2[12];
+            CHECK(vra_bind_from_inverse_bind(ibm[idx("Wrist_lft")], bl2) && vra_bind_from_inverse_bind(ibm[idx("Wrist_rt")], br2));
+            CHECK(NEAR(bl2[3], -br2[3], 1e-5) && NEAR(bl2[7], br2[7], 1e-5) && NEAR(bl2[11], br2[11], 1e-5));
+        }
+        /* a = S (the off controller is the gun hand's mirror image across model x = 0), the right arm in its bind
+         * pose: the left wrist lands exactly on its own bind frame, whatever the left arm was posed at */
+        memcpy(cm, base, sizeof(cm));
+        for (j = 0; j < 12; j++) vra_rows(cm, idx("Wrist_rt"))[j] = (j % 5 == 0) ? 1.0f : 0.0f;   /* identity palette */
+        memset(a, 0, sizeof(a));
+        a[0] = -1.0f; a[5] = 1.0f; a[10] = 1.0f; a[15] = 1.0f;
+        CHECK(vra_place_off_hand(&rm, cm, a) == 1);
+        {
+            float fl[12];
+            vra_m34_mul(vra_rows(cm, idx("Wrist_lft")), rm.bind[VRA_LEFT], fl);
+            for (j = 0; j < 12; j++) CHECK(NEAR(fl[j], rm.bind[VRA_LEFT][j], 1e-4));
+        }
+        /* the left fingers keep their pose relative to the left wrist (moved rigidly with it) */
+        {
+            float before_rel[12], after_rel[12], inv_b[12], inv_a[12];
+            CHECK(vra_m34_inv(vra_rows(base, idx("Wrist_lft")), inv_b) && vra_m34_inv(vra_rows(cm, idx("Wrist_lft")), inv_a));
+            vra_m34_mul(inv_b, vra_rows(base, idx("Finger1_Top_lft")), before_rel);
+            vra_m34_mul(inv_a, vra_rows(cm, idx("Finger1_Top_lft")), after_rel);
+            for (j = 0; j < 12; j++) CHECK(NEAR(before_rel[j], after_rel[j], 1e-4));
+        }
+        /* the right arm and the gun are untouched */
+        CHECK(!memcmp(vra_rows(cm, idx("Elbow_rt")), vra_rows(base, idx("Elbow_rt")), 12 * sizeof(float)));
+        CHECK(!memcmp(vra_rows(cm, idx("SMG_Slide")), vra_rows(base, idx("SMG_Slide")), 12 * sizeof(float)));
+        /* a translated off controller moves the left wrist by the same amount */
+        {
+            float c2[192 * 4], f1[12], f2[12];
+            memcpy(c2, base, sizeof(c2));
+            for (j = 0; j < 12; j++) vra_rows(c2, idx("Wrist_rt"))[j] = (j % 5 == 0) ? 1.0f : 0.0f;
+            a[3] = 0.25f; a[7] = -0.1f;
+            CHECK(vra_place_off_hand(&rm, c2, a) == 1);
+            vra_m34_mul(vra_rows(cm, idx("Wrist_lft")), rm.bind[VRA_LEFT], f1);
+            vra_m34_mul(vra_rows(c2, idx("Wrist_lft")), rm.bind[VRA_LEFT], f2);
+            CHECK(NEAR(f2[3] - f1[3], 0.25, 1e-5) && NEAR(f2[7] - f1[7], -0.1, 1e-5) && NEAR(f2[11], f1[11], 1e-5));
+        }
+        /* a NaN mirror or a rig without one does nothing */
+        a[0] = NAN;
+        memcpy(c, base, sizeof(c));
+        CHECK(vra_place_off_hand(&rm, c, a) == 0 && !memcmp(c, base, sizeof(c)));
+        CHECK(vra_place_off_hand(&rig, c, a) == 0);
+    }
+
     /* a model with no arm bones (or too many bones for the palette) is left alone */
     {
         static const char *const gun_only[] = { "World", "Root", "Pistol_Root" };

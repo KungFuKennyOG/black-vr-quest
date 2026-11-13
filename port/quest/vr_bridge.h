@@ -399,6 +399,9 @@ const VrGameGun *vr_game_gun(void);   /* the one stored with the newest camera (
  * renderer moves a draw only when its position is made through one of
  * these bit for bit. The renderer implements it; the shell has a no-op. */
 void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register);
+/* Game thread, with the weapon mesh's MVP (after vr_mark_viewmodel_mvp): the off-hand mirror A (row-major 4x4,
+ * column vectors) in the weapon's model space, for the first-person arms (vgm_off_hand_mirror). */
+void vr_mark_viewmodel_offhand(const float a[16]);
 
 /* --- The weapon's late latch (render thread) --------------------------------
  * vr_set_render_gun(): what the frame being drawn placed its weapon at
@@ -424,9 +427,10 @@ typedef struct {
 } VrGunLatchConfig;
 const VrGunLatchConfig *vr_gun_latch_config(void);
 
-/* First-person arms (render thread; port/notes/arms.md): cut = blackvr.ini arms (hands), show_off = whether the game's
- * off hand is drawn now (left_hand: grip -> while the two-handed grip is engaged, always, never). */
-void vr_arms_state(int *cut, int *show_off);
+enum { VR_LEFT_HAND_GRIP = 0, VR_LEFT_HAND_ALWAYS = 1, VR_LEFT_HAND_NEVER = 2, VR_LEFT_HAND_TRACKED = 3 };
+/* First-person arms (render thread; port/notes/arms.md): cut = blackvr.ini arms (hands), mode = left_hand
+ * (VR_LEFT_HAND_*), engaged = the two-handed grip is on now. */
+void vr_arms_state(int *cut, int *mode, int *engaged);
 
 /* --- Both-eye capture (debug; port/notes/renderer.md section 12) -------------
  * A request (both thumbsticks held VR_CAPTURE_HOLD_S -- past the 1 s recentre

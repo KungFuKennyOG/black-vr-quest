@@ -75,6 +75,8 @@ typedef struct GlueCam {
     uint32_t serial;         /* the mark's number (a slot is checked against it before its live MVP list is read) */
     int nvm;                 /* weapon MVPs recorded so far for this frame (grows after the mark, read live) */
     GlueVm vm[GLUE_VM_MAX];
+    float offhand[16];       /* first-person arms: the off-hand mirror (vr_mark_viewmodel_offhand) */
+    int offhand_ok;
 } GlueCam;
 
 static pthread_mutex_t g_ring_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -177,6 +179,7 @@ void vr_mark_world_pass(uint32_t pushbuffer_va, int begin)
     g_ring[k].gun = *vr_game_gun();     /* and where its weapon was placed */
     g_ring[k].serial = g_ring_next;
     g_ring[k].nvm = 0;
+    g_ring[k].offhand_ok = 0;
     g_ring_last = -1;
     pthread_mutex_unlock(&g_ring_lock);
     if (kelvin_mark_view(pushbuffer_va, KVK_VIEW_VR_CAMERA, (int)k, 0, 0, 640, 480)) {
@@ -203,6 +206,18 @@ void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register)
         g_vm_recorded++;
     } else {
         g_vm_dropped++;
+    }
+    pthread_mutex_unlock(&g_ring_lock);
+}
+
+/* Game thread, after the weapon mesh's MVP: its off-hand mirror, into the same (newest accepted) mark's slot. */
+void vr_mark_viewmodel_offhand(const float a[16])
+{
+    if (!g_on || !a) return;
+    pthread_mutex_lock(&g_ring_lock);
+    if (g_ring_last >= 0) {
+        memcpy(g_ring[g_ring_last].offhand, a, sizeof(g_ring[g_ring_last].offhand));
+        g_ring[g_ring_last].offhand_ok = 1;
     }
     pthread_mutex_unlock(&g_ring_lock);
 }
@@ -438,9 +453,21 @@ static int arms_load(ArmsEntry *e, const void *vdata)
 bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
 {
     ArmsEntry *e = NULL;
-    int cut, show_off, i;
+    int cut, mode, engaged, show_off, place = 0, i;
+    float off[16];
     if (!g_on || !constants || !vertex_data || !&g_xbox_mem_offset) return false;
-    vr_arms_state(&cut, &show_off);
+    vr_arms_state(&cut, &mode, &engaged);
+    /* the off hand: tracked -> at the off controller, or the game's pose on the gun while gripping; grip -> only while
+     * gripping; always -> the game's pose; never -> hidden */
+    show_off = mode == VR_LEFT_HAND_ALWAYS || ((mode == VR_LEFT_HAND_GRIP || mode == VR_LEFT_HAND_TRACKED) && engaged);
+    if (mode == VR_LEFT_HAND_TRACKED && !engaged && F.marked) {
+        pthread_mutex_lock(&g_ring_lock);
+        if (g_ring[F.slot].serial == F.mark.serial && g_ring[F.slot].offhand_ok) {
+            memcpy(off, g_ring[F.slot].offhand, sizeof(off));
+            place = 1;
+        }
+        pthread_mutex_unlock(&g_ring_lock);
+    }
     if (!cut && show_off) return false;                 /* the game's arms, unchanged */
     for (i = 0; i < ARMS_CACHE; i++) if (g_arms[i].vdata == vertex_data) { e = &g_arms[i]; break; }
     if (e && e->ok && !(arms_span(e->P, 0x70) && arms_u32(e->P + 0x10) == 0xB8000000u &&
@@ -456,7 +483,19 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
     }
     if (!e->ok) return false;
     /* the model's right arm holds the gun (the gun hand, whichever controller it is on); its left is the off hand */
-    return vra_apply(&e->rig, constants, cut, show_off, 1) > 0;
+    {
+        static unsigned logged;
+        int placed = place && vra_place_off_hand(&e->rig, constants, off);
+        if (logged < 6 && (logged < 3 || placed)) {
+            const float *rl = vra_rows(constants, e->rig.wrist[0]), *rr = vra_rows(constants, e->rig.wrist[1]);
+            logged++;
+            GLOG("arms: off hand mode %d engaged %d offhand %d placed %d mirror_ok %d | L wrist row-t %.3f %.3f %.3f | R %.3f %.3f %.3f | a t %.3f %.3f %.3f",
+                 mode, engaged, place, placed, e->rig.mirror_ok, rl[3], rl[7], rl[11], rr[3], rr[7], rr[11],
+                 place ? off[3] : 0.0f, place ? off[7] : 0.0f, place ? off[11] : 0.0f);
+        }
+        if (placed) show_off = 1;
+    }
+    return vra_apply(&e->rig, constants, cut, show_off, 1) > 0 || place;
 }
 
 /* The hand delta in stage space, D = hand_late * inverse(hand_game), and whether it is applied: gun_latch on, both

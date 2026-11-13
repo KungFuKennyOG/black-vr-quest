@@ -81,6 +81,8 @@ static int gun_count, vm_count, vm_reg = -1;
 static float vm_mvp[16];
 void vr_publish_game_gun(const VrGameGun *g) { pub_gun = *g; gun_count++; }
 void vr_mark_viewmodel_mvp(const float m[16], int reg) { memcpy(vm_mvp, m, sizeof(vm_mvp)); vm_reg = reg; vm_count++; }
+static int offhand_count;
+void vr_mark_viewmodel_offhand(const float a[16]) { (void)a; offhand_count++; }
 /* VR controls: the game's input state out, the scope's aim request in */
 static int (*got_resolver)(int);
 static VrGameInputState pub_in;

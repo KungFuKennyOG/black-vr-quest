@@ -43,8 +43,9 @@
  *   hud_distance      = 2.0       ; metres: the head-locked HUD / virtual screen
  *   hud_width         = 2.4       ; metres (4:3)
  *   arms              = hands     ; hands: the first-person arms end at the wrists (VR) | full: the game's arms
- *   left_hand         = grip      ; grip: the game's off hand shows only while the off hand grips the gun (two-handed)
- *                                 ; | always | never (port/notes/arms.md)
+ *   left_hand         = tracked   ; tracked: the game's off hand follows the off controller, and takes the game's
+ *                                 ; pose on the gun while gripping (two-handed) | grip: shown only while gripping
+ *                                 ; | always: the game's pose | never (port/notes/arms.md)
  *   haptic_fire       = 0.7       ; 0..1: shot pulse on the gun hand's controller (0 = off; the game's own rumble stays)
  *   gun_latch         = on        ; on | off: the first-person weapon follows the hand pose latched at display
  *                                 ; time, not the game frame's (port/notes/gun-latch.md); env
@@ -73,8 +74,6 @@ enum { VR_FOVEATION_OFF = 0, VR_FOVEATION_LOW = 1, VR_FOVEATION_MEDIUM = 2, VR_F
        /* not an XrFoveationLevelFB: HIGH with the level profile's verticalOffset (the VrApi "HighTop" level) */
        VR_FOVEATION_HIGH_TOP = 4 };
 #define VR_FOVEATION_HIGH_TOP_OFFSET_DEG 10.0f
-
-enum { VR_LEFT_HAND_GRIP = 0, VR_LEFT_HAND_ALWAYS = 1, VR_LEFT_HAND_NEVER = 2 };
 
 typedef struct {
     float refresh_hz;
@@ -126,7 +125,7 @@ static inline void vr_config_defaults(VrShellConfig *c)
     c->hud_width_m = 2.4f;
     c->haptic_fire = 0.7f;
     c->arms_cut = 1;
-    c->left_hand = VR_LEFT_HAND_GRIP;
+    c->left_hand = VR_LEFT_HAND_TRACKED;
     c->gun_latch = 1;
     vr_input_default_config(&c->input);
     vrg_default_config(&c->gest);
@@ -232,7 +231,8 @@ static inline int vr_config_line(VrShellConfig *c, const char *line_in)
         return 1;
     }
     if (!strcmp(key, "left_hand")) {
-        if (!strcmp(val, "grip")) c->left_hand = VR_LEFT_HAND_GRIP;
+        if (!strcmp(val, "tracked")) c->left_hand = VR_LEFT_HAND_TRACKED;
+        else if (!strcmp(val, "grip")) c->left_hand = VR_LEFT_HAND_GRIP;
         else if (!strcmp(val, "always")) c->left_hand = VR_LEFT_HAND_ALWAYS;
         else if (!strcmp(val, "never")) c->left_hand = VR_LEFT_HAND_NEVER;
         else return 0;
