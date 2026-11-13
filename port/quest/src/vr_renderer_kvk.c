@@ -495,6 +495,7 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
     if (!hand_auto) {
         const float zero[3] = { 0.0f, 0.0f, 0.0f };
         vr_set_grip_correction(zero);
+        vr_set_grip_lock(zero);
         return 0;
     }
     if (!vrm_m4_inverse(k, &k_inv)) return 0;
@@ -515,6 +516,7 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
         }
         e->corr_n++;
         vr_set_grip_correction(e->corr);
+        vr_set_grip_lock(d_hand);
         {   /* how far the game's animation turns the wrist away from its rest orientation (logged once a second) */
             float fr[12], rr[9], n0, n1, n2, tr;
             int a, b;

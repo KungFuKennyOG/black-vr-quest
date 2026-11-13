@@ -819,6 +819,22 @@ void vr_grip_correction(float c[3])
     pthread_mutex_unlock(&g_lock);
 }
 
+static float g_grip_lock[3];
+
+void vr_set_grip_lock(const float d[3])
+{
+    pthread_mutex_lock(&g_lock);
+    memcpy(g_grip_lock, d, sizeof(g_grip_lock));
+    pthread_mutex_unlock(&g_lock);
+}
+
+void vr_grip_lock(float d[3])
+{
+    pthread_mutex_lock(&g_lock);
+    memcpy(d, g_grip_lock, sizeof(g_grip_lock));
+    pthread_mutex_unlock(&g_lock);
+}
+
 void vr_arms_grip_config(int *hand_auto, float wrist_offset_m[3])
 {
     *hand_auto = g_xr.cfg.hand_auto;

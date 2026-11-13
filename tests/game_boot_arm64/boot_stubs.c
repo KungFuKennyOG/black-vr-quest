@@ -120,6 +120,7 @@ void vr_publish_game_gun(const VrGameGun *gun) { (void)gun; }
 void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register) { (void)mvp; (void)constant_register; }
 void vr_mark_viewmodel_offhand(const float a[16], const float c[3]) { (void)a; (void)c; }
 void vr_grip_correction(float c[3]) { c[0] = c[1] = c[2] = 0.0f; }
+void vr_grip_lock(float d[3]) { d[0] = d[1] = d[2] = 0.0f; }
 /* VR controls (port/notes/xr-shell.md "Input") */
 void vr_set_action_resolver(int (*resolve)(int slot)) { (void)resolve; }
 void vr_publish_game_input(const VrGameInputState *s) { (void)s; }

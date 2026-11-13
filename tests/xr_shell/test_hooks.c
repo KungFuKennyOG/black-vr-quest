@@ -84,6 +84,7 @@ void vr_mark_viewmodel_mvp(const float m[16], int reg) { memcpy(vm_mvp, m, sizeo
 static int offhand_count;
 void vr_mark_viewmodel_offhand(const float a[16], const float c[3]) { (void)a; (void)c; offhand_count++; }
 void vr_grip_correction(float c[3]) { c[0] = c[1] = c[2] = 0.0f; }
+void vr_grip_lock(float d[3]) { d[0] = d[1] = d[2] = 0.0f; }
 /* VR controls: the game's input state out, the scope's aim request in */
 static int (*got_resolver)(int);
 static VrGameInputState pub_in;

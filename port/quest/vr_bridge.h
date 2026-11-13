@@ -413,6 +413,9 @@ void vr_mark_viewmodel_offhand(const float k[16], const float grip_correction[3]
  * game's right wrist lands at blackvr.ini wrist_offset from the controller (port/notes/arms.md). */
 void vr_set_grip_correction(const float c[3]);
 void vr_grip_correction(float c[3]);
+/* the per-draw wrist lock of the last weapon render (hand frame, game units): the drawn gun sits at grip - lock */
+void vr_set_grip_lock(const float d[3]);
+void vr_grip_lock(float d[3]);
 
 /* --- The weapon's late latch (render thread) --------------------------------
  * vr_set_render_gun(): what the frame being drawn placed its weapon at

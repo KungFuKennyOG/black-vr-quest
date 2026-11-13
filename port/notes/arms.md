@@ -35,16 +35,21 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
   used there: for the rifles it keeps the left wrist about 0.55 m low and level with the camera, out of view
   (harness, inventory weapon 5446152380DB8000). `grip`: the game's pose, shown only while gripping. `always`: the
   game's pose. `never`: hidden.
-- **Auto-grip** (`hand_auto = on`, default): each gun model holds the game's right hand somewhere else relative to the
-  fixed `vm_offset`, so the right hand did not sit on the player's hand (rifles: far back). The renderer measures the
-  game's right wrist in the gun hand's aim frame (via K, below). The game thread records the grip correction each K
-  was built with, so one frame gives the exact correction: used + (wrist - wrist_offset target). `wrist_offset` is in
-  metres, OpenXR aim space (right, up, back), default 0 -0.03 0.10. For a weapon's first 45 draws (its raise
-  animation) the correction is taken exactly each draw; after that it follows slowly (2 % a draw, at most 2 mm), so
-  recoil and reload animations still play. The game thread adds it to the grip offset (`vr_set_grip_correction` /
-  `vr_grip_correction`). Harness, rifle: 11 cm off on the first draw, about 2 cm on the first corrected frame
-  (the raise animation moves the game's hand ~20 cm meanwhile), on target by draw 45. `vm_offset` is now only the
-  starting guess.
+- **Auto-grip** (`hand_auto = on`, default): each gun holds the game's right hand somewhere else, and the game's
+  animations (idle sway, recoil, reload) move the wrist by up to ~10 cm and 30° (more in reloads). Two parts:
+  - **Per-draw lock:** every bone of the weapon is moved in model space so the game's right wrist is at `wrist_offset`
+    (metres, OpenXR aim space: right, up, back; default 0 -0.03 0.10) from the controller in that very frame. No
+    latency, so the gun cannot drift after the animations; the gun still animates relative to the hand. (Kenny's
+    ef2acc2 test: following the animation slowly, twice per frame, made the gun float around when shooting.)
+  - **Baseline:** the weapon's static offset, exact from its first 45 frames (the game thread records the correction
+    each hand frame K was built with), then frozen; the game thread adds it to the grip offset
+    (`vr_set_grip_correction`), so the game's own placement is already close.
+  - The muzzle effects (main's a2b9ad0) and the muzzle flash draw use grip - lock (`vr_grip_lock`, the last render's
+    per-draw move), so they start at the drawn muzzle. Harness, rifle firing: the gun holds still in the hand, the
+    flash is at the muzzle.
+- **Gripping two-handed:** when the game's own animated left hand is on the gun (its wrist ahead of the hand and near
+  the gun line in the gun hand's aim frame), that hold is shown, as BLACK animates it; otherwise (the harness rifle
+  keeps it ~40 cm low) the mirrored right hand on the gun line. Logged as `arms: gripping with ...`.
 - How the tracked hand is placed (render thread, from the late latch, so it moves at display rate): the stock arms
   are mirror images across model x = 0 (bind pose checked on the gun models). The game thread records
   K = hand_from_model (`vgm_weapon_hand_frame`: the gun hand's aim frame from the weapon's model space, the same chain

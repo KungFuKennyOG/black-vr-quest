@@ -66,6 +66,8 @@ typedef struct BlackVr {
     VrMat4 w_entity, w_head, w_hand, yv, w_body;
     int yv_ok;
     VrVec3 grip;                      /* the weapon's grip offset (game units) */
+    VrMat4 yv_fx;                     /* yv for the muzzle flash draw: with the arms' wrist lock */
+    int yv_fx_ok;
     float grip_corr[3];               /* the auto-grip correction inside grip (game units) */
     int off_ok;
     float hx, hy;
@@ -413,6 +415,7 @@ static void black_vr_camera_after_world(uint32_t camera)
     {
         BVR_FP_BEGIN;
         bvr.yv_ok = 0;
+        bvr.yv_fx_ok = 0;
         bvr.off_ok = 0;
         bvr.calib_this_frame = 0;
         bvr_fx_invalidate();
@@ -486,6 +489,14 @@ static void black_vr_camera_after_world(uint32_t camera)
             bvr.yv_ok = vgm_weapon_to_hand(bvr.w_head, bvr.w_entity, bvr.w_hand, grip, &bvr.yv);
             bvr.grip = grip;
             bvr.off_ok = bvr.yv_ok;               /* first-person arms: the hand frame is published with the MVP */
+            {
+                /* the muzzle flash draw (its own MVP, not skinned with the weapon): where the arms' per-draw wrist
+                 * lock put the drawn gun last render (grip - lock), so the flash sits at the drawn muzzle */
+                float lock[3];
+                vr_grip_lock(lock);
+                bvr.yv_fx_ok = bvr.yv_ok && vgm_weapon_to_hand(bvr.w_head, bvr.w_entity, bvr.w_hand,
+                                                               vrm_sub(grip, vrm_v3(lock[0], lock[1], lock[2])), &bvr.yv_fx);
+            }
         }
         bvr_fx_capture();                     /* the held effects' next update starts from this */
 
@@ -738,9 +749,16 @@ static void bvr_fx_capture(void)
     if (!bvr.yv_ok || !bvr.hand_locked || !vrm_m4_inverse(bvr.w_head, &hinv)) { bvr_fxd.ok = 0; return; }
     bvr_fxl.x = vrm_m4_mul(bvr.w_head, vrm_m4_mul(bvr.yv, hinv));
     bvr_fxl.back = vrm_m4_identity();                 /* the grip, as vgm_weapon_to_hand takes it off */
-    VRM_AT(bvr_fxl.back, 0, 3) = -cfg->vm_offset_m[0] * cfg->units_per_metre;
-    VRM_AT(bvr_fxl.back, 1, 3) = -cfg->vm_offset_m[1] * cfg->units_per_metre;
-    VRM_AT(bvr_fxl.back, 2, 3) = -cfg->vm_offset_m[2] * cfg->units_per_metre;
+    {
+        /* the grip this render used (vm_offset + the first-person arms' auto-grip baseline), less the arms' per-draw
+         * wrist lock (last render's), so the effects start where the drawn gun's muzzle is (port/notes/arms.md) */
+        float lock[3];
+        vr_grip_lock(lock);
+        VRM_AT(bvr_fxl.back, 0, 3) = -(bvr.grip.x - lock[0]);
+        VRM_AT(bvr_fxl.back, 1, 3) = -(bvr.grip.y - lock[1]);
+        VRM_AT(bvr_fxl.back, 2, 3) = -(bvr.grip.z - lock[2]);
+        (void)cfg;
+    }
     bvr_fxl.w_body = bvr.w_body;
     bvr_fxl.w_hand = bvr.w_hand;
     bvr_fxl.w_entity = bvr.w_entity;
@@ -988,7 +1006,8 @@ static void black_vr_upload_at(uint32_t upload, int reg)
             const int have_mv = reg == 10 && bvr.off_ok && vgm_mvp_modelview(r, bvr.clip_y_sign, &mv);
             float before[16];
             memcpy(before, r, sizeof(before));
-            if (bvr.yv_ok && bvr.hand_locked && vgm_mvp_retarget(r, bvr.yv, bvr.clip_y_sign)) {
+            if (bvr.yv_ok && bvr.hand_locked &&
+                vgm_mvp_retarget(r, reg != 10 && bvr.yv_fx_ok ? bvr.yv_fx : bvr.yv, bvr.clip_y_sign)) {
                 if (reg == 0x70 && bvr_aim_trace()) bvr_aim_log(before, r);
                 memcpy((void *)((uintptr_t)g_xbox_mem_offset + upload), r, sizeof(r));
                 vr_mark_viewmodel_mvp(r, reg);          /* gun latch: exactly what reaches c[reg..reg+3] */
