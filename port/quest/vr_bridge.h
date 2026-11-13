@@ -408,7 +408,7 @@ void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register);
 /* Game thread, with the weapon mesh's MVP (after vr_mark_viewmodel_mvp): K = hand_from_model (row-major 4x4,
  * column vectors; LH, game units), the gun hand's aim frame from the weapon's model space (vgm_weapon_hand_frame),
  * for the first-person arms. */
-void vr_mark_viewmodel_offhand(const float k[16]);
+void vr_mark_viewmodel_offhand(const float k[16], const float grip_correction[3]);   /* + the correction K used */
 /* First-person arms -> game thread: the auto-grip correction (game units, added to the weapon's grip offset) so the
  * game's right wrist lands at blackvr.ini wrist_offset from the controller (port/notes/arms.md). */
 void vr_set_grip_correction(const float c[3]);

@@ -30,11 +30,13 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
   game's pose. `never`: hidden.
 - **Auto-grip** (`hand_auto = on`, default): each gun model holds the game's right hand somewhere else relative to the
   fixed `vm_offset`, so the right hand did not sit on the player's hand (rifles: far back). The renderer measures the
-  game's right wrist in the gun hand's aim frame (via K, below) and integrates the error to `wrist_offset` (metres,
-  OpenXR aim space, default 0 -0.03 0.10) into a per-weapon grip correction; the game thread adds it to the grip
-  offset (`vr_set_grip_correction` / `vr_grip_correction`). Fast for the first ~2 s of a weapon (gain 0.08), then slow
-  (0.01, error limited to 5 cm a step) so recoil and reload animations do not drag the gun. Harness, rifle: the wrist
-  went from 11 cm right / 7 cm low of target to exactly on it within 120 draws. `vm_offset` is now only the
+  game's right wrist in the gun hand's aim frame (via K, below). The game thread records the grip correction each K
+  was built with, so one frame gives the exact correction: used + (wrist - wrist_offset target). `wrist_offset` is in
+  metres, OpenXR aim space (right, up, back), default 0 -0.03 0.10. For a weapon's first 45 draws (its raise
+  animation) the correction is taken exactly each draw; after that it follows slowly (2 % a draw, at most 2 mm), so
+  recoil and reload animations still play. The game thread adds it to the grip offset (`vr_set_grip_correction` /
+  `vr_grip_correction`). Harness, rifle: 11 cm off on the first draw, about 2 cm on the first corrected frame
+  (the raise animation moves the game's hand ~20 cm meanwhile), on target by draw 45. `vm_offset` is now only the
   starting guess.
 - How the tracked hand is placed (render thread, from the late latch, so it moves at display rate): the stock arms
   are mirror images across model x = 0 (bind pose checked on the gun models). The game thread records

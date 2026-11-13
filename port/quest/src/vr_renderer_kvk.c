@@ -77,6 +77,7 @@ typedef struct GlueCam {
     int nvm;                 /* weapon MVPs recorded so far for this frame (grows after the mark, read live) */
     GlueVm vm[GLUE_VM_MAX];
     float offhand[16];       /* first-person arms: K = hand_from_model (vr_mark_viewmodel_offhand) */
+    float grip_corr[3];      /* the auto-grip correction K was built with */
     int offhand_ok;
 } GlueCam;
 
@@ -222,12 +223,13 @@ void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register)
 }
 
 /* Game thread, after the weapon mesh's MVP: its off-hand mirror, into the same (newest accepted) mark's slot. */
-void vr_mark_viewmodel_offhand(const float a[16])
+void vr_mark_viewmodel_offhand(const float a[16], const float grip_correction[3])
 {
     if (!g_on || !a) return;
     pthread_mutex_lock(&g_ring_lock);
     if (g_ring_last >= 0) {
         memcpy(g_ring[g_ring_last].offhand, a, sizeof(g_ring[g_ring_last].offhand));
+        memcpy(g_ring[g_ring_last].grip_corr, grip_correction, sizeof(g_ring[g_ring_last].grip_corr));
         g_ring[g_ring_last].offhand_ok = 1;
     }
     pthread_mutex_unlock(&g_ring_lock);
@@ -472,12 +474,16 @@ static void arms_joint(const VrArmRig *rig, const float *constants, int k, float
         out[i] = r[i * 4] * rig->joint[k][0] + r[i * 4 + 1] * rig->joint[k][1] + r[i * 4 + 2] * rig->joint[k][2] + r[i * 4 + 3];
 }
 
-/* Auto-grip: where the game's right wrist is in the gun hand's aim frame (via K) vs where it should be (wrist_offset);
- * the error is integrated per weapon into the grip correction the game thread adds to the weapon's grip offset. */
-static void arms_auto_grip(ArmsEntry *e, const float *constants, VrMat4 k)
+/* Auto-grip: where the game's right wrist is in the gun hand's aim frame (via K) vs where it should be (wrist_offset).
+ * K was built with the grip correction `used`, and moving the grip by c moves the wrist by -c in that frame, so the
+ * exact correction from this one frame is used + (wrist - target). For a weapon's first 45 draws (its raise animation)
+ * it is taken exactly each draw (the hand is on target from the next game frame); after that it follows slowly, so
+ * recoil and reload animations do not drag the gun. Frames still in flight with an older correction give the same
+ * answer, so nothing overshoots. */
+static void arms_auto_grip(ArmsEntry *e, const float *constants, VrMat4 k, const float used[3])
 {
     int hand_auto, i;
-    float wo[3], p[3], h[3], target[3], err[3], gain;
+    float wo[3], p[3], h[3], target[3], need[3];
     const float upm = vr_game_config()->units_per_metre;
     vr_arms_grip_config(&hand_auto, wo);
     if (!hand_auto) {
@@ -488,26 +494,28 @@ static void arms_auto_grip(ArmsEntry *e, const float *constants, VrMat4 k)
     arms_joint(&e->rig, constants, e->rig.wrist[VRA_RIGHT], p);
     for (i = 0; i < 3; i++) h[i] = VRM_AT(k, i, 0) * p[0] + VRM_AT(k, i, 1) * p[1] + VRM_AT(k, i, 2) * p[2] + VRM_AT(k, i, 3);
     target[0] = wo[0] * upm; target[1] = wo[1] * upm; target[2] = -wo[2] * upm;   /* OpenXR z back -> LH z forward */
-    /* fast for the first ~2 s of a weapon, then slow and limited so recoil and reload animations do not drag the gun */
-    gain = e->corr_n < 120u ? 0.08f : 0.01f;
     for (i = 0; i < 3; i++) {
-        err[i] = h[i] - target[i];
-        if (e->corr_n >= 120u) {
-            const float lim = 0.05f * upm;
-            if (err[i] > lim) err[i] = lim;
-            if (err[i] < -lim) err[i] = -lim;
+        need[i] = used[i] + h[i] - target[i];
+        if (!(need[i] == need[i])) return;
+        if (need[i] > 0.6f * upm) need[i] = 0.6f * upm;
+        if (need[i] < -0.6f * upm) need[i] = -0.6f * upm;
+    }
+    for (i = 0; i < 3; i++) {
+        if (e->corr_n < 45u) e->corr[i] = need[i];          /* the weapon's first ~0.75 s (its raise): exact */
+        else {
+            const float lim = 0.002f * upm;                 /* at most 2 mm a draw */
+            float d = 0.02f * (need[i] - e->corr[i]);
+            if (d > lim) d = lim;
+            if (d < -lim) d = -lim;
+            e->corr[i] += d;
         }
-        if (!(err[i] == err[i])) return;
-        e->corr[i] += gain * err[i];
-        if (e->corr[i] > 0.6f * upm) e->corr[i] = 0.6f * upm;
-        if (e->corr[i] < -0.6f * upm) e->corr[i] = -0.6f * upm;
     }
     e->corr_n++;
     vr_set_grip_correction(e->corr);
-    if (e->corr_n == 1u || e->corr_n == 120u || e->corr_n % 3600u == 0u)
-        GLOG("arms: auto-grip n %u wrist in hand frame %.3f %.3f %.3f m (target %.3f %.3f %.3f) correction %.3f %.3f %.3f m",
+    if (e->corr_n <= 12u || e->corr_n == 45u || e->corr_n == 60u || e->corr_n % 3600u == 0u)
+        GLOG("arms: auto-grip n %u wrist in hand frame %.3f %.3f %.3f m (target %.3f %.3f %.3f) correction used %.3f %.3f %.3f -> %.3f %.3f %.3f m",
              e->corr_n, h[0] / upm, h[1] / upm, h[2] / upm, target[0] / upm, target[1] / upm, target[2] / upm,
-             e->corr[0] / upm, e->corr[1] / upm, e->corr[2] / upm);
+             used[0] / upm, used[1] / upm, used[2] / upm, e->corr[0] / upm, e->corr[1] / upm, e->corr[2] / upm);
 }
 
 bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
@@ -515,7 +523,7 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
     ArmsEntry *e = NULL;
     int cut, mode, engaged, show_off, have_k = 0, place = 0, i;
     static int last_engaged;
-    float kf[16], off[16];
+    float kf[16], off[16], used[3] = { 0.0f, 0.0f, 0.0f };
     VrMat4 k;
     if (!g_on || !constants || !vertex_data || !&g_xbox_mem_offset) return false;
     vr_arms_state(&cut, &mode, &engaged);
@@ -526,6 +534,7 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
         pthread_mutex_lock(&g_ring_lock);
         if (g_ring[F.slot].serial == F.mark.serial && g_ring[F.slot].offhand_ok) {
             memcpy(kf, g_ring[F.slot].offhand, sizeof(kf));
+            memcpy(used, g_ring[F.slot].grip_corr, sizeof(used));
             have_k = 1;
         }
         pthread_mutex_unlock(&g_ring_lock);
@@ -552,7 +561,7 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
         e->retry = 120;
     }
     if (!e->ok) return false;
-    if (have_k && e->rig.wrist[VRA_RIGHT] >= 0) arms_auto_grip(e, constants, k);
+    if (have_k && e->rig.wrist[VRA_RIGHT] >= 0) arms_auto_grip(e, constants, k, used);
     if (mode == VR_LEFT_HAND_TRACKED && have_k) {
         const VrRenderGun *g = vr_render_gun();
         VrMat4 a;

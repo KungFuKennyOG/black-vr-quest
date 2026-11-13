@@ -66,6 +66,7 @@ typedef struct BlackVr {
     VrMat4 w_entity, w_head, w_hand, yv;
     int yv_ok;
     VrVec3 grip;                      /* the weapon's grip offset (game units) */
+    float grip_corr[3];               /* the auto-grip correction inside grip (game units) */
     int off_ok;
     float hx, hy;
     float depth_a, depth_b;
@@ -478,6 +479,7 @@ static void black_vr_camera_after_world(uint32_t camera)
             float corr[3];
             VrVec3 grip;
             vr_grip_correction(corr);                 /* first-person arms: the measured auto-grip (game units) */
+            memcpy(bvr.grip_corr, corr, sizeof(bvr.grip_corr));
             grip = vrm_add(vrm_scale(vrm_v3(cfg->vm_offset_m[0], cfg->vm_offset_m[1], cfg->vm_offset_m[2]),
                                      cfg->units_per_metre), vrm_v3(corr[0], corr[1], corr[2]));
             bvr.yv_ok = vgm_weapon_to_hand(bvr.w_head, bvr.w_entity, bvr.w_hand, grip, &bvr.yv);
@@ -818,7 +820,7 @@ static void black_vr_upload_at(uint32_t upload, int reg)
                     float rm[16];
                     int i2, j2;
                     for (i2 = 0; i2 < 4; i2++) for (j2 = 0; j2 < 4; j2++) rm[i2 * 4 + j2] = VRM_AT(a, i2, j2);
-                    vr_mark_viewmodel_offhand(rm);
+                    vr_mark_viewmodel_offhand(rm, bvr.grip_corr);
                 }
             }
         } else {
