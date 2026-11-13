@@ -55,8 +55,10 @@ typedef struct BlackVr {
     /* aim */
     uint32_t look;                    /* look object (sub_001BD3F0 ESI) */
     double look_time;
+    unsigned look_cams;               /* world cameras decided since the look integrator last ran */
     double body_yaw, aim_yaw_prev;    /* game degrees, positive = left */
     int have_body;
+    int body_fresh;                   /* the body yaw was stepped (or anchored) since the view last turned STEREO */
     double pitch_sign;                /* game pitch = -pitch_up * sign */
     int pitch_votes;
     VgmYawCal cal;
@@ -142,6 +144,48 @@ static int black_vr_stereo(void) { return bvr.mode == VR_PRESENT_STEREO; }
 
 /* ---- presentation choice ---------------------------------------------------------------- */
 
+/* Test only: BLACKVR_TEST_LOOK_STALE_MS=<ms> adds a wall-clock limit on the look integrator's age (the rule before
+ * 2026-11-13 was 250 ms; the decision now counts world cameras, BVR_LOOK_STALE_CAMS). Unset: 0, no wall-clock limit. */
+static double bvr_look_stale_s(void)
+{
+    static double s = -1.0;
+    if (s < 0.0) {
+        const char *e = getenv("BLACKVR_TEST_LOOK_STALE_MS");
+        const double ms = e && *e ? atof(e) : 0.0;
+        s = ms > 0.0 && ms < 600000.0 ? ms / 1000.0 : 0.0;
+        if (s > 0.0) fprintf(stderr, "[BLACK_VR] test: look staleness limit %.0f ms\n", s * 1000.0);
+    }
+    return s;
+}
+
+/* STEREO needs the look integrator to have run within the last few world cameras: it stops in cutscenes and menus.
+ * Counted in world cameras, not wall time, so a hitch (a long game frame) cannot turn one gameplay frame flat
+ * (sweep 2026-11-13, issue 3: the old 250 ms rule popped a frame to the flat quad after hitches of 0.25 s or more).
+ * 6: two frames of level_07, which builds its world camera three times per frame. */
+#define BVR_LOOK_STALE_CAMS 6u
+
+/* The current weapon has a scope ([[look+8C]+29C] weapon, +EC descriptor, +C0). */
+static int bvr_weapon_scoped(void)
+{
+    uint32_t actor, weapon, desc;
+    if (!bvr.look || !black_pc_ram_span(bvr.look, 0x90u)) return 0;
+    actor = GUEST32(bvr.look + 0x8Cu);
+    if (!black_pc_ram_span(actor, 0x2A0u)) return 0;
+    weapon = GUEST32(actor + 0x29Cu);
+    if (!black_pc_ram_span(weapon, 0xF0u)) return 0;
+    desc = GUEST32(weapon + 0xECu);
+    return black_pc_ram_span(desc, 0xC8u) && GUEST8(desc + 0xC0u) != 0;
+}
+
+/* The zoom at which the view goes flat for the scope: scope_zoom (2.5), and for a scoped weapon at most 2.0, so the
+ * sniper's X2 (2.33) shows the game's scope view, not its full-screen scope mask as a black panel on the HUD quad
+ * (sweep issue 2). The 1.10 of the raise animation stays STEREO. */
+static float bvr_scope_zoom_min(void)
+{
+    const float z = vr_game_config()->scope_zoom_min;
+    return bvr_weapon_scoped() && z > 2.0f ? 2.0f : z;
+}
+
 /* -2: not the world camera (state untouched); -1: VR presentation inactive. */
 static int black_vr_decide(uint32_t camera)
 {
@@ -150,12 +194,34 @@ static int black_vr_decide(uint32_t camera)
     renderer = GUEST32(BVR_RENDERER);
     if (!black_pc_ram_span(renderer, 0xD4F0u) || camera != renderer + 0xD450u) return -2;
     if (!vr_active()) return -1;
+    if (bvr.look_cams < 1000000u) bvr.look_cams++;
     if (pc_photo_active() || pc_split_enabled() || black_split_pass) return VR_PRESENT_FLAT_MENU;
     if (!black_photo_world_camera()) return VR_PRESENT_FLAT_CINEMA;     /* scripted / not the player's view */
     if (black_pc_input_gameplay_blocked_query()) return VR_PRESENT_FLAT_MENU;
-    if (!bvr.look || black_vr_now() - bvr.look_time > 0.25) return VR_PRESENT_FLAT_MENU;
-    if (bvr_zoom() >= vr_game_config()->scope_zoom_min) return VR_PRESENT_FLAT_SCOPE;
+    if (!bvr.look || bvr.look_cams > BVR_LOOK_STALE_CAMS) return VR_PRESENT_FLAT_MENU;
+    if (bvr_look_stale_s() > 0.0 && black_vr_now() - bvr.look_time > bvr_look_stale_s()) return VR_PRESENT_FLAT_MENU;
+    if (bvr_zoom() >= bvr_scope_zoom_min()) return VR_PRESENT_FLAT_SCOPE;
     return VR_PRESENT_STEREO;
+}
+
+/* ---- harness only: BLACKVR_DECIDE_TRACE=1 ------------------------------------------------------------------------
+ * Logs why the presentation leaves STEREO (each STEREO -> other change and the change back): the inputs of
+ * black_vr_decide. Diagnostics for the sweep (build-vrmenu-x86/sweep/REPORT.md); without the variable, nothing. */
+static void bvr_decide_trace(int prev, int m)
+{
+    static int on = -1;
+    static unsigned same;
+    if (on < 0) { const char *e = getenv("BLACKVR_DECIDE_TRACE"); on = e && *e && *e != '0'; }
+    if (!on) return;
+    /* every change, and every 32nd decision of a flat mode that lasts (with a look object: gameplay shown flat) */
+    same = prev == m ? same + 1u : 0u;
+    if (prev == m && (m == VR_PRESENT_STEREO || !bvr.look || (same & 31u))) return;
+    fprintf(stderr, "[BLACK_VR] DECIDE gf %u: mode %d -> %d | photo %d split %d split_pass %d world_camera %d blocked %d "
+            "look %08X age %.0f ms zoom %.2f | body yaw %.1f (set %d) look yaw %.1f\n", bvr.game_frame, prev, m,
+            pc_photo_active(), pc_split_enabled(), black_split_pass, black_photo_world_camera(),
+            black_pc_input_gameplay_blocked_query(), bvr.look, bvr.look ? (black_vr_now() - bvr.look_time) * 1000.0 : -1.0,
+            (double)bvr_zoom(), bvr.body_yaw, bvr.have_body,
+            bvr.look && black_pc_ram_span(bvr.look, 0x20u) && bvr_f32_ok(bvr.look + 0x18u) ? (double)bvr_f32(bvr.look + 0x18u) : 0.0);
 }
 
 /* ---- before D2F40: lens window covering both eyes ----------------------------------------- */
@@ -171,6 +237,10 @@ static void black_vr_camera_begin(uint32_t camera)
         const int m = black_vr_decide(camera);
         bvr.world_pass = m != -2;
         if (m == -2) goto done;
+        bvr_decide_trace(bvr.mode, m);
+        if ((m == VR_PRESENT_STEREO || m == VR_PRESENT_FLAT_SCOPE) &&
+            bvr.mode != VR_PRESENT_STEREO && bvr.mode != VR_PRESENT_FLAT_SCOPE)
+            bvr.body_fresh = 0;           /* black_vr_look skipped this frame: anchor in black_vr_camera_after_world */
         bvr.mode = m;
     }
     if (bvr.mode >= 0) vr_set_present_mode(bvr.mode);
@@ -227,6 +297,7 @@ static void black_vr_look(uint32_t look)
         BVR_FP_BEGIN;
         bvr.look = look;
         bvr.look_time = black_vr_now();
+        bvr.look_cams = 0;
         cfg = vr_game_config();
         f = vr_latch_frame_state();                     /* this game frame's head and hands */
         turn = vr_consume_turn();
@@ -243,6 +314,7 @@ static void black_vr_look(uint32_t look)
         g = bvr_f32(look + 0x18u);
         bvr.body_yaw = vgm_body_yaw_step(bvr.body_yaw, bvr.have_body, g, bvr.aim_yaw_prev, turn, 20.0);
         bvr.have_body = 1;
+        bvr.body_fresh = 1;
         bvr.aim_yaw_prev = ay;
         yaw = vrm_wrap_deg(bvr.body_yaw + ay);
         pitch = -ap * bvr.pitch_sign;
@@ -460,6 +532,27 @@ static void black_vr_camera_after_world(uint32_t camera)
             }
         }
         if (cfg->bob_filter && U0.y > 0.5f) P.y = vgm_bob_filter(&bvr.bob, P.y, dt, 0.2, 0.6f * cfg->units_per_metre);
+        if (!bvr.body_fresh) {
+            /* The first STEREO camera after a flat stretch (level start, checkpoint, menu): black_vr_look ran while
+             * the view was still flat and skipped, so the body yaw is unset (0) or from before. Anchor it to the
+             * game's facing now, as the look's own step would at the next frame (sweep issue 1: the first frame of
+             * every level faced 55-96 deg off). */
+            VrPose o;
+            VrVec3 d;
+            double ay, ap;
+            const int hm = cfg->aim_mode == VR_AIM_HAND && f && f->hand[cfg->aim_hand & 1].valid;
+            const double g = bvr_f32(bvr.look + 0x18u);
+            vr_get_recentre(&o);
+            d = f ? vgm_aim_dir(hm, vgm_relative(o, f->head), vgm_relative(o, f->hand[cfg->aim_hand & 1].aim),
+                                vrm_v3(0, 0, 0), cfg->aim_converge_m)
+                  : vrm_v3(0, 0, -1);
+            vgm_dir_angles(d, &ay, &ap);
+            (void)ap;
+            if (!bvr.have_body) bvr.aim_yaw_prev = ay;
+            bvr.body_yaw = vgm_body_yaw_step(bvr.body_yaw, bvr.have_body, g, bvr.aim_yaw_prev, 0.0, 20.0);
+            bvr.have_body = 1;
+            bvr.body_fresh = 1;
+        }
         w_body = vgm_body_frame(vgm_yaw_cal_world(&bvr.cal, bvr.body_yaw), P, F0, S0, U0);
         bvr.w_body = w_body;
 
@@ -710,7 +803,11 @@ static struct {
     uint32_t at[8];
     VrMat4 l[8];
 } bvr_fxl;                                    /* the last render's */
-static struct { int ok, fresh; uint32_t frame, at; VrVec3 p, p_old; } bvr_fxd;   /* trace: the last update's muzzle */
+static struct { int ok, fresh; uint32_t frame, at; VrVec3 p, p_old; } bvr_fxd;   /* check: the last update's muzzle */
+/* The muzzle check in the log (always; ~every 30 s of STEREO with the gun in the hand): how far the held effects'
+ * update put the muzzle record from where the next render puts the hand-held muzzle (0 when the placement is right),
+ * and how many updates had to do without the aim matrix (the fallback, which keeps the shot's recoil in the spawn). */
+static struct { unsigned n, fallback; double sum, max; } bvr_fxs;
 static uint32_t bvr_fxu_at[8];
 static uint8_t bvr_fxu_kept[8][0x40];
 static unsigned bvr_fxu_n;
@@ -750,16 +847,29 @@ static void bvr_fx_capture(void)
     bvr_fxl.ok = 1;
     /* trace: where the last update started the muzzle's effects vs where this render puts the muzzle in the hand (the
      * late latch's own move at display aside), and where e856ad7 started them */
-    if (bvr_aim_trace() && bvr_fxd.ok && bvr_fxl.at[5] && bvr_fxd.at == bvr_fxl.at[5]) {
+    if (bvr_fxd.ok && bvr_fxl.at[5] && bvr_fxd.at == bvr_fxl.at[5]) {
         float p4[4], b[4];
         VrVec3 t;
+        double dm;
         p4[0] = VRM_AT(bvr_fxl.l[5], 0, 3); p4[1] = VRM_AT(bvr_fxl.l[5], 1, 3); p4[2] = VRM_AT(bvr_fxl.l[5], 2, 3); p4[3] = 1.0f;
         vrm_m4_apply(bvr_fxl.x, p4, b);
         t = vrm_v3(b[0], b[1], b[2]);
-        fprintf(stderr, "[BLACK_VR] FXC gf %u muzzle effects started at update after gf %u: %.4f from the hand-held muzzle "
-                "(e856ad7: %.4f)%s\n", bvr.game_frame, bvr_fxd.frame,
-                (double)vrm_len(vrm_sub(bvr_fxd.p, t)), (double)vrm_len(vrm_sub(bvr_fxd.p_old, t)),
-                bvr_fxd.fresh ? "" : ", no aim matrix");
+        dm = (double)vrm_len(vrm_sub(bvr_fxd.p, t));
+        if (bvr_aim_trace())
+            fprintf(stderr, "[BLACK_VR] FXC gf %u muzzle effects started at update after gf %u: %.4f from the hand-held "
+                    "muzzle (e856ad7: %.4f)%s\n", bvr.game_frame, bvr_fxd.frame, dm,
+                    (double)vrm_len(vrm_sub(bvr_fxd.p_old, t)), bvr_fxd.fresh ? "" : ", no aim matrix");
+        dm /= (double)cfg->units_per_metre;
+        bvr_fxs.n++;
+        bvr_fxs.sum += dm;
+        if (dm > bvr_fxs.max) bvr_fxs.max = dm;
+        if (!bvr_fxd.fresh) bvr_fxs.fallback++;
+        if (bvr_fxs.n >= 1800u) {
+            fprintf(stderr, "[BLACK_VR] gun fx check: %u updates, muzzle effects started %.1f cm (mean) / %.1f cm (max) "
+                    "from the hand-held muzzle, %u without the aim matrix\n", bvr_fxs.n, 100.0 * bvr_fxs.sum / bvr_fxs.n,
+                    100.0 * bvr_fxs.max, bvr_fxs.fallback);
+            memset(&bvr_fxs, 0, sizeof(bvr_fxs));
+        }
     }
     bvr_fxd.ok = 0;
 }
@@ -813,8 +923,9 @@ static void black_vr_fx_update_begin(void)
             for (j = 0; j < bvr_fxu_n; j++) if (bvr_fxu_at[j] == at) dup = 1;
             if (dup) continue;
             m = vrm_m4_mul(x, now);
-            if (r == 5u && bvr_aim_trace()) {
-                /* trace: what e856ad7 did (the last render's X on the game's record, its motion since as a translation) */
+            if (r == 5u) {
+                /* the muzzle check (and the trace: what e856ad7 did, the last render's X on the game's record, its
+                 * motion since as a translation) */
                 const VrVec3 p0 = vgm_col(bvr_fxl.l[r], 3), p1 = vgm_col(now, 3);
                 float a[4], b[4];
                 a[0] = p0.x; a[1] = p0.y; a[2] = p0.z; a[3] = 1.0f;

@@ -760,6 +760,29 @@ void black_level_override(uint8_t *level, uint8_t *stage)
     }
     if (lv >= 0) *level = (uint8_t)lv;
     if (sg >= 0) *stage = (uint8_t)sg;
+#ifdef BLACK_VR
+    /* Harness only: RECOMP_BLACK_TEST_LEVEL=n starts the mission from level n with every loader agreeing. The
+     * override above changes only the mission core's copy (+5AEC): Level.awd then comes from level n while the
+     * collision, destruction and speech loaders, which read the frontend's selection ([2D45F0]+2020C) again after
+     * this point, still load the frontend's level (a mixed level). This sets that selection too. Without the
+     * variable, nothing. (build-vrmenu-x86/sweep/REPORT.md) */
+    {
+        static int test_level = -2;
+        if (test_level == -2) {
+            const char *e = getenv("RECOMP_BLACK_TEST_LEVEL");
+            test_level = e && *e >= '0' && *e <= '9' ? atoi(e) : -1;
+            if (test_level > 99) test_level = -1;
+            if (test_level >= 0) fprintf(stderr, "[BLACK] test level: level %d (frontend selection and mission core)\n", test_level);
+        }
+        if (test_level >= 0 && black_pc_ram_span(0x002D45F0u, 4u) &&
+            black_pc_ram_span(GUEST32(0x002D45F0u) + 0x2020Cu, 1u)) {
+            fprintf(stderr, "[BLACK] test level: frontend asked for level %u, starting level %d\n",
+                    GUEST8(GUEST32(0x002D45F0u) + 0x2020Cu), test_level);
+            *level = (uint8_t)test_level;
+            GUEST8(GUEST32(0x002D45F0u) + 0x2020Cu) = (uint8_t)test_level;
+        }
+    }
+#endif
 }
 
 /* The emulated vblank rate, for values that count vblanks against the game's 60 Hz clocks. */
