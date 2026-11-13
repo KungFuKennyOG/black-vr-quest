@@ -297,13 +297,84 @@ Moving the emitters around the world draw does nothing (the particles are alread
   binary and input). The emitter moves by exactly the flash's re-target delta (default pose: (-0.4, -3.3, +4.8) cm vs
   the flash's (-0.4, -4.2, +5.1) cm).
 - Limits: X is the last render's, so the spawn point lags the hand's own motion by one game frame (the late latch
-  does not apply to effects). Shell casings (thrown from Bullet_Loc by an animation event, 162FE0) are not moved.
+  does not apply to effects). Superseded by 6b: the recoil also got in, and the transform is now built for the update. Shell casings (thrown from Bullet_Loc by an animation event, 162FE0) are not moved.
 - Tests: `tests/xr_shell` hooks 447 -> 510 checks (both variants) (records moved to X and carried by the record's motion, absent records and
   other owners untouched, restored bit for bit, nothing outside STEREO or without a re-target); two mutations caught.
 
 **Diagnostics added:** `RECOMP_KVK_SPRITELOG=2` (also blended perspective world draws as `PFX` lines with guest-pixel
 extents and view depth; every `SPRITE` line gets the eye NDC its centre lands at), `BLACKVR_AIM_TRACE=1` (`AIM`, `FX`,
 `MUZZLE` lines), harness `GRX_HAND_POS`, `GRX_HAND_YAW/_PITCH` and the gestures `aiml/aimr/aimu/aimd`.
+
+### 6b. UZI and shotgun: the recoil was in the spawn (2026-11-12, second pass)
+
+**Report (headset, e856ad7):** with the UZI and the shotgun the glow / fireball still floats off the gun.
+
+**Getting the guns in the harness:** `RECOMP_BLACK_TEST_LOADOUT=smg` (UZI) or `=shg` (shotgun), harness-only, in
+`black_vr_test_loadout` (called from `black_test_weapon_loadout`, 1B7800): the primary weapon token at core+3F0 becomes
+`BG1_<gun>` (12-char names packed base 40: BG1_SMG `5446152380DB8000`, BG1_SHG `5446151EBC278000`, BG1_PST
+`544614B7182C0000`), only if the token is in the loaded gun table exactly once with a sane descriptor. Logged as
+`test loadout: BG1_shg token ... accepted`.
+
+**Mechanism per weapon** (`BLACKVR_AIM_TRACE=2`, `RECOMP_KVK_SPRITELOG=2`):
+- UZI: the flash (16B1E0 via D4A50, c112, re-targeted) plus the held effect on record 5 (glow `3516849B` in the glare
+  chain, smoke) -- the same as the pistol.
+- Shotgun: no flash draw (its flash entry's texture is 0, 16B1E0 skips it). The fireball *is* the record-5 held effect:
+  4 emitters, sprite `3516849B`, drawn into the main target, flying out ~0.6 m per frame.
+- No other record, no `where 8` effect, no one-shot spawn elsewhere: the only held effect a shot starts is that slot,
+  and nothing else new is drawn near it (`SPRITE`/`PFX` lines).
+
+**Why e856ad7 missed:** the gating was met (`FXU ... moved 3 records`, `gun fx: ... follow it to the hand` logged,
+STEREO, yv_ok, hand_locked). But the game poses the first-person records for the update on the player's *aim matrix*
+(actor+D0 = [2D45D4]+100), which already carries this frame's recoil, while the camera entity (D2F40's source, the
+`w_entity` the latch removes) only copies the aim matrix later in the frame. The recoil is a pitch about the eye,
+core+4F4 degrees: 8.1 at a shotgun shot, then x0.9 per frame. So at the effects' update the records stood
+`Rot(A_n - A_n-1)` above where the render puts them (measured to 0.001 deg over 8 frames: +8.10, -0.81, -0.73, ...),
+and e856ad7's `X_last_render * record` put the shot's fireball 10.2 cm above the hand-held muzzle, flying 8 deg
+upward. On top of that e856ad7 used the last render's hand: the spawn trailed a moving hand by its whole per-frame
+move (harness sway: 4-6 cm every frame, 11.5 cm at the swaying shot).
+
+**Fix (`black_vr_fx_update_begin`):** the transform is built for the update the way the next render will build it:
+`X = w_hand_now * grip^-1 * M_aim^-1`, with M_aim read from actor+D0 at the update (self-checked at each render: it must
+equal that render's camera frame to 2e-3, else the fallback below), w_hand_now = this game frame's latched hand on
+the last render's body, moved by the aim matrix's step since that render (walking). Records are `X * record` (the
+animation is in the game's record and matches the next render's). Fallback (no aim matrix): the last render's X,
+moved with the hand. `BLACKVR_GUN_FX=0` still turns it all off. Measured spawn vs the next render's hand-held muzzle
+(`FXC` lines, `BLACKVR_AIM_TRACE=1`, world units = m; default hand pose; the e856ad7 column is computed on the same
+frames, and matches separate runs with e856ad7's placement):
+
+| | shotgun new | shotgun e856ad7 | UZI new | UZI e856ad7 |
+|---|---|---|---|---|
+| recoil at the shot (core+4F4) | 8.1 deg | | 1.57-1.67 deg | |
+| settled shot | 0.0000 | 0.102 | 0.0000 | 0.017 |
+| shot, hand swaying 15 cm | 0.0000 | 0.115 | 0.0000 | 0.054 |
+| shot, walking + swaying | 0.0000 | 0.092 | 0.0000 | 0.056 |
+| worst frame of the run | 0.0001 | 0.115 (0.132 in the e856ad7 run) | 0.0000 | 0.113 (0.105) |
+
+(The harness hand moves ~6 cm per game frame in the sway: its game frames take ~0.75 s. On the headset e856ad7's
+hand lag is the hand's move in one game frame, ~1 cm at 0.5 m/s; the recoil part is as above.)
+
+**What is left: the late latch.** The drawn gun is moved at the flip to the hand located for the display time
+(`D = hand_late * hand_game^-1`, vr_renderer_kvk.c); particles already in the world are not. The game's hand is the
+XR thread's last sample (its frame's predicted display time, input_sync), the late latch's is the render's display
+time: on the headset ~one game frame plus the sample's age, ~17-30 ms, i.e. ~1-1.5 cm at 0.5 m/s, 2-3 cm on a fast
+flick, and nothing with the hand still. In the harness that gap is ~0.75 s, so the swaying UZI's glow shows ~5 cm
+beside the muzzle with the latch on and sits on it with `GRX_INI="gun_latch = off"` (`uzi_sway_late_latch.png`).
+Options, not done: locate the hands at `game_predict_time` in `vr_latch_frame_state` like the eyes (D becomes the
+prediction's refinement; also changes the aim's timing), or predict the spawn by the last flip's D.
+
+**Captures** (`build-vrmenu-x86/evidence/gunfx2/`, rows: `BLACKVR_GUN_FX=0` / e856ad7's placement / the new default,
+same input script, left | right eye; the sway is wall-clock driven, so the hand is not at the same place in each run):
+`shotgun_settled_shot.png`, `shotgun_settled_next.png`, `shotgun_sway_shot.png`, `shotgun_walk_shot.png`,
+`uzi_settled_shot.png`, `uzi_sway_shot.png`, `uzi_walk_shot.png`, `uzi_sway_late_latch.png`. Logs:
+`build-vrmenu-x86/{shgF,smgF}-{off,e856,on}.log`, `smgF-on-nolatch.log`; harness driver: 60 stereo frames settled, a
+shot, then the gesture `sway` held, a shot, then `fwd` held, a shot.
+
+**Tests:** `tests/xr_shell` hooks 510 -> 608 checks (both variants): the aim matrix found and self-checked; a shot
+frame with the aim kicked 8 deg, the player stepping 5 cm, record 5 animating 3 deg, a record appearing and the hand
+moving 4 cm / 5 deg: every record relative to the next render's hand is its pose on the aim matrix less the grip, and
+e856ad7's placement is over 5 cm off; the fallback without the aim matrix; restore bit for bit. Six mutations caught
+(the last render's camera entity, no body step, the last render's hand, the last render's records, no hand move in the
+fallback, no self-check).
 
 ## 7. Where the shots go vs where the gun points (2026-11-12, measured, not changed)
 

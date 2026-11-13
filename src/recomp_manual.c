@@ -3503,6 +3503,9 @@ void black_test_weapon_loadout(uint32_t record)
     static unsigned records;
     unsigned csr;
     fenv_t environment;
+#ifdef BLACK_VR
+    black_vr_test_loadout(record);      /* harness only: RECOMP_BLACK_TEST_LOADOUT=<gun> (black_vr.inc) */
+#endif
     if (enabled == 0) return;
     csr = _mm_getcsr();
     fegetenv(&environment);
