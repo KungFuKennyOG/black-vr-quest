@@ -376,6 +376,20 @@ e856ad7's placement is over 5 cm off; the fallback without the aim matrix; resto
 (the last render's camera entity, no body step, the last render's hand, the last render's records, no hand move in the
 fallback, no self-check).
 
+### 6c. The muzzle check in every log (2026-11-13)
+
+**Report (headset, a2b9ad0):** UZI right; the shotgun's fireball still a bit too high or low, with the gun held still.
+In the harness the spawn is exact (6b) and the fireball sits on the barrel line just past the muzzle
+(`evidence/gunfx2/shotgun_settled_shot.png`). One headset-only cause would fit: the update without the aim matrix
+(the fallback keeps the shot's recoil in the spawn, 10 cm above the muzzle for the shotgun, about 1.7 cm for the
+UZI). To tell, every log now carries, about every 30 s of STEREO with the gun in the hand:
+
+`gun fx check: N updates, muzzle effects started M cm (mean) / X cm (max) from the hand-held muzzle, F without the aim matrix`
+
+0 / 0 / 0 is the harness result. F > 0 or X of several cm on the headset points at the placement; all 0 points at
+the drawing of the fireball itself (the screen-space sprite's per-eye correction, renderer.md 11). The per-frame
+`FXC` lines stay behind `BLACKVR_AIM_TRACE=1`.
+
 ## 7. Where the shots go vs where the gun points (2026-11-12, measured, not changed)
 
 - Bullets: 1DBD50 fires from the actor's eye toward `weapon+10` (spread from the magazine), which the game puts on

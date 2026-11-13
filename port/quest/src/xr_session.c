@@ -895,7 +895,15 @@ void xrs_frame(XrShell *s)
                 hudq.subImage.imageRect.extent.width = (int32_t)s->hud.width;
                 hudq.subImage.imageRect.extent.height = (int32_t)s->hud.height;
                 hudq.pose = identity_pose();
-                hudq.pose.position.z = -hl->distance_m;
+                {
+                    /* turned about the eyes' x axis by hud_height, still facing them: BLACK's HUD lives along the
+                     * top of its image, 22 deg above the view centre when level */
+                    const float a = hl->pitch_deg * 0.017453292f;
+                    hudq.pose.orientation.x = sinf(0.5f * a);
+                    hudq.pose.orientation.w = cosf(0.5f * a);
+                    hudq.pose.position.y = hl->distance_m * sinf(a);
+                    hudq.pose.position.z = -hl->distance_m * cosf(a);
+                }
                 hudq.size.width = hl->width_m;
                 hudq.size.height = hl->width_m * (float)s->hud.height / (float)s->hud.width;
                 layers[nl++] = (const XrCompositionLayerBaseHeader *)&hudq;

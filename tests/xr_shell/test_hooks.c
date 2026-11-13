@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #include <fenv.h>
 #include <xmmintrin.h>
 #include "vr_bridge.h"
@@ -253,7 +254,17 @@ int main(void)
     /* the first world camera has no look yet: flat */
     d2f40();
     CHECK(present == VR_PRESENT_FLAT_MENU && pub_count == 1 && !pub_cam.valid);
-    for (i = 0; i < 90; i++) frame();
+    /* the first STEREO frame already faces the game's way: no turn on the frame after (sweep issue 1: the look
+     * integrator skipped while the view was flat, so the body yaw was still unset) */
+    {
+        VrVec3 f1;
+        frame();
+        CHECK(present == VR_PRESENT_STEREO);
+        f1 = frame_forward();
+        frame();
+        CHECK(vrm_dot(f1, frame_forward()) > 0.99999f);
+    }
+    for (i = 0; i < 88; i++) frame();
     CHECK(present == VR_PRESENT_STEREO && pub_cam.valid);
     CHECK(bvr.hand_locked && bvr.screen_sign == TEST_RIGHT_ROW_SIGN);
     /* the lens was widened for D2F40 and restored afterwards */
@@ -333,6 +344,65 @@ int main(void)
     putf(ZOOMOBJ + 0x2A4u, 1.0f);
     frame();
     CHECK(present == VR_PRESENT_STEREO);
+    /* a scoped weapon goes flat from 2.0 (the sniper's X2 is 2.33, under scope_zoom 2.5; sweep issue 2); another
+     * weapon at that zoom stays STEREO, and so does the scoped one at the raise animation's 1.10 */
+    {
+#define SCOPE_WEAPON 0x003B0000u
+#define SCOPE_DESC 0x003C0000u
+        GUEST32(ZOOMOBJ + 0x29Cu) = SCOPE_WEAPON;
+        GUEST32(SCOPE_WEAPON + 0xECu) = SCOPE_DESC;
+        GUEST8(SCOPE_DESC + 0xC0u) = 0;
+        putf(ZOOMOBJ + 0x2A4u, 2.33f);
+        frame();
+        CHECK(present == VR_PRESENT_STEREO);
+        GUEST8(SCOPE_DESC + 0xC0u) = 1;
+        frame();
+        CHECK(present == VR_PRESENT_FLAT_SCOPE && !pub_cam.valid);
+        putf(ZOOMOBJ + 0x2A4u, 1.10f);
+        frame();
+        CHECK(present == VR_PRESENT_STEREO);
+        gcfg.scope_zoom_min = 1.5f;                     /* a lower scope_zoom in blackvr.ini still wins */
+        putf(ZOOMOBJ + 0x2A4u, 1.8f);
+        frame();
+        CHECK(present == VR_PRESENT_FLAT_SCOPE);
+        gcfg.scope_zoom_min = 2.5f;
+        putf(ZOOMOBJ + 0x2A4u, 1.0f);
+        GUEST8(SCOPE_DESC + 0xC0u) = 0;
+        GUEST32(ZOOMOBJ + 0x29Cu) = 0;
+        frame();
+        CHECK(present == VR_PRESENT_STEREO);
+    }
+    /* a hitch (300 ms between the look and the world camera) stays STEREO (sweep issue 3: the old 250 ms rule made
+     * it one flat frame); the look integrator stopping goes flat within a few world cameras */
+    {
+        const struct timespec ts = { 0, 300000000L };
+        black_vr_look(LOOK);
+        nanosleep(&ts, NULL);
+        d2f40();
+        CHECK(present == VR_PRESENT_STEREO && pub_cam.valid);
+        for (i = 0; i < 5; i++) d2f40();               /* six world cameras since the look: still STEREO */
+        CHECK(present == VR_PRESENT_STEREO);
+        d2f40();                                        /* the seventh: flat */
+        CHECK(present == VR_PRESENT_FLAT_MENU && !pub_cam.valid);
+        frame();
+        CHECK(present == VR_PRESENT_STEREO);
+        frame();
+    }
+    /* back from a flat stretch with the game turned meanwhile (a checkpoint, a level change): the first STEREO frame
+     * faces the game's new way (sweep issue 1) */
+    {
+        VrVec3 f_before, f1;
+        f_before = frame_forward();
+        blocked = 1; frame(); CHECK(present == VR_PRESENT_FLAT_MENU);
+        putf(LOOK + 0x18u, vrm_wrap_deg(getf(LOOK + 0x18u) + 90.0));
+        blocked = 0;
+        frame();
+        CHECK(present == VR_PRESENT_STEREO);
+        f1 = frame_forward();
+        CHECK(NEAR(acos(vrm_dot(f_before, f1)) / VRM_DEG, 90.0, 0.5));
+        frame();
+        CHECK(vrm_dot(f1, frame_forward()) > 0.99999f);
+    }
     /* pause, photo mode, scripted camera */
     blocked = 1; frame(); CHECK(present == VR_PRESENT_FLAT_MENU); blocked = 0;
     photo_on = 1; frame(); CHECK(present == VR_PRESENT_FLAT_MENU); photo_on = 0;

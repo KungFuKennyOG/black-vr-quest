@@ -50,6 +50,8 @@
  *                                 ; controller, measured per weapon (vm_offset is then only the starting guess)
  *   wrist_offset      = 0 -0.03 0.10 ; metres, controller aim space: x right, y up, z back
  *   haptic_fire       = 0.7       ; 0..1: shot pulse on the gun hand's controller (0 = off; the game's own rumble stays)
+ *   hud_height        = -12       ; degrees: the in-game HUD tilted below (-) or above eye level (menus and the
+ *                                 ; cutscene screen stay level)
  *   gun_latch         = on        ; on | off: the first-person weapon follows the hand pose latched at display
  *                                 ; time, not the game frame's (port/notes/gun-latch.md); env
  *                                 ; BLACKVR_GUN_LATCH_DEBUG=1 tints the draws taken for the weapon
@@ -89,6 +91,7 @@ typedef struct {
     int   left_hand;         /* VR_LEFT_HAND_* */
     int   hand_auto;         /* 1: the gun is moved so the game's right wrist sits at wrist_offset from the controller */
     float wrist_offset_m[3]; /* the wrist in the gun hand's OpenXR aim space (x right, y up, z back), metres */
+    float hud_pitch_deg;                 /* the in-game HUD quad tilted about the eyes (negative: below eye level) */
     int   foveation;         /* VR_FOVEATION_* */
     int   game_hz;           /* 30 | 60 -> RECOMP_BLACK_HZ / RECOMP_BLACK_60HZ */
     int   raster_workers;    /* -> RECOMP_KELVIN_THREADS = workers + 1 */
@@ -135,6 +138,7 @@ static inline void vr_config_defaults(VrShellConfig *c)
     c->wrist_offset_m[0] = 0.0f;
     c->wrist_offset_m[1] = -0.03f;
     c->wrist_offset_m[2] = 0.10f;
+    c->hud_pitch_deg = -12.0f;      /* BLACK's HUD sits along the top of its image: 22 deg up at 0 */
     c->gun_latch = 1;
     vr_input_default_config(&c->input);
     vrg_default_config(&c->gest);
@@ -256,6 +260,7 @@ static inline int vr_config_line(VrShellConfig *c, const char *line_in)
         return 1;
     }
     if (!strcmp(key, "haptic_fire")) { if (!vr_cfg_float(val, 0.0f, 1.0f, &f)) return 0; c->haptic_fire = f; return 1; }
+    if (!strcmp(key, "hud_height")) { if (!vr_cfg_float(val, -45.0f, 30.0f, &f)) return 0; c->hud_pitch_deg = f; return 1; }
     if (!strcmp(key, "gun_latch")) return vr_cfg_bool(val, &c->gun_latch);
     if (!strcmp(key, "settings_menu")) {
         if (!strcmp(val, "native") || !strcmp(val, "game")) c->settings_menu = VR_SETTINGS_MENU_NATIVE;

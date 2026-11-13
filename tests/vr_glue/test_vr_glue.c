@@ -1680,8 +1680,12 @@ static int run(int multiview)
     CHECK(fx_last_end.nlayers == 2 && fx_last_end.nquads == 1, "frame 1: projection + HUD quad (%u layers)", fx_last_end.nlayers);
     if (fx_last_end.nquads == 1) {
         const XrCompositionLayerQuad *q = &fx_last_end.quads[0];
-        CHECK(q->space == shell_view_space() && q->pose.position.z == -2.0f && q->size.width == 2.4f &&
-              fabsf(q->size.height - 1.8f) < 1e-6f, "HUD quad: head-locked, 2.4 x 1.8 m at 2 m");
+        const float a = -12.0f * 0.017453292f;          /* hud_height default: 12 deg below eye level, facing the eyes */
+        CHECK(q->space == shell_view_space() && fabsf(q->pose.position.z + 2.0f * cosf(a)) < 1e-5f &&
+              fabsf(q->pose.position.y - 2.0f * sinf(a)) < 1e-5f && q->pose.position.x == 0.0f &&
+              fabsf(q->pose.orientation.x - sinf(0.5f * a)) < 1e-6f && fabsf(q->pose.orientation.w - cosf(0.5f * a)) < 1e-6f &&
+              q->pose.orientation.y == 0.0f && q->pose.orientation.z == 0.0f && q->size.width == 2.4f &&
+              fabsf(q->size.height - 1.8f) < 1e-6f, "HUD quad: head-locked, 2.4 x 1.8 m at 2 m, 12 deg below eye level");
         CHECK((q->layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) &&
               !(q->layerFlags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT), "HUD quad: premultiplied alpha blending");
         CHECK(q->subImage.swapchain == shell_hud_swapchain(), "HUD quad shows the HUD swapchain");
