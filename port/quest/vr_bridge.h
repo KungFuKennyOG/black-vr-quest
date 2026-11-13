@@ -340,6 +340,8 @@ void vr_release_hud_target(void);
 typedef struct {
     float distance_m;      /* view-space distance of the HUD quad */
     float width_m;         /* its width; height = width * 3/4 */
+    float pitch_deg;       /* the in-game HUD quad turned about the eyes' x axis (negative: below eye level); the
+                            * flat menu / cutscene quad stays level */
     uint32_t width, height;/* image size (1280x960) */
 } VrHudLayout;
 const VrHudLayout *vr_hud_layout(void);

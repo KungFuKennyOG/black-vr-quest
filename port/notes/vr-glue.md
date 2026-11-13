@@ -89,6 +89,10 @@ Nothing has run on a headset.
   layer, with `BLEND_TEXTURE_SOURCE_ALPHA`.
   - It is placed at `hud_distance` (2.0 m) and `hud_width` (2.4 m), 4:3. These are new
     `blackvr.ini` keys and match the backend's virtual screen.
+  - `hud_height` (2026-11-13, default -12 deg; VR SETTINGS -> COMFORT -> HUD height, live, -30..+10)
+    turns the in-game HUD quad about the eyes' x axis, still facing them. BLACK's HUD (health,
+    ammo, objective text) lives along the top of its image, 22 deg above the view centre with the
+    quad level, where it was hard to read on the headset. The flat menu / cutscene quad stays level.
 - **Pairing with the eye images:** the HUD image is published *with* `vr_release_eye_targets()`
   under the queue lock. A HUD is never shown over another frame's world. A STEREO frame
   without HUD draws shows no HUD layer.
