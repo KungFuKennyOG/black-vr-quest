@@ -43,7 +43,8 @@
  *   GRX_HAND=0              1: the right controller tracked (as GRX_GUN_TEST) without the step
  *   GRX_HAND_YAW/_PITCH=0   degrees (+ left / up) the right controller is turned in place; the gestures aiml / aimr
  *                           (yaw +-20) and aimu / aimd (pitch +-12) turn it while held (aim checks)
- *   GRX_HAND_POS            "x,y,z" metres from the head centre where the right controller is held (0.12,-0.22,-0.35)
+ *   GRX_HAND_POS            "x,y,z" metres from the head centre where the right controller is held (0.12,-0.22,-0.35);
+ *                           the gesture sway moves it 0.15 m left and right over 12 s while held
  *   GRX_CONTROLS=0          1: both controllers tracked, for the VR controls' gestures (BLACKVR_INPUT_TRACE=1 logs the
  *                           game's side: intents, weapon state, magazine)
  */
@@ -222,6 +223,12 @@ static int hand_pose(int hand, int grip, XrTime t, XrPosef *pose)
     }
     pose->position.x = centre.x + r.x; pose->position.y = centre.y + r.y; pose->position.z = centre.z + r.z;
     if (hand == 1) {
+        /* "sway": the controller moves left and right, 0.15 m either side over 12 s (the glow-trail check) */
+        if (button_down("sway")) {
+            static double t0 = -1.0;
+            if (t0 < 0.0) t0 = now_s();
+            pose->position.x += (float)(0.15 * sin(2.0 * M_PI * (now_s() - t0) / 12.0));
+        }
         if (button_down("swing")) {
             const double now = now_s();
             double d;

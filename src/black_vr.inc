@@ -63,7 +63,7 @@ typedef struct BlackVr {
     VgmBob bob;
     double last_frame_time;
     /* this frame */
-    VrMat4 w_entity, w_head, w_hand, yv;
+    VrMat4 w_entity, w_head, w_hand, yv, w_body;
     int yv_ok;
     float hx, hy;
     float depth_a, depth_b;
@@ -461,6 +461,7 @@ static void black_vr_camera_after_world(uint32_t camera)
         }
         if (cfg->bob_filter && U0.y > 0.5f) P.y = vgm_bob_filter(&bvr.bob, P.y, dt, 0.2, 0.6f * cfg->units_per_metre);
         w_body = vgm_body_frame(vgm_yaw_cal_world(&bvr.cal, bvr.body_yaw), P, F0, S0, U0);
+        bvr.w_body = w_body;
 
         vr_get_recentre(&origin);
         head_rel = vgm_relative(origin, f->head);
@@ -543,7 +544,7 @@ static void bvr_learn(const float r[16])
 static int bvr_aim_trace(void)
 {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("BLACKVR_AIM_TRACE"); on = e && *e && *e != '0'; }
+    if (on < 0) { const char *e = getenv("BLACKVR_AIM_TRACE"); on = e && *e ? atoi(e) : 0; if (on < 0) on = 0; }
     return on;
 }
 static int bvr_view_of(const float r[16], double vw[3][4])
@@ -608,12 +609,14 @@ static void bvr_aim_log(const float before[16], const float after[16])
  * screen-space sprites (the glow into the glare chain's 160x120 source image, blurred and added over the view). The
  * record is where the flat game holds its weapon, so with the weapon in the hand they made a soft orange glow floating
  * where the flat gun would be (port/notes/gun-latch.md).
+ * Every gun's shot does this (pistol, UZI, shotgun alike); the shotgun has no flash draw of its own (its flash entry's
+ * texture is 0, so 16B1E0 skips it), its fireball is this held effect.
  * So around the held effects' update (sub_00176BD0 in recomp_manual.c) the player's records 0..7 are moved by the
- * transform the weapon's MVPs got at the last render (world X = w_head * yv * w_head^-1 = w_hand * grip^-1 *
- * w_entity^-1, captured with the records in camera_after_world), plus the records' own motion since (the player walking,
- * the weapon's animation) as a translation, and put back afterwards: the effects that follow them start at the
- * hand-held muzzle. The records themselves are left to the game (the flash, 16B1E0, reads record 5 at the render and
- * is re-targeted with its MVP). BLACKVR_GUN_FX=0: the effects follow the game's records as before. */
+ * transform the next render will give the weapon (world X = w_head * yv * w_head^-1 = w_hand * grip^-1 *
+ * w_entity^-1), built for the update (black_vr_fx_update_begin), and put back afterwards: the effects that follow them
+ * start at the hand-held muzzle and leave along the hand-held barrel. The records themselves are left to the game
+ * (the flash, 16B1E0, reads record 5 at the render and is re-targeted with its MVP). BLACKVR_GUN_FX=0: the effects
+ * follow the game's records as before. */
 #define BVR_FX_AT 0x65690u
 #define BVR_FX_SLOTS 0x50u
 static uint32_t bvr_fx(void)
@@ -667,7 +670,47 @@ static void bvr_rw_write(uint32_t va, const VrMat4 *m)
         for (k = 0; k < 3; k++) bvr_put(va + (uint32_t)j * 0x10u + (uint32_t)k * 4u, VRM_AT(*m, k, j));
 }
 
-static struct { int ok; VrMat4 x; uint32_t at[8]; VrMat4 l[8]; } bvr_fxl;   /* the last render's X and records */
+/* The player's aim matrix, actor+D0 ([2D45D4]+100; RenderWare rows right, up, at, pos): the game's update poses the
+ * first-person model on it, the camera entity copies it later in the frame (so at the held effects' update the camera
+ * entity is still the last frame's: with a shot's recoil, core+4F4 degrees of pitch, 8.1 for the shotgun, the two
+ * differ by the recoil's change). As a view (the frame's screen sign), as w_entity is read; 0 if unreadable. */
+static uint32_t bvr_aim_va(void)
+{
+    uint32_t core;
+    if (!black_pc_ram_span(0x2D45D4u, 4u)) return 0;
+    core = GUEST32(0x2D45D4u);
+    return black_pc_ram_span(core + 0x100u, 0x40u) ? core + 0x100u : 0;
+}
+static int bvr_aim_view(uint32_t va, VrMat4 *w)
+{
+    float rows[4][3];
+    int r, k;
+    for (r = 0; r < 4; r++)
+        for (k = 0; k < 3; k++) {
+            const uint32_t at = va + (uint32_t)r * 0x10u + (uint32_t)k * 4u;
+            if (!bvr_f32_ok(at)) return 0;
+            rows[r][k] = bvr_f32(at);
+        }
+    *w = vgm_frame_to_view(rows, bvr.screen_sign);
+    return 1;
+}
+static int bvr_m4_near(VrMat4 a, VrMat4 b, float rot, float pos)
+{
+    int r, c;
+    for (c = 0; c < 4; c++)
+        for (r = 0; r < 3; r++)
+            if (!(fabsf(VRM_AT(a, r, c) - VRM_AT(b, r, c)) <= (c == 3 ? pos : rot))) return 0;
+    return 1;
+}
+
+static struct {
+    int ok;
+    uint32_t frame, aim;                      /* aim: the player's aim matrix, when it was this render's camera entity */
+    VrMat4 x, back, w_body, w_hand, w_entity;
+    uint32_t at[8];
+    VrMat4 l[8];
+} bvr_fxl;                                    /* the last render's */
+static struct { int ok, fresh; uint32_t frame, at; VrVec3 p, p_old; } bvr_fxd;   /* trace: the last update's muzzle */
 static uint32_t bvr_fxu_at[8];
 static uint8_t bvr_fxu_kept[8][0x40];
 static unsigned bvr_fxu_n;
@@ -677,25 +720,91 @@ static void bvr_fx_invalidate(void) { bvr_fxl.ok = 0; }
 /* camera_after_world, once the weapon's re-target for this render is known (yv_ok) */
 static void bvr_fx_capture(void)
 {
-    VrMat4 hinv;
+    const VrGameConfig *cfg = vr_game_config();
+    VrMat4 hinv, a;
     unsigned r;
+    uint32_t va;
     bvr_fxl.ok = 0;
-    if (!bvr.yv_ok || !bvr.hand_locked || !vrm_m4_inverse(bvr.w_head, &hinv)) return;
+    if (!bvr.yv_ok || !bvr.hand_locked || !vrm_m4_inverse(bvr.w_head, &hinv)) { bvr_fxd.ok = 0; return; }
     bvr_fxl.x = vrm_m4_mul(bvr.w_head, vrm_m4_mul(bvr.yv, hinv));
+    bvr_fxl.back = vrm_m4_identity();                 /* the grip, as vgm_weapon_to_hand takes it off */
+    VRM_AT(bvr_fxl.back, 0, 3) = -cfg->vm_offset_m[0] * cfg->units_per_metre;
+    VRM_AT(bvr_fxl.back, 1, 3) = -cfg->vm_offset_m[1] * cfg->units_per_metre;
+    VRM_AT(bvr_fxl.back, 2, 3) = -cfg->vm_offset_m[2] * cfg->units_per_metre;
+    bvr_fxl.w_body = bvr.w_body;
+    bvr_fxl.w_hand = bvr.w_hand;
+    bvr_fxl.w_entity = bvr.w_entity;
+    va = bvr_aim_va();
+    bvr_fxl.aim = va && bvr_aim_view(va, &a) && bvr_m4_near(a, bvr.w_entity, 2e-3f, 2e-3f * cfg->units_per_metre) ? va : 0;
+    {
+        static int logged;
+        if (!logged && !bvr_fxl.aim) {
+            logged = 1;
+            fprintf(stderr, "[BLACK_VR] gun fx: the player's aim matrix is not this render's camera (logged once): the held "
+                    "effects use the last render's transform\n");
+        }
+    }
     for (r = 0; r < 8u; r++)
         if ((bvr_fxl.at[r] = bvr_fp_record(r)) != 0 && !bvr_rw_read(bvr_fxl.at[r], &bvr_fxl.l[r])) bvr_fxl.at[r] = 0;
+    bvr_fxl.frame = bvr.game_frame;
     bvr_fxl.ok = 1;
+    /* trace: where the last update started the muzzle's effects vs where this render puts the muzzle in the hand (the
+     * late latch's own move at display aside), and where e856ad7 started them */
+    if (bvr_aim_trace() && bvr_fxd.ok && bvr_fxl.at[5] && bvr_fxd.at == bvr_fxl.at[5]) {
+        float p4[4], b[4];
+        VrVec3 t;
+        p4[0] = VRM_AT(bvr_fxl.l[5], 0, 3); p4[1] = VRM_AT(bvr_fxl.l[5], 1, 3); p4[2] = VRM_AT(bvr_fxl.l[5], 2, 3); p4[3] = 1.0f;
+        vrm_m4_apply(bvr_fxl.x, p4, b);
+        t = vrm_v3(b[0], b[1], b[2]);
+        fprintf(stderr, "[BLACK_VR] FXC gf %u muzzle effects started at update after gf %u: %.4f from the hand-held muzzle "
+                "(e856ad7: %.4f)%s\n", bvr.game_frame, bvr_fxd.frame,
+                (double)vrm_len(vrm_sub(bvr_fxd.p, t)), (double)vrm_len(vrm_sub(bvr_fxd.p_old, t)),
+                bvr_fxd.fresh ? "" : ", no aim matrix");
+    }
+    bvr_fxd.ok = 0;
 }
 
 /* Before the held effects' update (176BD0; VR STEREO, the weapon in the hand at the last render): the player's
- * first-person records to the hand. */
+ * first-person records to the hand, by the transform the next render will give the weapon (X = w_hand * grip^-1 *
+ * w_entity^-1), built now: the camera entity it will have is the player's aim matrix now (the records are posed on it;
+ * the camera entity itself still has the last frame's), the hand is this game frame's latch, on the last render's
+ * body moved as the aim matrix moved. Without the aim matrix: the last render's X, carried by the hand's move. */
 static void black_vr_fx_update_begin(void)
 {
     unsigned r, j;
     bvr_fxu_n = 0;
-    if (!bvr_gun_fx() || bvr.mode != VR_PRESENT_STEREO || !bvr_fxl.ok) return;
+    if (!bvr_gun_fx() || bvr.mode != VR_PRESENT_STEREO || !bvr_fxl.ok) {
+        if (bvr_aim_trace() && bvr.mode == VR_PRESENT_STEREO)
+            fprintf(stderr, "[BLACK_VR] FXU gf %u skipped (on %d, render captured %d, yv_ok %d, hand_locked %d)\n",
+                    bvr.game_frame, bvr_gun_fx(), bvr_fxl.ok, bvr.yv_ok, bvr.hand_locked);
+        return;
+    }
     {
         BVR_FP_BEGIN;
+        const VrGameConfig *cfg = vr_game_config();
+        const VrFrameState *f = vr_frame_state();
+        VrMat4 h_now = bvr_fxl.w_hand, x = bvr_fxl.x, hinv, m_now, minv;
+        VrVec3 dp = vrm_v3(0, 0, 0);
+        int fresh = 0;
+        if (f && f->hand[cfg->aim_hand & 1].valid) {
+            VrPose origin;
+            VrMat4 h;
+            vr_get_recentre(&origin);
+            h = vrm_m4_mul(bvr_fxl.w_body, bvr_lh(vgm_relative(origin, f->hand[cfg->aim_hand & 1].aim)));
+            if (vrm_len(vrm_sub(vgm_col(h, 3), vgm_col(bvr_fxl.w_hand, 3))) <= 0.30f * cfg->units_per_metre)
+                h_now = h;                                                   /* a recentre or a glitch: none */
+        }
+        if (bvr_fxl.aim && bvr_aim_va() == bvr_fxl.aim && bvr_aim_view(bvr_fxl.aim, &m_now) && vrm_m4_inverse(m_now, &minv)) {
+            dp = vrm_sub(vgm_col(m_now, 3), vgm_col(bvr_fxl.w_entity, 3));
+            if (vrm_len(dp) <= 1.0f * cfg->units_per_metre) {                /* a teleport: as without it */
+                VRM_AT(h_now, 0, 3) += dp.x; VRM_AT(h_now, 1, 3) += dp.y; VRM_AT(h_now, 2, 3) += dp.z;
+                x = vrm_m4_mul(h_now, vrm_m4_mul(bvr_fxl.back, minv));
+                fresh = 1;
+            } else {
+                dp = vrm_v3(0, 0, 0);
+            }
+        }
+        if (!fresh && vrm_m4_inverse(bvr_fxl.w_hand, &hinv)) x = vrm_m4_mul(h_now, vrm_m4_mul(hinv, bvr_fxl.x));
         for (r = 0; r < 8u; r++) {
             const uint32_t at = bvr_fp_record(r);
             VrMat4 now, m;
@@ -703,26 +812,34 @@ static void black_vr_fx_update_begin(void)
             if (!at || !bvr_rw_read(at, &now)) continue;
             for (j = 0; j < bvr_fxu_n; j++) if (bvr_fxu_at[j] == at) dup = 1;
             if (dup) continue;
-            m = vrm_m4_mul(bvr_fxl.x, now);
-            if (bvr_fxl.at[r] == at) {
-                /* where the render put it, moved as the game's record moved since (a translation: the player's own
-                 * motion between the render and this update is in it, and X stays the render's) */
+            m = vrm_m4_mul(x, now);
+            if (r == 5u && bvr_aim_trace()) {
+                /* trace: what e856ad7 did (the last render's X on the game's record, its motion since as a translation) */
                 const VrVec3 p0 = vgm_col(bvr_fxl.l[r], 3), p1 = vgm_col(now, 3);
                 float a[4], b[4];
                 a[0] = p0.x; a[1] = p0.y; a[2] = p0.z; a[3] = 1.0f;
                 vrm_m4_apply(bvr_fxl.x, a, b);
-                VRM_AT(m, 0, 3) = b[0] + (p1.x - p0.x);
-                VRM_AT(m, 1, 3) = b[1] + (p1.y - p0.y);
-                VRM_AT(m, 2, 3) = b[2] + (p1.z - p0.z);
+                bvr_fxd.ok = bvr_fxl.at[r] == at; bvr_fxd.fresh = fresh; bvr_fxd.frame = bvr_fxl.frame; bvr_fxd.at = at;
+                bvr_fxd.p = vgm_col(m, 3);
+                bvr_fxd.p_old = vrm_v3(b[0] + (p1.x - p0.x), b[1] + (p1.y - p0.y), b[2] + (p1.z - p0.z));
             }
             bvr_fxu_at[bvr_fxu_n] = at;
             memcpy(bvr_fxu_kept[bvr_fxu_n], (uint8_t *)(uintptr_t)g_xbox_mem_offset + at, 0x40u);
             bvr_fxu_n++;
             bvr_rw_write(at, &m);
         }
+        if (bvr_aim_trace())
+            fprintf(stderr, "[BLACK_VR] FXU gf %u moved %u records (render gf %u) hand move %.4f %.4f %.4f (body step %.4f %.4f "
+                    "%.4f), recoil %.3f deg%s\n", bvr.game_frame, bvr_fxu_n, bvr_fxl.frame,
+                    (double)(VRM_AT(h_now, 0, 3) - VRM_AT(bvr_fxl.w_hand, 0, 3)),
+                    (double)(VRM_AT(h_now, 1, 3) - VRM_AT(bvr_fxl.w_hand, 1, 3)),
+                    (double)(VRM_AT(h_now, 2, 3) - VRM_AT(bvr_fxl.w_hand, 2, 3)), (double)dp.x, (double)dp.y, (double)dp.z,
+                    bvr_fxl.aim && black_pc_ram_span(bvr_fxl.aim + 0x3F4u, 4u) && bvr_f32_ok(bvr_fxl.aim + 0x3F4u)
+                        ? (double)bvr_f32(bvr_fxl.aim + 0x3F4u) : 0.0,
+                    fresh ? "" : ", no aim matrix");
         if (bvr_fxu_n && (++bvr_fxu_updates == 1u || !(bvr_fxu_updates & 4095u)))
-            fprintf(stderr, "[BLACK_VR] gun fx: the weapon's held effects follow it to the hand (%u updates)\n",
-                    bvr_fxu_updates);
+            fprintf(stderr, "[BLACK_VR] gun fx: the weapon's held effects follow it to the hand (%u updates%s)\n",
+                    bvr_fxu_updates, fresh ? "" : ", without the aim matrix");
         BVR_FP_END;
     }
 }
@@ -736,6 +853,65 @@ static void black_vr_fx_update_end(void)
     bvr_fxu_n = 0;
 }
 
+/* ---- harness only: RECOMP_BLACK_TEST_LOADOUT=<gun> (smg, shg, pst, asr, ...) ------------------------------------------
+ * At the player's loadout initialization (1B7800, the black_test_weapon_loadout hook) the primary weapon token becomes
+ * BG1_<GUN>: the gun table's tokens are 12-character names packed base 40, MSB first ('0'-'9' = 3..12, 'A'-'Z' = 13..38,
+ * '_' = 39, 0 pads), e.g. 54461524B8230000 = BG1_SNR, 5446151EBC278000 = BG1_SHG (shotgun), 5446152380DB8000 = BG1_SMG
+ * (the UZI). Only when the token is in the loaded gun table exactly once with a sane descriptor; native construction
+ * follows. A test control: it does not represent a natural pickup. */
+static uint64_t bvr_gun_token(const char *gun)
+{
+    char name[13];
+    uint64_t n = 0;
+    int i;
+    if (!gun || strlen(gun) > 8u) return 0;
+    snprintf(name, sizeof(name), "BG1_%s", gun);
+    for (i = 0; i < 12; i++) {
+        const char ch = (char)(name[i] >= 'a' && name[i] <= 'z' ? name[i] - 32 : name[i]);
+        unsigned c;
+        if (!ch) c = 0;
+        else if (ch >= '0' && ch <= '9') c = 3u + (unsigned)(ch - '0');
+        else if (ch >= 'A' && ch <= 'Z') c = 13u + (unsigned)(ch - 'A');
+        else if (ch == '_') c = 39u;
+        else return 0;
+        n = n * 40u + c;
+        if (!ch) { for (i++; i < 12; i++) n *= 40u; break; }
+    }
+    return n;
+}
+static void black_vr_test_loadout(uint32_t record)
+{
+    static int done;
+    const char *gun = getenv("RECOMP_BLACK_TEST_LOADOUT");
+    const uint64_t tok = gun && *gun ? bvr_gun_token(gun) : 0;
+    uint32_t core, table, header, entries, count, i, matches = 0;
+    if (!tok || done >= 8 || !black_pc_ram_span(0x2D45D4u, 4u) || !black_pc_ram_span(0x2D12D0u, 4u)) return;
+    core = GUEST32(0x2D45D4u);
+    if (!black_pc_ram_span(core, 0x5CB2u) || record != core + 0x3F0u || !black_pc_ram_span(record, 0x50u) ||
+        GUEST8(core + 0x5CB1u))
+        return;
+    table = GUEST32(0x2D12D0u);
+    header = black_pc_ram_span(table, 4u) ? GUEST32(table) : 0;
+    if (!black_pc_ram_span(header, 8u)) return;
+    count = GUEST8(header + 1u);
+    entries = GUEST32(header + 4u);
+    if (!count || count > 127u || !black_pc_ram_span(entries, count * 32u)) return;
+    for (i = 0; i < count; i++) {
+        const uint32_t e = entries + i * 32u, cfg = GUEST32(e + 8u);
+        if (GUEST32(e) != (uint32_t)tok || GUEST32(e + 4u) != (uint32_t)(tok >> 32)) continue;
+        if (!black_pc_ram_span(cfg, 0x65u) || !GUEST32(cfg + 0x60u) || GUEST32(cfg + 0x60u) > 65535u ||
+            GUEST8(cfg + 0x64u) >= 10u) return;
+        matches++;
+    }
+    done++;
+    fprintf(stderr, "[BLACK_VR] test loadout: BG1_%s token %08X%08X %s (mission %u, was %08X%08X)\n", gun,
+            (uint32_t)(tok >> 32), (uint32_t)tok, matches == 1u ? "accepted" : "not in the gun table",
+            GUEST8(core + 0x5AECu), GUEST32(record + 4u), GUEST32(record));
+    if (matches != 1u) return;
+    GUEST32(record) = (uint32_t)tok;
+    GUEST32(record + 4u) = (uint32_t)(tok >> 32);
+}
+
 /* BLACKVR_AIM_TRACE=1, at the world draw: every live held effect's emitters in the head view (FX lines) and, every 8th
  * frame, the muzzle record relative to the game's camera entity (MUZZLE lines: the barrel's idle tilt). */
 static void bvr_fx_trace(void)
@@ -746,7 +922,7 @@ static void bvr_fx_trace(void)
     if (!bvr_aim_trace() || bvr.mode != VR_PRESENT_STEREO || !(fx = bvr_fx()) || !vrm_m4_inverse(bvr.w_head, &hv)) return;
     /* every 8th frame: the muzzle locator 16B1E0 draws the flash at ([[core+358]+44]+40, a RenderWare matrix in the
      * world), relative to the game's camera entity, i.e. where the latch puts it relative to the hand (plus the grip) */
-    if (!(bvr.game_frame & 7u) && black_pc_ram_span(0x2D45D4u, 4u)) {
+    if ((bvr_aim_trace() >= 2 || !(bvr.game_frame & 7u)) && black_pc_ram_span(0x2D45D4u, 4u)) {
         const uint32_t core = GUEST32(0x2D45D4u);
         const uint32_t a = black_pc_ram_span(core, 0x35Cu) ? GUEST32(core + 0x358u) : 0u;
         const uint32_t t = black_pc_ram_span(a, 0x48u) ? GUEST32(a + 0x44u) : 0u;

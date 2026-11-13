@@ -93,6 +93,22 @@ static float depth_a, depth_b;
 static void putf(uint32_t va, float v) { memcpy(ram + va, &v, 4); }
 static float getf(uint32_t va) { float v; memcpy(&v, ram + va, 4); return v; }
 
+/* The player's aim matrix ([2D45D4]+100, RenderWare rows): the game poses the first-person model on it in its update
+ * and the camera entity copies it later in the frame; written from the frame's rows when aim_on. */
+static int aim_on;
+static void aim_from_rows(const float rows[4][3])
+{
+    const uint32_t a = GUEST32(0x002D45D4u) + 0x100u;
+    int r, k;
+    for (r = 0; r < 4; r++) for (k = 0; k < 3; k++) memcpy(ram + a + r * 0x10u + k * 4u, &rows[r][k], 4);
+}
+static void aim_from_view(VrMat4 w)
+{
+    float rows[4][3];
+    vgm_view_to_frame(w, TEST_RIGHT_ROW_SIGN, rows);
+    aim_from_rows(rows);
+}
+
 /* World convention of this synthetic game: right-handed world, +y up; game yaw (degrees)
  * grows to the left; forward = (sin y, 0, cos y) rotated; the RW "right" row is the
  * screen's LEFT, as BLACK's is. */
@@ -116,6 +132,11 @@ static void game_produce(void)
             putf(FRAME + 0x10u + r * 0x10u + k * 4u, v);
             putf(FRAME + 0x50u + r * 0x10u + k * 4u, v);
         }
+    if (aim_on) {
+        float fr[4][3];
+        for (r = 0; r < 4; r++) for (k = 0; k < 3; k++) fr[r][k] = getf(FRAME + 0x10u + r * 0x10u + k * 4u);
+        aim_from_rows(fr);
+    }
     /* the lens: halfX = window70 * tan(angle/2), halfY = halfX / aspect74 */
     {
         const float hx = getf(CAMERA + 0x70u) * tanf(getf(OWNER + 0x750u) * 0.5f * (float)VRM_DEG);
@@ -383,8 +404,8 @@ int main(void)
         fs.hand[1].valid = 1;
     }
     /* the weapon's held effects (the muzzle glow and smoke a shot puts on the player's first-person record 5) follow
-     * the records 0..7 in their update (176BD0); around it the records are where the weapon is in the hand, as of the
-     * last render, carried along by the records' own motion since; afterwards they are the game's again */
+     * the records 0..7 in their update (176BD0); around it the records are where the last render drew them in the hand,
+     * carried by the hand's move since; afterwards they are the game's again */
     {
 #define FXCORE 0x003B0000u
 #define FXMODEL 0x003C0000u
@@ -415,9 +436,11 @@ int main(void)
         }
         frame();                                              /* the render captures X and the records */
         CHECK(bvr_fxl.ok && bvr_fxl.at[5] == FXREC + 0x540u && bvr_fxl.at[2] == FXREC + 0x240u && !bvr_fxl.at[3]);
+        CHECK(!bvr_fxl.aim);                                  /* no aim matrix (it is not the camera): the fallback */
         CHECK(vrm_m4_inverse(bvr.w_entity, &he) && vrm_m4_inverse(bvr.w_hand, &hh) && vrm_m4_inverse(bvr.w_head, &hinv));
         x = vrm_m4_mul(bvr.w_head, vrm_m4_mul(bvr.yv, hinv));
-        /* the next update: the game moved record 5 (the player stepped 5 cm right, 8 cm back; the weapon tilted 4 deg) */
+        /* the next update: the game moved record 5 (the player stepped 5 cm right, 8 cm back; the weapon tilted 4 deg);
+         * the hand did not move */
         {
             const VrMat4 step = vrm_m4_from_pose(P(0, 0, 0.05f, 0.0f, -0.08f));
             const VrMat4 m = vrm_m4_mul(step, vrm_m4_mul(lprev[5], vrm_m4_from_pose(P(0, 4, 0, 0, 0))));
@@ -428,7 +451,7 @@ int main(void)
             }
             for (r = 0; r < 8u; r++) memcpy(kept[r], ram + FXREC + r * 0x100u + 0x40u, 0x40u);
             black_vr_fx_update_begin();
-            /* the rows: turned by X (the weapon's re-target), the game's own tilt kept */
+            /* the rows: turned by X (the last render's re-target of the weapon), the game's own tilt kept */
             for (j = 0; j < 3; j++) {
                 float a[4] = { VRM_AT(m, 0, j), VRM_AT(m, 1, j), VRM_AT(m, 2, j), 0.0f }, b[4];
                 vrm_m4_apply(x, a, b);
@@ -436,13 +459,13 @@ int main(void)
                       NEAR(getf(at + j * 0x10u + 8u), b[2], 2e-5));
                 CHECK(GUEST32(at + j * 0x10u + 12u) == 0x5A5A0000u + 5u * 16u + j);
             }
-            /* the position: where the latched weapon's muzzle was at the render, plus the record's motion since; and that
-             * latched muzzle is, relative to the hand, the game's relative to its camera entity less the grip */
+            /* the position, too: the game's record by X; relative to the hand, the game's relative to the render's camera
+             * entity less the grip */
             {
-                float a[4] = { VRM_AT(lprev[5], 0, 3), VRM_AT(lprev[5], 1, 3), VRM_AT(lprev[5], 2, 3), 1.0f }, b[4], c[4];
+                float a[4] = { VRM_AT(m, 0, 3), VRM_AT(m, 1, 3), VRM_AT(m, 2, 3), 1.0f }, b[4], c[4];
                 vrm_m4_apply(x, a, b);
-                CHECK(NEAR(getf(at + 0x30u), b[0] + 0.05f, 2e-5) && NEAR(getf(at + 0x34u), b[1], 2e-5) &&
-                      NEAR(getf(at + 0x38u), b[2] - 0.08f, 2e-5));
+                CHECK(NEAR(getf(at + 0x30u), b[0], 2e-5) && NEAR(getf(at + 0x34u), b[1], 2e-5) &&
+                      NEAR(getf(at + 0x38u), b[2], 2e-5));
                 vrm_m4_apply(hh, b, c);
                 vrm_m4_apply(he, a, b);
                 CHECK(NEAR(c[0], b[0] - 0.12f, 2e-5) && NEAR(c[1], b[1] + 0.18f, 2e-5) && NEAR(c[2], b[2] - 0.30f, 2e-5));
@@ -474,6 +497,120 @@ int main(void)
         for (r = 0; r < 8u; r++) CHECK(!memcmp(ram + FXREC + r * 0x100u + 0x40u, kept[r], 0x40u));
         black_vr_fx_update_end();
         fs.hand[1].valid = 1;
+        gcfg.vm_offset_m[0] = gcfg.vm_offset_m[1] = gcfg.vm_offset_m[2] = 0.0f;
+        fs.hand[1].aim = P(0, 0, 0.2f, 1.3f, -0.3f);
+        for (i = 0; i < 4; i++) frame();
+    }
+    /* ... with the player's aim matrix readable ([2D45D4]+100, the render's camera entity): the transform is built for
+     * the update from the aim matrix as it is then (the camera entity the next render will have) and the hand this game
+     * frame latched. A shot kicks the aim matrix up (the records posed on it) while the camera entity stays the last
+     * frame's until later in the frame; relative to the hand of the next render, every record is then its pose on the
+     * aim matrix, less the grip: the recoil is not in it, the animation is */
+    {
+        VrMat4 lrec[8], e0, e1, body, hand_next, hinv2, want, got;
+        VrPose o;
+        unsigned r, j, c;
+        uint8_t kept2[8][0x40];
+        aim_on = 1;
+        gcfg.vm_offset_m[0] = 0.12f; gcfg.vm_offset_m[1] = -0.18f; gcfg.vm_offset_m[2] = 0.30f;
+        fs.hand[1].aim = P(25, -10, 0.25f, 1.25f, -0.35f);
+        for (i = 0; i < 4; i++) frame();
+        CHECK(bvr.yv_ok && bvr.hand_locked && bvr.mode == VR_PRESENT_STEREO);
+        for (r = 0; r < 8u; r++) {
+            lrec[r] = vrm_m4_from_pose(r == 5 ? P(3, 2, 0.09f, -0.06f, 0.39f) : P(-8, 5, 0.02f, -0.12f, 0.20f));
+            GUEST32(FXCNT + 0x38u + r * 4u) = (r == 2 || r == 5) ? 0u : 0xFFFFFFFFu;
+        }
+        /* the records as the game places them for the render: on the entity it is about to build the frame from */
+        frame();
+        for (r = 0; r < 8u; r++) {
+            const VrMat4 m = vrm_m4_mul(bvr.w_entity, lrec[r]);
+            const uint32_t at = FXREC + r * 0x100u + 0x40u;
+            for (j = 0; j < 4; j++) {
+                putf(at + j * 0x10u, VRM_AT(m, 0, j)); putf(at + j * 0x10u + 4u, VRM_AT(m, 1, j));
+                putf(at + j * 0x10u + 8u, VRM_AT(m, 2, j)); GUEST32(at + j * 0x10u + 12u) = 0x6B6B0000u + r * 16u + j;
+            }
+        }
+        frame();                                              /* the render: X, the records, the aim matrix */
+        CHECK(bvr_fxl.ok && bvr_fxl.aim == FXCORE + 0x100u);
+        {
+            /* the shot's frame: the player stepped 5 cm right and the aim matrix kicked 8 deg up about the eye; the game
+             * posed the records on it, record 5 with its animation 3 deg on, and record 3 appeared; the hand moved 4 cm
+             * left and turned 5 deg since the render */
+            const VrMat4 kick = vrm_m4_from_pose(P(0, 8, 0, 0, 0));
+            e0 = bvr.w_entity;
+            body = bvr.w_body;
+            e1 = vrm_m4_mul(vrm_m4_from_pose(P(0, 0, 0.05f, 0, 0)), vrm_m4_mul(e0, kick));
+            aim_from_view(e1);
+            GUEST32(FXCNT + 0x38u + 3u * 4u) = 0u;
+            lrec[3] = vrm_m4_from_pose(P(0, 0, -0.05f, -0.10f, 0.25f));
+            for (r = 0; r < 8u; r++) {
+                const VrMat4 m = vrm_m4_mul(e1, r == 5 ? vrm_m4_mul(lrec[5], vrm_m4_from_pose(P(0, 3, 0, 0, 0))) : lrec[r]);
+                const uint32_t at = FXREC + r * 0x100u + 0x40u;
+                for (j = 0; j < 4; j++) {
+                    putf(at + j * 0x10u, VRM_AT(m, 0, j)); putf(at + j * 0x10u + 4u, VRM_AT(m, 1, j));
+                    putf(at + j * 0x10u + 8u, VRM_AT(m, 2, j));
+                }
+                GUEST32(at + 12u) = 0x6B6B0000u + r * 16u;
+                memcpy(kept2[r], ram + at, 0x40u);
+            }
+            fs.hand[1].aim = P(30, -10, 0.21f, 1.25f, -0.35f);
+            black_vr_fx_update_begin();
+            /* the next render's hand: this latch, on the body moved with the aim matrix */
+            vr_get_recentre(&o);
+            VRM_AT(body, 0, 3) += VRM_AT(e1, 0, 3) - VRM_AT(e0, 0, 3);
+            VRM_AT(body, 1, 3) += VRM_AT(e1, 1, 3) - VRM_AT(e0, 1, 3);
+            VRM_AT(body, 2, 3) += VRM_AT(e1, 2, 3) - VRM_AT(e0, 2, 3);
+            hand_next = vrm_m4_mul(body, vgm_lh_from_pose(vgm_relative(o, fs.hand[1].aim), 1.0f));
+            CHECK(vrm_m4_inverse(hand_next, &hinv2));
+            for (r = 0; r < 8u; r++) {
+                const uint32_t at = FXREC + r * 0x100u + 0x40u;
+                if (r != 2 && r != 3 && r != 5) { CHECK(!memcmp(ram + at, kept2[r], 0x40u)); continue; }
+                got = vrm_m4_identity();
+                for (j = 0; j < 4; j++) for (c = 0; c < 3; c++) VRM_AT(got, c, j) = getf(at + j * 0x10u + c * 4u);
+                got = vrm_m4_mul(hinv2, got);
+                want = r == 5 ? vrm_m4_mul(lrec[5], vrm_m4_from_pose(P(0, 3, 0, 0, 0))) : lrec[r];
+                VRM_AT(want, 0, 3) -= 0.12f; VRM_AT(want, 1, 3) += 0.18f; VRM_AT(want, 2, 3) -= 0.30f;
+                for (j = 0; j < 4; j++) for (c = 0; c < 3; c++) CHECK(NEAR(VRM_AT(got, c, j), VRM_AT(want, c, j), 5e-5));
+                CHECK(GUEST32(at + 12u) == 0x6B6B0000u + r * 16u);
+            }
+            /* e856ad7 (the last render's X on the update's record, plus its motion since) started the muzzle's effects
+             * with the recoil in: over 5 cm off here */
+            {
+                float a[4], b[4], d[3];
+                const uint32_t at = FXREC + 0x540u;
+                a[0] = VRM_AT(bvr_fxl.l[5], 0, 3); a[1] = VRM_AT(bvr_fxl.l[5], 1, 3); a[2] = VRM_AT(bvr_fxl.l[5], 2, 3); a[3] = 1;
+                vrm_m4_apply(bvr_fxl.x, a, b);
+                for (c = 0; c < 3; c++) {
+                    float now;
+                    memcpy(&now, kept2[5] + 0x30u + c * 4u, 4);
+                    d[c] = b[c] + (now - a[c]) - getf(at + 0x30u + c * 4u);
+                }
+                CHECK(sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) > 0.05f);
+            }
+            black_vr_fx_update_end();
+            for (r = 0; r < 8u; r++) CHECK(!memcmp(ram + FXREC + r * 0x100u + 0x40u, kept2[r], 0x40u));
+            /* the aim matrix unreadable: the last render's X on the game's record, moved with the hand */
+            putf(FXCORE + 0x100u, NAN);
+            black_vr_fx_update_begin();
+            {
+                const uint32_t at = FXREC + 0x540u;
+                VrMat4 h0 = vrm_m4_mul(bvr.w_body, vgm_lh_from_pose(vgm_relative(o, fs.hand[1].aim), 1.0f)), hi, ei;
+                CHECK(vrm_m4_inverse(h0, &hi) && vrm_m4_inverse(e0, &ei));
+                got = vrm_m4_identity();
+                for (j = 0; j < 4; j++) for (c = 0; c < 3; c++) VRM_AT(got, c, j) = getf(at + j * 0x10u + c * 4u);
+                got = vrm_m4_mul(hi, got);
+                want = vrm_m4_identity();
+                for (j = 0; j < 4; j++) for (c = 0; c < 3; c++) { float v; memcpy(&v, kept2[5] + j * 16u + c * 4u, 4); VRM_AT(want, c, j) = v; }
+                want = vrm_m4_mul(ei, want);
+                VRM_AT(want, 0, 3) -= 0.12f; VRM_AT(want, 1, 3) += 0.18f; VRM_AT(want, 2, 3) -= 0.30f;
+                for (j = 0; j < 4; j++) for (c = 0; c < 3; c++) CHECK(NEAR(VRM_AT(got, c, j), VRM_AT(want, c, j), 5e-5));
+            }
+            black_vr_fx_update_end();
+            for (r = 0; r < 8u; r++) CHECK(!memcmp(ram + FXREC + r * 0x100u + 0x40u, kept2[r], 0x40u));
+            GUEST32(FXCNT + 0x38u + 3u * 4u) = 0xFFFFFFFFu;
+        }
+        aim_on = 0;
+        memset(ram + FXCORE + 0x100u, 0, 0x40u);
         gcfg.vm_offset_m[0] = gcfg.vm_offset_m[1] = gcfg.vm_offset_m[2] = 0.0f;
         fs.hand[1].aim = P(0, 0, 0.2f, 1.3f, -0.3f);
         for (i = 0; i < 4; i++) frame();
