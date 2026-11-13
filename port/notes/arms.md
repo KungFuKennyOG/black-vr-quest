@@ -44,6 +44,14 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
     still animates relative to the hand (slide, magazine). History: ef2acc2 followed the animation slowly (the gun
     floated after shots); 5c51085 locked the position only, so the recoil's wrist rotation (~30°) spun the gun about
     the hand ("flying around").
+  - **The gun is what is locked** once its rest pose is known: the gun's `*_Root` bone is held at its rest pose on the
+    controller (placed so the wrist is on target at rest), and the game's hands animate on the gun (reloads, bolt
+    pulls). Before the rest pose (the raise animation) the wrist is locked. Guns without a `*_Root` bone keep the
+    wrist lock.
+  - **Each weapon draw uses its own hand frame K:** the game draws other models with the weapon's register in the
+    same frame (the ejected shell casings), so K is recorded per weapon MVP (`GlueVm.k`) and a draw finds its K by
+    the MVP in its own c10 (bit for bit). Before (603a81b), the frame's last K was used: during a burst that was a
+    spinning shell's, so the lock threw the gun around (Kenny's log: "moved the wrist up to 1.85 m, turned 178°").
   - **VR recoil kick** (`recoil`, 0..2, default 1): per shot (`vr_note_shot` from the muzzle flash hook) the target
     pose pitches up 5° about the wrist and moves back 2.5 cm, decaying with a 60 ms time constant.
   - The lock L (hand frame) is published (`vr_grip_lock`, 4x4) for the muzzle flash draw (w_hand * L) and main's

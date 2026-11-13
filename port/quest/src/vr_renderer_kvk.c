@@ -68,7 +68,13 @@ extern int kelvin_mark_view(uint32_t va, int mode, int slot, int x0, int y0, int
 #define GLUE_RING 16   /* > kelvin_mark_view's queue (16 marks): a slot cannot be reused before its mark is reached */
 #define GLUE_VM_MAX 8  /* weapon MVPs per frame (BLACK: the mesh queue's first-person entries and the muzzle flash) */
 
-typedef struct GlueVm { float mvp[16]; int reg; } GlueVm;
+typedef struct GlueVm {
+    float mvp[16];
+    int reg;
+    int k_ok;                /* first-person arms: K = hand_from_model of this MVP's model (vr_mark_viewmodel_offhand) */
+    float k[16];
+    float grip_corr[3];      /* the auto-grip correction K was built with */
+} GlueVm;
 typedef struct GlueCam {
     VrGameCamera cam;
     VrGameCameraExt ext;
@@ -214,6 +220,7 @@ void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register)
     if (g_ring_last >= 0 && (c = &g_ring[g_ring_last])->nvm < GLUE_VM_MAX) {
         memcpy(c->vm[c->nvm].mvp, mvp, sizeof(c->vm[c->nvm].mvp));
         c->vm[c->nvm].reg = constant_register;
+        c->vm[c->nvm].k_ok = 0;
         c->nvm++;
         g_vm_recorded++;
     } else {
@@ -227,10 +234,13 @@ void vr_mark_viewmodel_offhand(const float a[16], const float grip_correction[3]
 {
     if (!g_on || !a) return;
     pthread_mutex_lock(&g_ring_lock);
-    if (g_ring_last >= 0) {
-        memcpy(g_ring[g_ring_last].offhand, a, sizeof(g_ring[g_ring_last].offhand));
-        memcpy(g_ring[g_ring_last].grip_corr, grip_correction, sizeof(g_ring[g_ring_last].grip_corr));
-        g_ring[g_ring_last].offhand_ok = 1;
+    if (g_ring_last >= 0 && g_ring[g_ring_last].nvm > 0) {
+        /* onto the MVP just recorded: the game draws other models with the weapon's register in the same frame (the
+         * ejected shells), so each weapon draw finds its own K by its MVP, not the frame's last one */
+        GlueVm *v = &g_ring[g_ring_last].vm[g_ring[g_ring_last].nvm - 1];
+        memcpy(v->k, a, sizeof(v->k));
+        memcpy(v->grip_corr, grip_correction, sizeof(v->grip_corr));
+        v->k_ok = 1;
     }
     pthread_mutex_unlock(&g_ring_lock);
 }
@@ -421,6 +431,8 @@ typedef struct {
     int have_r0;                /* r0 captured */
     float r0[9];                /* the weapon's rest orientation of the wrist (in the hand frame), locked to */
     float lock_move_max, lock_turn_max;   /* the largest correction since the last log line (m, degrees) */
+    int have_root;              /* root_t captured: the gun (its *_Root bone) is what is locked */
+    float root_t[12];           /* the gun root's locked pose in the hand frame (at rest the wrist is on target) */
     VrArmRig rig;
 } ArmsEntry;
 
@@ -499,7 +511,8 @@ static void arms_m34_from_m4(VrMat4 m, float o[12])
 static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float used[3], uint64_t frame)
 {
     int hand_auto, i, kk, new_frame;
-    float wo[3], fr[12], k34[12], k34_inv[12], wh[12], wh_inv[12], th[12], l[12], g[12], q[9], s, target[3], d_hand[3];
+    float wo[3], fr[12], k34[12], k34_inv[12], wh[12], wh_inv[12], th[12], l[12], g[12], q[9], s, target[3], d_hand[3],
+          d_wrist[3];
     const float upm = vr_game_config()->units_per_metre;
     vr_arms_grip_config(&hand_auto, wo);
     if (!hand_auto) {
@@ -520,6 +533,7 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
     for (i = 0; i < 9; i++) q[i] = wh[(i / 3) * 4 + i % 3] / s;
     target[0] = wo[0] * upm; target[1] = wo[1] * upm; target[2] = -wo[2] * upm;   /* OpenXR z back -> LH z forward */
     for (i = 0; i < 3; i++) { d_hand[i] = target[i] - wh[i * 4 + 3]; if (!(d_hand[i] == d_hand[i])) return 0; }
+    memcpy(d_wrist, d_hand, sizeof(d_wrist));
     new_frame = frame != e->corr_frame;
     if (new_frame) {
         /* the rest orientation: once the wrist has barely turned (< 0.4 deg a frame) for 15 frames */
@@ -531,7 +545,15 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
         if (!e->have_r0 && e->corr_n >= 20u && e->stable_n >= 15u) {
             memcpy(e->r0, q, sizeof(q));
             e->have_r0 = 1;
-            GLOG("arms: rest orientation of the wrist captured after %u frames", e->corr_n);
+            /* the gun's rest pose, placed so the wrist is on target: root_t = T(target - wrist) * root now */
+            if (e->rig.gun_root >= 0) {
+                float gr[12];
+                vra_m34_mul(vra_rows(constants, e->rig.gun_root), e->rig.bindk[e->rig.gun_root], gr);
+                vra_m34_mul(k34, gr, e->root_t);
+                e->root_t[3] += d_hand[0]; e->root_t[7] += d_hand[1]; e->root_t[11] += d_hand[2];
+                e->have_root = 1;
+            }
+            GLOG("arms: rest pose captured after %u frames: locking the %s", e->corr_n, e->have_root ? "gun" : "wrist");
         }
     }
     /* the target pose of the wrist in the hand frame: rest orientation (once known), wrist_offset */
@@ -556,14 +578,34 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
             }
         }
     }
-    vra_m34_mul(th, wh_inv, l);                                        /* L = target * wrist^-1, hand frame */
+    if (e->have_root) {
+        /* the gun is locked: L = (kick *) root_t * root_now^-1; the game's hands animate on the gun */
+        float gr[12], gh[12], gh_inv[12], kt[12];
+        vra_m34_mul(vra_rows(constants, e->rig.gun_root), e->rig.bindk[e->rig.gun_root], gr);
+        vra_m34_mul(k34, gr, gh);
+        if (!vra_m34_inv(gh, gh_inv)) return 0;
+        /* th now holds kick * wrist_target; the kick alone is th * wrist_target^-1, applied to root_t */
+        {
+            float wt[12], wt_inv[12], kick[12];
+            for (i = 0; i < 9; i++) wt[(i / 3) * 4 + i % 3] = s * e->r0[i];
+            wt[3] = target[0]; wt[7] = target[1]; wt[11] = target[2];
+            if (!vra_m34_inv(wt, wt_inv)) return 0;
+            vra_m34_mul(th, wt_inv, kick);
+            vra_m34_mul(kick, e->root_t, kt);
+        }
+        vra_m34_mul(kt, gh_inv, l);
+        /* for the log: how far the game moved the gun from its locked pose */
+        d_hand[0] = e->root_t[3] - gh[3]; d_hand[1] = e->root_t[7] - gh[7]; d_hand[2] = e->root_t[11] - gh[11];
+    } else {
+        vra_m34_mul(th, wh_inv, l);                                    /* L = target * wrist^-1, hand frame */
+    }
     /* the baseline, once per frame (both weapon draws of a frame come here) */
     if (new_frame) {
         const float lf[16] = { l[0], l[1], l[2], l[3], l[4], l[5], l[6], l[7], l[8], l[9], l[10], l[11], 0, 0, 0, 1 };
         e->corr_frame = frame;
         if (e->corr_n < 45u) {
             for (i = 0; i < 3; i++) {
-                float need = used[i] - d_hand[i];
+                float need = used[i] - d_wrist[i];
                 if (need > 0.6f * upm) need = 0.6f * upm;
                 if (need < -0.6f * upm) need = -0.6f * upm;
                 e->corr[i] = need;
@@ -574,15 +616,17 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
         vr_set_grip_lock(lf);
         {   /* once a second: how much the game's animation moved and turned the wrist, all locked out */
             const float mv = sqrtf(d_hand[0] * d_hand[0] + d_hand[1] * d_hand[1] + d_hand[2] * d_hand[2]) / upm;
-            float tr = 0.0f, c;
-            for (i = 0; i < 9; i++) tr += q[i] * e->r0[i];
+            float tr = 0.0f, c, ln = 0.0f;
+            for (i = 0; i < 3; i++) ln += sqrtf(l[i] * l[i] + l[4 + i] * l[4 + i] + l[8 + i] * l[8 + i]) / 3.0f;
+            for (i = 0; i < 3; i++) tr += l[i * 4 + i] / (ln > 1e-9f ? ln : 1.0f);
             c = (tr - 1.0f) * 0.5f;
             if (c > 1.0f) c = 1.0f;
             if (c < -1.0f) c = -1.0f;
             if (mv > e->lock_move_max) e->lock_move_max = mv;
             if (e->have_r0 && acosf(c) * 57.29578f > e->lock_turn_max) e->lock_turn_max = acosf(c) * 57.29578f;
             if (e->corr_n % 60u == 0u) {
-                GLOG("arms: lock (last 60 frames): game moved the wrist up to %.3f m and turned it up to %.1f deg, held still",
+                GLOG("arms: lock (last 60 frames): game moved the %s up to %.3f m and turned it up to %.1f deg, held still",
+                     e->have_root ? "gun" : "wrist",
                      e->lock_move_max, e->lock_turn_max);
                 e->lock_move_max = e->lock_turn_max = 0.0f;
             }
@@ -629,11 +673,19 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
      * grip -> the game's pose, only while gripping; always -> the game's pose; never -> hidden */
     show_off = mode == VR_LEFT_HAND_ALWAYS || (mode == VR_LEFT_HAND_GRIP && engaged);
     if (F.marked) {
+        /* this draw's own K: the recorded weapon MVP equal (bit for bit) to the MVP in this draw's c10 */
         pthread_mutex_lock(&g_ring_lock);
-        if (g_ring[F.slot].serial == F.mark.serial && g_ring[F.slot].offhand_ok) {
-            memcpy(kf, g_ring[F.slot].offhand, sizeof(kf));
-            memcpy(used, g_ring[F.slot].grip_corr, sizeof(used));
-            have_k = 1;
+        if (g_ring[F.slot].serial == F.mark.serial) {
+            const GlueCam *c = &g_ring[F.slot];
+            int v;
+            for (v = c->nvm - 1; v >= 0; v--) {
+                if (!c->vm[v].k_ok || c->vm[v].reg < 0 || c->vm[v].reg > 188 ||
+                    memcmp(c->vm[v].mvp, constants + c->vm[v].reg * 4, sizeof(c->vm[v].mvp)) != 0) continue;
+                memcpy(kf, c->vm[v].k, sizeof(kf));
+                memcpy(used, c->vm[v].grip_corr, sizeof(used));
+                have_k = 1;
+                break;
+            }
         }
         pthread_mutex_unlock(&g_ring_lock);
     }
