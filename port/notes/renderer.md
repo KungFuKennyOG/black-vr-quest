@@ -529,6 +529,7 @@ the first time, then the pipeline manifest has it for the next start.
 | Switch | Default | What |
 |---|---|---|
 | `RECOMP_KVK_PASS_MERGE` | 1 | 0: the pass structure exactly as before (no parking, no attaching, no keeping) |
+| `RECOMP_KVK_PASS_AB` | 1 on Android (test branch), 0 on the host | 1: an A/B in one session: pass merging flips on/off after every 10 s `PASSES` report (at the next frame start), GPU timers on, so the log alternates `pass merge on (A/B)` / `off (A/B)` windows with their `GPUTIME` lines; `kvk_set_pass_merge()` turns it off. **Set `KVK_PASS_AB_DEFAULT` to 0 before this branch merges.** |
 | `RECOMP_KVK_GPUTIME` | 0 | 1: GPU timestamps around every render pass, per-stage ms in a `GPUTIME` line every 10 s |
 | `RECOMP_KVK_PASSLOG`, `_FRAME`, `_EVERY` | 0, 600, 0 | one `PASS` line per pass of frame `_FRAME` (and every `_EVERY`-th frame): target, size, layers, load/store ops, draws, why it ended; `parked`/`unparked` lines |
 | `RECOMP_KVK_TRACE`, `_N`, `_EVERY` | off | host builds only (`KVK_TRACE`): record the backend's calls (13.4) |

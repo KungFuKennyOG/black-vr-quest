@@ -786,6 +786,43 @@ static VkCommandBuffer upload_cmd(void)
  * nothing is recorded. */
 static const char *const k_gt_name[GT_N] = { "world", "fx", "glare", "hud", "compose", "other" };
 
+/* RECOMP_KVK_PASS_MERGE (default on; 0: the pass structure as before 2026-11-13) */
+static int s_pass_merge = -1;
+static bool pass_merge(void)
+{
+    if (s_pass_merge < 0) {
+        const char *e = getenv("RECOMP_KVK_PASS_MERGE");
+        s_pass_merge = !(e && *e == '0');
+        LOG("pass merge %s (RECOMP_KVK_PASS_MERGE)", s_pass_merge ? "on" : "off");
+    }
+    return s_pass_merge != 0;
+}
+
+/* RECOMP_KVK_PASS_AB=1: an A/B of the pass merge in one session, for a headset test without editing blackvr.ini between
+ * runs. Pass merging flips on/off after every 10 s report (at the next frame start), and the GPU timers are on, so the
+ * log alternates "PASSES ... pass merge on" / "off" lines, each followed by its GPUTIME line. 0 turns it off.
+ * KVK_PASS_AB_DEFAULT is the value without the env line. kvk_set_pass_merge() (tests) turns the A/B off. */
+#ifndef KVK_PASS_AB_DEFAULT
+#if defined(__ANDROID__)
+#define KVK_PASS_AB_DEFAULT 1   /* gpu-pass-merge test branch only: set to 0 before this merges to main */
+#else
+#define KVK_PASS_AB_DEFAULT 0   /* host harness and tests: never flip on their own */
+#endif
+#endif
+static int s_pass_ab = -1;
+static bool s_pass_ab_flip;
+static bool pass_ab(void)
+{
+    if (s_pass_ab < 0) {
+        const char *e = getenv("RECOMP_KVK_PASS_AB");
+        s_pass_ab = (e && *e) ? (*e != '0') : KVK_PASS_AB_DEFAULT;
+        if (s_pass_ab)
+            LOG("pass merge A/B on: merging flips on/off after every 10 s report, GPU timers on "
+                "(env RECOMP_KVK_PASS_AB=0 stops it)");
+    }
+    return s_pass_ab != 0;
+}
+
 static void gt_init(void)
 {
     const char *e = getenv("RECOMP_KVK_GPUTIME");
@@ -794,7 +831,7 @@ static void gt_init(void)
     uint32_t nq = 0, bits = 0;
     int i;
     memset(&G.gt, 0, sizeof(G.gt));
-    if (!(e && *e && *e != '0')) return;
+    if (!(e && *e && *e != '0') && !pass_ab()) return;
     vkGetPhysicalDeviceQueueFamilyProperties(G.phys, &nq, NULL);
     qf = (VkQueueFamilyProperties *)calloc(nq ? nq : 1, sizeof(*qf));
     if (!qf) return;
@@ -931,6 +968,10 @@ static void frame_begin(void)
     memset(&P, 0, sizeof(P));
     P.gt_open = -1;
     P.reopen_k = -1;
+    if (s_pass_ab_flip) {           /* RECOMP_KVK_PASS_AB: nothing is open or parked at a frame start */
+        s_pass_ab_flip = false;
+        s_pass_merge = pass_merge() ? 0 : 1;
+    }
     gt_frame_begin(f->cb);
 }
 
@@ -2249,18 +2290,6 @@ static bool passlog_on(void)
         if (v && *v) s_passlog_every = strtoull(v, NULL, 10);
     }
     return s_passlog && (G.st.frames == s_passlog_frame || (s_passlog_every && G.st.frames % s_passlog_every == 0));
-}
-
-/* RECOMP_KVK_PASS_MERGE (default on; 0: the pass structure as before 2026-11-13) */
-static int s_pass_merge = -1;
-static bool pass_merge(void)
-{
-    if (s_pass_merge < 0) {
-        const char *e = getenv("RECOMP_KVK_PASS_MERGE");
-        s_pass_merge = !(e && *e == '0');
-        LOG("pass merge %s (RECOMP_KVK_PASS_MERGE)", s_pass_merge ? "on" : "off");
-    }
-    return s_pass_merge != 0;
 }
 
 /* RECOMP_KVK_POISON=1 (a test aid, kvk_replay): what a tiler may do with a DONT_CARE store, done for real: an attachment
@@ -4249,7 +4278,8 @@ static void pass_report(void)
     LOG("PASSES %.1f s, %u frames (%u stereo), pass merge %s: per frame %.2f passes, main target opened %.2fx (%.2f loading "
         "it), depth loaded %.2fx stored %.2fx, est. attachment traffic %.1f MiB (load %.1f, store %.1f) | merging: %.2f kept "
         "depth for colour-only draws, %.2f depth attached at a reopen (%.2f used), %.2f parked (%.2f draws joined)%s",
-        sec, a->frames, a->stereo_frames, pass_merge() ? "on" : "off", a->passes / n, a->main_opens / n, a->main_loads / n,
+        sec, a->frames, a->stereo_frames,
+        pass_merge() ? (pass_ab() ? "on (A/B)" : "on") : (pass_ab() ? "off (A/B)" : "off"), a->passes / n, a->main_opens / n, a->main_loads / n,
         a->depth_loads / n, a->depth_stores / n, (a->load_mb + a->store_mb) / n, a->load_mb / n, a->store_mb / n,
         a->kept_depth / n, a->spec / n, a->spec_used / n, a->parks / n, a->absorbed / n,
         G.gt.on ? "" : " (RECOMP_KVK_GPUTIME=1: GPU ms per stage)");
@@ -4265,6 +4295,7 @@ static void pass_report(void)
     }
     memset(a, 0, sizeof(*a));
     a->t0_ns = now;
+    if (pass_ab()) s_pass_ab_flip = true;   /* applied at the next frame start, never inside a frame */
 }
 
 static void flip_now(const KelvinTarget *t, unsigned int color_format)
@@ -4700,6 +4731,8 @@ void kvk_set_pass_merge(int on)
     unpark("kvk_set_pass_merge");
     if (P.active) PASS_END_WHY("kvk_set_pass_merge", 0u);
     s_pass_merge = on ? 1 : 0;
+    s_pass_ab = 0;          /* an explicit choice: no A/B flipping */
+    s_pass_ab_flip = false;
 }
 
 bool kvk_read_surface(uint32_t va, unsigned int layer, void *out, size_t pitch, unsigned int *w, unsigned int *h,
