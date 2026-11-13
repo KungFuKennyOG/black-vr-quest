@@ -807,7 +807,7 @@ static struct { int ok, fresh; uint32_t frame, at; VrVec3 p, p_old; } bvr_fxd;  
 /* The muzzle check in the log (always; ~every 30 s of STEREO with the gun in the hand): how far the held effects'
  * update put the muzzle record from where the next render puts the hand-held muzzle (0 when the placement is right),
  * and how many updates had to do without the aim matrix (the fallback, which keeps the shot's recoil in the spawn). */
-static struct { unsigned n, fallback; double sum, max; } bvr_fxs;
+static struct { unsigned n, fallback; double sum, max, body_yaw; } bvr_fxs;
 static uint32_t bvr_fxu_at[8];
 static uint8_t bvr_fxu_kept[8][0x40];
 static unsigned bvr_fxu_n;
@@ -860,6 +860,7 @@ static void bvr_fx_capture(void)
                     "muzzle (e856ad7: %.4f)%s\n", bvr.game_frame, bvr_fxd.frame, dm,
                     (double)vrm_len(vrm_sub(bvr_fxd.p_old, t)), bvr_fxd.fresh ? "" : ", no aim matrix");
         dm /= (double)cfg->units_per_metre;
+        if (fabs(vrm_wrap_deg(bvr.body_yaw - bvr_fxs.body_yaw)) > 0.5) goto turned;   /* a snap/smooth turn: below */
         bvr_fxs.n++;
         bvr_fxs.sum += dm;
         if (dm > bvr_fxs.max) bvr_fxs.max = dm;
@@ -871,6 +872,10 @@ static void bvr_fx_capture(void)
             memset(&bvr_fxs, 0, sizeof(bvr_fxs));
         }
     }
+    /* A turn between the update and this render moves the whole view about the body: the effects started in that one
+     * update are off by the turn (a 35 deg snap: ~40 cm at the muzzle, one puff), which the check leaves out. */
+turned:
+    bvr_fxs.body_yaw = bvr.body_yaw;
     bvr_fxd.ok = 0;
 }
 
