@@ -3446,9 +3446,12 @@ static int black_test_weapon_loadout_valid(uint32_t record)
     uint32_t core, inventory, header, entries, count, i, matches = 0;
     if (!black_pc_ram_span(0x2D45D4u, 4u) || !black_pc_ram_span(0x2D12D0u, 4u)) return 0;
     core = GUEST32(0x2D45D4u);
+    /* RECOMP_BLACK_TEST_WEAPON_ANY_MISSION=1 (debug): allow the swap outside missions 5 and 6 */
+    static int any_mission = -1;
+    if (any_mission < 0) { const char *e = getenv("RECOMP_BLACK_TEST_WEAPON_ANY_MISSION"); any_mission = e && *e == '1'; }
     if (!black_pc_ram_span(core, 0x5CB2u) || record != core + 0x3F0u ||
         !black_pc_ram_span(record, 0x50u) || memory[core + 0x5CB1u] ||
-        (memory[core + 0x5AECu] != 5u && memory[core + 0x5AECu] != 6u)) return 0;
+        (!any_mission && memory[core + 0x5AECu] != 5u && memory[core + 0x5AECu] != 6u)) return 0;
     inventory = GUEST32(0x2D12D0u);
     if (!black_pc_ram_span(inventory, 4u)) return 0;
     header = GUEST32(inventory);
