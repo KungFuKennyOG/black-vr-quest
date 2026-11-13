@@ -416,8 +416,11 @@ typedef struct {
     float corr[3];              /* auto-grip baseline for this weapon (game units) */
     unsigned corr_n;            /* frames measured so far */
     uint64_t corr_frame;        /* the frame of the last baseline update */
-    float rot0[9];              /* the wrist's orientation in the hand frame at the end of the baseline */
-    float rot_max;              /* the largest turn away from it (degrees) since the last log line */
+    float q_prev[9];            /* the wrist's orientation in the hand frame, last frame */
+    unsigned stable_n;          /* frames in a row it barely turned */
+    int have_r0;                /* r0 captured */
+    float r0[9];                /* the weapon's rest orientation of the wrist (in the hand frame), locked to */
+    float lock_move_max, lock_turn_max;   /* the largest correction since the last log line (m, degrees) */
     VrArmRig rig;
 } ArmsEntry;
 
@@ -477,34 +480,86 @@ static void arms_joint(const VrArmRig *rig, const float *constants, int k, float
         out[i] = r[i * 4] * rig->joint[k][0] + r[i * 4 + 1] * rig->joint[k][1] + r[i * 4 + 2] * rig->joint[k][2] + r[i * 4 + 3];
 }
 
-/* Auto-grip (port/notes/arms.md). Two parts:
- *  - per draw, exact: the whole weapon (every bone) is moved in model space so the game's right wrist is at
- *    wrist_offset from the controller in this very frame. No latency, so the gun cannot drift after the game's sway
- *    and bob animations; the gun still animates relative to the hand (recoil, reload tilts).
+/* Auto-grip (port/notes/arms.md):
+ *  - per draw, exact: the whole weapon (every bone) is moved in model space so the game's right wrist has a fixed
+ *    pose on the controller in this very frame: position wrist_offset, orientation the weapon's rest orientation
+ *    (captured once the game's raise animation has settled). The game's own sway, recoil and reload swings of the arm
+ *    are locked out, so the gun is rigid in the hand; the gun still animates relative to the hand (slide, magazine).
+ *    A VR recoil kick (blackvr.ini recoil) replaces the game's recoil swing: a short pitch up and push back.
  *  - a baseline for the game thread: the weapon's static offset, taken from its first 45 frames and then frozen, so
- *    the game's own placement (muzzle flash, effects) is already close and the per-draw move stays small.
- * K was built with the correction `used`; moving the grip by c moves the wrist by -c in the hand frame, so the exact
- * baseline from one frame is used + (wrist - target). Returns 1 when it moved the weapon. */
+ *    the game's own placement is already close and the per-draw move stays small.
+ * The lock L (in the hand frame) is published for the muzzle flash draw and the muzzle effects. Returns 1 when it
+ * moved the weapon. */
+static void arms_m34_from_m4(VrMat4 m, float o[12])
+{
+    int r, c;
+    for (r = 0; r < 3; r++) for (c = 0; c < 4; c++) o[r * 4 + c] = VRM_AT(m, r, c);
+}
+
 static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float used[3], uint64_t frame)
 {
-    int hand_auto, i, kk;
-    float wo[3], p[3], h[3], target[3], d_hand[3], d_model[3];
-    VrMat4 k_inv;
+    int hand_auto, i, kk, new_frame;
+    float wo[3], fr[12], k34[12], k34_inv[12], wh[12], wh_inv[12], th[12], l[12], g[12], q[9], s, target[3], d_hand[3];
     const float upm = vr_game_config()->units_per_metre;
     vr_arms_grip_config(&hand_auto, wo);
     if (!hand_auto) {
-        const float zero[3] = { 0.0f, 0.0f, 0.0f };
+        const float zero[3] = { 0.0f, 0.0f, 0.0f }, ident[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
         vr_set_grip_correction(zero);
-        vr_set_grip_lock(zero);
+        vr_set_grip_lock(ident);
         return 0;
     }
-    if (!vrm_m4_inverse(k, &k_inv)) return 0;
-    arms_joint(&e->rig, constants, e->rig.wrist[VRA_RIGHT], p);
-    for (i = 0; i < 3; i++) h[i] = VRM_AT(k, i, 0) * p[0] + VRM_AT(k, i, 1) * p[1] + VRM_AT(k, i, 2) * p[2] + VRM_AT(k, i, 3);
+    arms_m34_from_m4(k, k34);
+    if (!vra_m34_inv(k34, k34_inv)) return 0;
+    /* the posed right wrist frame, in the hand frame (LH, game units; K's scale included) */
+    vra_m34_mul(vra_rows(constants, e->rig.wrist[VRA_RIGHT]), e->rig.bind[VRA_RIGHT], fr);
+    vra_m34_mul(k34, fr, wh);
+    if (!vra_m34_inv(wh, wh_inv)) return 0;
+    s = 0.0f;
+    for (i = 0; i < 3; i++) s += sqrtf(wh[i] * wh[i] + wh[4 + i] * wh[4 + i] + wh[8 + i] * wh[8 + i]) / 3.0f;
+    if (!(s > 1e-9f)) return 0;
+    for (i = 0; i < 9; i++) q[i] = wh[(i / 3) * 4 + i % 3] / s;
     target[0] = wo[0] * upm; target[1] = wo[1] * upm; target[2] = -wo[2] * upm;   /* OpenXR z back -> LH z forward */
-    for (i = 0; i < 3; i++) { d_hand[i] = target[i] - h[i]; if (!(d_hand[i] == d_hand[i])) return 0; }
+    for (i = 0; i < 3; i++) { d_hand[i] = target[i] - wh[i * 4 + 3]; if (!(d_hand[i] == d_hand[i])) return 0; }
+    new_frame = frame != e->corr_frame;
+    if (new_frame) {
+        /* the rest orientation: once the wrist has barely turned (< 0.4 deg a frame) for 15 frames */
+        float tr = 0.0f;
+        for (i = 0; i < 9; i++) tr += q[i] * e->q_prev[i];
+        if (e->corr_n > 0u && tr > 2.0f * cosf(0.4f * 0.0174533f) + 1.0f - 1e-6f) e->stable_n++;
+        else e->stable_n = 0;
+        memcpy(e->q_prev, q, sizeof(q));
+        if (!e->have_r0 && e->corr_n >= 20u && e->stable_n >= 15u) {
+            memcpy(e->r0, q, sizeof(q));
+            e->have_r0 = 1;
+            GLOG("arms: rest orientation of the wrist captured after %u frames", e->corr_n);
+        }
+    }
+    /* the target pose of the wrist in the hand frame: rest orientation (once known), wrist_offset */
+    for (i = 0; i < 9; i++) th[(i / 3) * 4 + i % 3] = s * (e->have_r0 ? e->r0[i] : q[i]);
+    th[3] = target[0]; th[7] = target[1]; th[11] = target[2];
+    /* the VR recoil kick: about the wrist, pitch up and back, decaying (60 ms) after each shot */
+    {
+        const float scale = vr_recoil_scale();
+        const int64_t shot = vr_last_shot_ns();
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        if (scale > 0.0f && shot > 0) {
+            const float t = (float)(((int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec - shot) * 1e-9);
+            if (t >= 0.0f && t < 0.4f) {
+                const float amp = scale * expf(-t / 0.06f), a = -5.0f * 0.0174533f * amp, back = 0.025f * upm * amp;
+                const float ca = cosf(a), sa = sinf(a);
+                /* T(target) * T(0, 0, -back) * Rx(a) * T(-target) */
+                const float rx[12] = { 1, 0, 0, 0,
+                                       0, ca, -sa, target[1] - (ca * target[1] - sa * target[2]),
+                                       0, sa, ca, target[2] - back - (sa * target[1] + ca * target[2]) };
+                vra_m34_mul(rx, th, th);
+            }
+        }
+    }
+    vra_m34_mul(th, wh_inv, l);                                        /* L = target * wrist^-1, hand frame */
     /* the baseline, once per frame (both weapon draws of a frame come here) */
-    if (frame != e->corr_frame) {
+    if (new_frame) {
+        const float lf[16] = { l[0], l[1], l[2], l[3], l[4], l[5], l[6], l[7], l[8], l[9], l[10], l[11], 0, 0, 0, 1 };
         e->corr_frame = frame;
         if (e->corr_n < 45u) {
             for (i = 0; i < 3; i++) {
@@ -516,44 +571,34 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
         }
         e->corr_n++;
         vr_set_grip_correction(e->corr);
-        vr_set_grip_lock(d_hand);
-        {   /* how far the game's animation turns the wrist away from its rest orientation (logged once a second) */
-            float fr[12], rr[9], n0, n1, n2, tr;
-            int a, b;
-            vra_m34_mul(vra_rows(constants, e->rig.wrist[VRA_RIGHT]), e->rig.bind[VRA_RIGHT], fr);
-            for (a = 0; a < 3; a++) for (b = 0; b < 3; b++)
-                rr[a * 3 + b] = VRM_AT(k, a, 0) * fr[b] + VRM_AT(k, a, 1) * fr[4 + b] + VRM_AT(k, a, 2) * fr[8 + b];
-            for (b = 0; b < 3; b++) {
-                n0 = sqrtf(rr[b] * rr[b] + rr[3 + b] * rr[3 + b] + rr[6 + b] * rr[6 + b]);
-                if (n0 > 1e-9f) { rr[b] /= n0; rr[3 + b] /= n0; rr[6 + b] /= n0; }
-            }
-            if (e->corr_n == 45u) memcpy(e->rot0, rr, sizeof(rr));
-            if (e->corr_n > 45u) {
-                tr = 0.0f;
-                for (a = 0; a < 3; a++) for (b = 0; b < 3; b++) tr += e->rot0[a * 3 + b] * rr[a * 3 + b];
-                n1 = (tr - 1.0f) * 0.5f;
-                if (n1 > 1.0f) n1 = 1.0f;
-                if (n1 < -1.0f) n1 = -1.0f;
-                n2 = acosf(n1) * 57.29578f;
-                if (n2 > e->rot_max) e->rot_max = n2;
-                if (e->corr_n % 60u == 0u && e->rot_max > 2.0f) {
-                    GLOG("arms: wrist turned up to %.1f deg from rest (last second), moved up to %.3f m", e->rot_max,
-                         sqrtf(d_hand[0] * d_hand[0] + d_hand[1] * d_hand[1] + d_hand[2] * d_hand[2]) / upm);
-                    e->rot_max = 0.0f;
-                }
+        vr_set_grip_lock(lf);
+        {   /* once a second: how much the game's animation moved and turned the wrist, all locked out */
+            const float mv = sqrtf(d_hand[0] * d_hand[0] + d_hand[1] * d_hand[1] + d_hand[2] * d_hand[2]) / upm;
+            float tr = 0.0f, c;
+            for (i = 0; i < 9; i++) tr += q[i] * e->r0[i];
+            c = (tr - 1.0f) * 0.5f;
+            if (c > 1.0f) c = 1.0f;
+            if (c < -1.0f) c = -1.0f;
+            if (mv > e->lock_move_max) e->lock_move_max = mv;
+            if (e->have_r0 && acosf(c) * 57.29578f > e->lock_turn_max) e->lock_turn_max = acosf(c) * 57.29578f;
+            if (e->corr_n % 60u == 0u) {
+                GLOG("arms: lock (last 60 frames): game moved the wrist up to %.3f m and turned it up to %.1f deg, held still",
+                     e->lock_move_max, e->lock_turn_max);
+                e->lock_move_max = e->lock_turn_max = 0.0f;
             }
         }
         if (e->corr_n <= 3u || e->corr_n == 45u || e->corr_n % 3600u == 0u)
             GLOG("arms: auto-grip n %u wrist in hand frame %.3f %.3f %.3f m (target %.3f %.3f %.3f), moved %.3f m this frame, baseline %.3f %.3f %.3f m",
-                 e->corr_n, h[0] / upm, h[1] / upm, h[2] / upm, target[0] / upm, target[1] / upm, target[2] / upm,
+                 e->corr_n, wh[3] / upm, wh[7] / upm, wh[11] / upm, target[0] / upm, target[1] / upm, target[2] / upm,
                  sqrtf(d_hand[0] * d_hand[0] + d_hand[1] * d_hand[1] + d_hand[2] * d_hand[2]) / upm,
                  e->corr[0] / upm, e->corr[1] / upm, e->corr[2] / upm);
     }
-    /* the exact per-draw move: hand-frame delta to model space (K's linear part inverted), onto every bone */
-    for (i = 0; i < 3; i++) d_model[i] = VRM_AT(k_inv, i, 0) * d_hand[0] + VRM_AT(k_inv, i, 1) * d_hand[1] + VRM_AT(k_inv, i, 2) * d_hand[2];
+    /* G = K^-1 * L * K, onto every bone of the weapon */
+    vra_m34_mul(l, k34, g);
+    vra_m34_mul(k34_inv, g, g);
     for (kk = 0; kk < e->rig.n; kk++) {
         float *rows = vra_rows(constants, kk);
-        rows[3] += d_model[0]; rows[7] += d_model[1]; rows[11] += d_model[2];
+        vra_m34_mul(g, rows, rows);
     }
     return 1;
 }

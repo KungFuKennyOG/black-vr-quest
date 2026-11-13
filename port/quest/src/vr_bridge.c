@@ -819,21 +819,26 @@ void vr_grip_correction(float c[3])
     pthread_mutex_unlock(&g_lock);
 }
 
-static float g_grip_lock[3];
+static float g_grip_lock[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+static int64_t g_last_shot_ns;
 
-void vr_set_grip_lock(const float d[3])
+void vr_set_grip_lock(const float l[16])
 {
     pthread_mutex_lock(&g_lock);
-    memcpy(g_grip_lock, d, sizeof(g_grip_lock));
+    memcpy(g_grip_lock, l, sizeof(g_grip_lock));
     pthread_mutex_unlock(&g_lock);
 }
 
-void vr_grip_lock(float d[3])
+void vr_grip_lock(float l[16])
 {
     pthread_mutex_lock(&g_lock);
-    memcpy(d, g_grip_lock, sizeof(g_grip_lock));
+    memcpy(l, g_grip_lock, sizeof(g_grip_lock));
     pthread_mutex_unlock(&g_lock);
 }
+
+void vr_note_shot(void) { __atomic_store_n(&g_last_shot_ns, mono_ns(), __ATOMIC_RELAXED); }
+int64_t vr_last_shot_ns(void) { return __atomic_load_n(&g_last_shot_ns, __ATOMIC_RELAXED); }
+float vr_recoil_scale(void) { return g_xr.cfg.recoil; }
 
 void vr_arms_grip_config(int *hand_auto, float wrist_offset_m[3])
 {

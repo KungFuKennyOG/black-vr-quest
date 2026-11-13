@@ -37,16 +37,22 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
   game's pose. `never`: hidden.
 - **Auto-grip** (`hand_auto = on`, default): each gun holds the game's right hand somewhere else, and the game's
   animations (idle sway, recoil, reload) move the wrist by up to ~10 cm and 30° (more in reloads). Two parts:
-  - **Per-draw lock:** every bone of the weapon is moved in model space so the game's right wrist is at `wrist_offset`
-    (metres, OpenXR aim space: right, up, back; default 0 -0.03 0.10) from the controller in that very frame. No
-    latency, so the gun cannot drift after the animations; the gun still animates relative to the hand. (Kenny's
-    ef2acc2 test: following the animation slowly, twice per frame, made the gun float around when shooting.)
+  - **Per-draw lock (position and rotation):** every bone of the weapon is moved in model space so the game's right
+    wrist has a fixed pose on the controller in that very frame: position `wrist_offset` (metres, OpenXR aim space:
+    right, up, back; default 0 -0.03 0.10), orientation the weapon's rest orientation (captured once the wrist has
+    turned < 0.4° a frame for 15 frames). The game's sway, recoil and reload swings of the arm are locked out; the gun
+    still animates relative to the hand (slide, magazine). History: ef2acc2 followed the animation slowly (the gun
+    floated after shots); 5c51085 locked the position only, so the recoil's wrist rotation (~30°) spun the gun about
+    the hand ("flying around").
+  - **VR recoil kick** (`recoil`, 0..2, default 1): per shot (`vr_note_shot` from the muzzle flash hook) the target
+    pose pitches up 5° about the wrist and moves back 2.5 cm, decaying with a 60 ms time constant.
+  - The lock L (hand frame) is published (`vr_grip_lock`, 4x4) for the muzzle flash draw (w_hand * L) and main's
+    muzzle effects (back = L * grip^-1). Logcat once a second: `arms: lock (last 60 frames): game moved the wrist up to
+    ... m and turned it up to ... deg, held still`.
   - **Baseline:** the weapon's static offset, exact from its first 45 frames (the game thread records the correction
     each hand frame K was built with), then frozen; the game thread adds it to the grip offset
     (`vr_set_grip_correction`), so the game's own placement is already close.
-  - The muzzle effects (main's a2b9ad0) and the muzzle flash draw use grip - lock (`vr_grip_lock`, the last render's
-    per-draw move), so they start at the drawn muzzle. Harness, rifle firing: the gun holds still in the hand, the
-    flash is at the muzzle.
+  - Harness, rifle firing 30 s: the gun keeps its pose in the hand, flash at the muzzle.
 - **Gripping two-handed:** when the game's own animated left hand is on the gun (its wrist ahead of the hand and near
   the gun line in the gun hand's aim frame), that hold is shown, as BLACK animates it; otherwise (the harness rifle
   keeps it ~40 cm low) the mirrored right hand on the gun line. Logged as `arms: gripping with ...`.
@@ -67,6 +73,7 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
 | `left_hand` | `tracked` / `grip` / `always` / `never` | `tracked` |
 | `hand_auto` | `on` / `off` | `on` |
 | `wrist_offset` | metres from the controller's aim pose to your wrist: right, up, back | `0 -0.03 0.10` |
+| `recoil` | 0..2, the VR kick per shot | `1.0` |
 
 ## Tests
 - `tests/xr_shell/test_arms.c` (50 checks): name roles in the SMG order, joints from inverse binds, the cut is seamless

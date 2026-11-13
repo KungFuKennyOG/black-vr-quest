@@ -583,12 +583,15 @@ static void black_vr_camera_after_world(uint32_t camera)
             bvr.grip = grip;
             bvr.off_ok = bvr.yv_ok;               /* first-person arms: the hand frame is published with the MVP */
             {
-                /* the muzzle flash draw (its own MVP, not skinned with the weapon): where the arms' per-draw wrist
-                 * lock put the drawn gun last render (grip - lock), so the flash sits at the drawn muzzle */
-                float lock[3];
-                vr_grip_lock(lock);
-                bvr.yv_fx_ok = bvr.yv_ok && vgm_weapon_to_hand(bvr.w_head, bvr.w_entity, bvr.w_hand,
-                                                               vrm_sub(grip, vrm_v3(lock[0], lock[1], lock[2])), &bvr.yv_fx);
+                /* the muzzle flash draw (its own MVP, not skinned with the weapon): moved by the arms' wrist lock of
+                 * the last render (L, in the hand frame), so the flash sits at the drawn muzzle */
+                float lf[16];
+                VrMat4 l;
+                int r2, c2;
+                vr_grip_lock(lf);
+                for (r2 = 0; r2 < 4; r2++) for (c2 = 0; c2 < 4; c2++) VRM_AT(l, r2, c2) = lf[r2 * 4 + c2];
+                bvr.yv_fx_ok = bvr.yv_ok && vgm_weapon_to_hand(bvr.w_head, bvr.w_entity, vrm_m4_mul(bvr.w_hand, l), grip,
+                                                               &bvr.yv_fx);
             }
         }
         bvr_fx_capture();                     /* the held effects' next update starts from this */
@@ -847,13 +850,17 @@ static void bvr_fx_capture(void)
     bvr_fxl.x = vrm_m4_mul(bvr.w_head, vrm_m4_mul(bvr.yv, hinv));
     bvr_fxl.back = vrm_m4_identity();                 /* the grip, as vgm_weapon_to_hand takes it off */
     {
-        /* the grip this render used (vm_offset + the first-person arms' auto-grip baseline), less the arms' per-draw
-         * wrist lock (last render's), so the effects start where the drawn gun's muzzle is (port/notes/arms.md) */
-        float lock[3];
-        vr_grip_lock(lock);
-        VRM_AT(bvr_fxl.back, 0, 3) = -(bvr.grip.x - lock[0]);
-        VRM_AT(bvr_fxl.back, 1, 3) = -(bvr.grip.y - lock[1]);
-        VRM_AT(bvr_fxl.back, 2, 3) = -(bvr.grip.z - lock[2]);
+        /* the grip this render used (vm_offset + the first-person arms' auto-grip baseline), then the arms' per-draw
+         * wrist lock L (last render's, in the hand frame), so the effects start at the drawn gun's muzzle */
+        float lf[16];
+        VrMat4 l;
+        int r2, c2;
+        vr_grip_lock(lf);
+        for (r2 = 0; r2 < 4; r2++) for (c2 = 0; c2 < 4; c2++) VRM_AT(l, r2, c2) = lf[r2 * 4 + c2];
+        VRM_AT(bvr_fxl.back, 0, 3) = -bvr.grip.x;
+        VRM_AT(bvr_fxl.back, 1, 3) = -bvr.grip.y;
+        VRM_AT(bvr_fxl.back, 2, 3) = -bvr.grip.z;
+        bvr_fxl.back = vrm_m4_mul(l, bvr_fxl.back);
         (void)cfg;
     }
     bvr_fxl.w_body = bvr.w_body;
@@ -1145,7 +1152,7 @@ static void black_vr_upload_at(uint32_t upload, int reg)
 static void black_vr_upload(uint32_t upload) { black_vr_upload_at(upload, 10); }
 
 /* The player's muzzle flash is being drawn (a shot): a short haptic pulse on the gun hand's controller. */
-static void black_vr_shot_pulse(void) { vr_game_haptic(vr_game_config()->aim_hand & 1, 1.0f, 40u); }
+static void black_vr_shot_pulse(void) { vr_game_haptic(vr_game_config()->aim_hand & 1, 1.0f, 40u); vr_note_shot(); }
 /* ---- the world pass (1EE820 draws the world through the world camera) ------------------------ */
 
 /* Tells the renderer where in the push buffer the world camera's draws begin and end, the way

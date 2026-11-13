@@ -415,9 +415,15 @@ void vr_mark_viewmodel_offhand(const float k[16], const float grip_correction[3]
  * game's right wrist lands at blackvr.ini wrist_offset from the controller (port/notes/arms.md). */
 void vr_set_grip_correction(const float c[3]);
 void vr_grip_correction(float c[3]);
-/* the per-draw wrist lock of the last weapon render (hand frame, game units): the drawn gun sits at grip - lock */
-void vr_set_grip_lock(const float d[3]);
-void vr_grip_lock(float d[3]);
+/* the per-draw wrist lock of the last weapon render: L (row-major 4x4, column vectors) in the gun hand's aim frame
+ * (LH, game units): the drawn gun is the game's gun moved by L in that frame (identity when none) */
+void vr_set_grip_lock(const float l[16]);
+void vr_grip_lock(float l[16]);
+/* Game thread: the player fired (the muzzle flash was drawn). Render thread: the time of the last shot (CLOCK_MONOTONIC
+ * ns, 0 = none) and the recoil kick scale (blackvr.ini recoil). */
+void vr_note_shot(void);
+int64_t vr_last_shot_ns(void);
+float vr_recoil_scale(void);
 
 /* --- The weapon's late latch (render thread) --------------------------------
  * vr_set_render_gun(): what the frame being drawn placed its weapon at
