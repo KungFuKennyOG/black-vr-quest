@@ -82,6 +82,7 @@ static const char k_default_ini[] =
     "bob_filter = 1\n"
     "hud_distance = 2.0       ; metres: the head-locked HUD\n"
     "hud_width = 2.4          ; metres (4:3)\n"
+    "hud_height = -12         ; degrees: the in-game HUD below (-) or above eye level\n"
     "gun_latch = on           ; on | off: the weapon follows the controller at display time\n"
     "# env RECOMP_BLACK_HZ=60\n"
     "# In the headset: Options -> VR SETTINGS (settings_menu = panel: the floating panel instead)\n";
