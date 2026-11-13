@@ -93,6 +93,9 @@ void kvk_get_stats(KvkStats *out);
 /* Wait until every queued vertex/pixel program compile has finished (tests; a pre-start precompile). */
 void kvk_wait_compiles(void);
 
+/* RECOMP_KVK_PASS_MERGE without the environment (tests): 1 on, 0 off. Takes effect at the next render pass. */
+void kvk_set_pass_merge(int on);
+
 #ifdef __cplusplus
 }
 #endif

@@ -58,6 +58,11 @@ set_property(TARGET kelvin_vk PROPERTY POSITION_INDEPENDENT_CODE ON)
 target_include_directories(kelvin_vk PUBLIC ${KVK_DIR}
     PRIVATE ${KVK_XBOXRECOMP_SRC} ${KVK_XBOXRECOMP_SRC}/nv2a ${KVK_XBOXRECOMP_SRC}/platform)
 target_compile_definitions(kelvin_vk PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+# The call-trace recorder (kvk_trace.inc, RECOMP_KVK_TRACE): host builds only (game_render_x86, tests); the headset's
+# library has none of it.
+if(NOT ANDROID)
+    target_compile_definitions(kelvin_vk PRIVATE KVK_TRACE=1)
+endif()
 target_link_libraries(kelvin_vk PUBLIC kelvin_vk_shadergen glslang glslang-default-resource-limits)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i.86")
     target_compile_options(kelvin_vk PRIVATE -msse4.2)        # gfx/kgfx_hash.inc's CRC-32C
