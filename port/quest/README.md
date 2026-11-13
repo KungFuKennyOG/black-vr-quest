@@ -130,8 +130,8 @@ so hip-fired shots are as accurate as the game ever makes them. All settings are
 
 ## 6. Settings in the headset
 
-**Options -> VR SETTINGS.** BLACK's own Options menu (front end, and the pause menu's Options) has one more button,
-**VR SETTINGS**, under the stock ones. It opens a page in the game's own style (its font, selection bar, sounds and
+**Options -> VR SETTINGS.** BLACK's own Options menu on the front end (not the pause menu's Options page) has one
+more button, **VR SETTINGS**, under the stock ones. It opens a page in the game's own style (its font, selection bar, sounds and
 legend): GRAPHICS, COMFORT, GESTURES, INFO, then RECALIBRATE HEIGHT and RESTORE DEFAULTS. In a section, the stick
 moves up/down, **left/right** (or **A**) changes the value, **B** goes back. A value marked "(RESTART)" applies at
 the next start, "N/A" means this headset/runtime lacks what it drives; everything else applies at once. Leaving the

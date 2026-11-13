@@ -97,7 +97,7 @@ static struct {
 } F;
 
 /* counters (diagnostics, tests) */
-static volatile uint32_t g_marks_made, g_marks_failed, g_marks_seen;
+static volatile uint32_t g_marks_made, g_marks_failed, g_marks_seen, g_hud_marks;
 static volatile uint32_t g_vm_recorded, g_vm_dropped, g_vm_frames;
 static uint32_t g_captures;          /* both-eye captures written */
 
@@ -162,16 +162,26 @@ void vr_renderer_shutdown(void)
      * may still be inside the backend, and the process exits right after (xr_main.c). The pipeline cache is
      * saved by the backend every 1800 frames. */
     g_on = 0;
-    GLOG("renderer detached: %u camera marks made (%u refused), %u reached; gun latch: %u weapon MVPs recorded "
-         "(%u dropped), %u frames moved the weapon", g_marks_made, g_marks_failed, g_marks_seen, g_vm_recorded,
+    GLOG("renderer detached: %u camera marks made (%u refused), %u reached, %u HUD marks; gun latch: %u weapon MVPs "
+         "recorded (%u dropped), %u frames moved the weapon", g_marks_made, g_marks_failed, g_marks_seen, g_hud_marks,
+         g_vm_recorded,
          g_vm_dropped, g_vm_frames);
 }
 
-/* Game thread, at the world pass (src/black_vr.inc black_vr_world_mark). */
+/* Game thread, at the world pass (src/black_vr.inc black_vr_world_mark). begin 1: the world camera's draws start;
+ * 2: the game starts drawing its HUD (scripts/generate.py hooks the world draw there), so everything after is HUD
+ * whatever its depth state; 0: the end, no mark. Without the 2 the backend finds the HUD by its first depth-ALWAYS
+ * draw, and HUD boxes drawn before that one (the pickup caption, secondary-objective messages: depth test off)
+ * were taken for world effects and pushed far out into the scene. */
+#define GLUE_VIEW_VR_SCREEN 17          /* kelvin_gfx.h KG_VIEW_VR_SCREEN */
 void vr_mark_world_pass(uint32_t pushbuffer_va, int begin)
 {
     uint32_t k;
-    if (!g_on || !begin) return;        /* the end needs no mark: the backend finds the HUD itself */
+    if (!g_on || !begin) return;
+    if (begin == 2) {
+        if (kelvin_mark_view(pushbuffer_va, GLUE_VIEW_VR_SCREEN, 0, 0, 0, 640, 480)) g_hud_marks++;
+        return;
+    }
     pthread_mutex_lock(&g_ring_lock);
     k = g_ring_next++ % GLUE_RING;
     g_ring[k].cam = *vr_game_camera();  /* what the world pass is drawn with: the newest published camera */
@@ -457,10 +467,11 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
     float off[16];
     if (!g_on || !constants || !vertex_data || !&g_xbox_mem_offset) return false;
     vr_arms_state(&cut, &mode, &engaged);
-    /* the off hand: tracked -> at the off controller, or the game's pose on the gun while gripping; grip -> only while
-     * gripping; always -> the game's pose; never -> hidden */
-    show_off = mode == VR_LEFT_HAND_ALWAYS || ((mode == VR_LEFT_HAND_GRIP || mode == VR_LEFT_HAND_TRACKED) && engaged);
-    if (mode == VR_LEFT_HAND_TRACKED && !engaged && F.marked) {
+    /* the off hand: tracked -> at the off controller, also while gripping (the controller is then on the gun: the game's
+     * own off-hand pose is not on the gun for every weapon, e.g. its rifles keep the left hand at the hip); grip -> the
+     * game's pose, only while gripping; always -> the game's pose; never -> hidden */
+    show_off = mode == VR_LEFT_HAND_ALWAYS || (mode == VR_LEFT_HAND_GRIP && engaged);
+    if (mode == VR_LEFT_HAND_TRACKED && F.marked) {
         pthread_mutex_lock(&g_ring_lock);
         if (g_ring[F.slot].serial == F.mark.serial && g_ring[F.slot].offhand_ok) {
             memcpy(off, g_ring[F.slot].offhand, sizeof(off));
@@ -484,14 +495,22 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
     if (!e->ok) return false;
     /* the model's right arm holds the gun (the gun hand, whichever controller it is on); its left is the off hand */
     {
-        static unsigned logged;
+        static unsigned logged, changes;
+        static int last_engaged = -1;
         int placed = place && vra_place_off_hand(&e->rig, constants, off);
-        if (logged < 6 && (logged < 3 || placed)) {
+        if (engaged != last_engaged && changes < 16) { changes++; last_engaged = engaged; logged = 0; }
+        if (logged < 3) {
             const float *rl = vra_rows(constants, e->rig.wrist[0]), *rr = vra_rows(constants, e->rig.wrist[1]);
             logged++;
-            GLOG("arms: off hand mode %d engaged %d offhand %d placed %d mirror_ok %d | L wrist row-t %.3f %.3f %.3f | R %.3f %.3f %.3f | a t %.3f %.3f %.3f",
-                 mode, engaged, place, placed, e->rig.mirror_ok, rl[3], rl[7], rl[11], rr[3], rr[7], rr[11],
-                 place ? off[3] : 0.0f, place ? off[7] : 0.0f, place ? off[11] : 0.0f);
+            const float *jl = e->rig.joint[e->rig.wrist[0]], *jr = e->rig.joint[e->rig.wrist[1]];
+            float pl[3], pr[3];
+            int r2;
+            for (r2 = 0; r2 < 3; r2++) {
+                pl[r2] = rl[r2 * 4] * jl[0] + rl[r2 * 4 + 1] * jl[1] + rl[r2 * 4 + 2] * jl[2] + rl[r2 * 4 + 3];
+                pr[r2] = rr[r2 * 4] * jr[0] + rr[r2 * 4 + 1] * jr[1] + rr[r2 * 4 + 2] * jr[2] + rr[r2 * 4 + 3];
+            }
+            GLOG("arms: off hand mode %d gripping %d mirror %d placed %d | wrists (model) L %.3f %.3f %.3f  R %.3f %.3f %.3f",
+                 mode, engaged, place, placed, pl[0], pl[1], pl[2], pr[0], pr[1], pr[2]);
         }
         if (placed) show_off = 1;
     }

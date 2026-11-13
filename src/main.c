@@ -596,6 +596,8 @@ static void *black_android_log_pump(void *arg)
     return NULL;
 }
 
+extern void vr_log_sink(VrLogSink sink) __attribute__((weak));   /* the shell's lines into the same file */
+
 static void black_android_stdio_to_logcat(void)
 {
     const char *opt = getenv("BLACKVR_STDIO_LOGCAT"), *file = getenv("BLACKVR_LOG_FILE");
@@ -623,6 +625,8 @@ static void black_android_stdio_to_logcat(void)
             if (black_android_log_file < 0) black_android_log_path[0] = 0;
         }
     }
+    if (black_android_log_file >= 0 && vr_log_sink)
+        vr_log_sink(black_android_log_file_write);
     if (pipe(black_android_log_pipe) != 0)
         return;
     fflush(stdout);

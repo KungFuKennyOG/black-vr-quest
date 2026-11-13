@@ -41,6 +41,9 @@
  *                           game the old one), a settled frame (the game has caught up), and a debug-tint frame;
  *                           meta.json for gun_latch_check.py, which writes gunlatch_before.png / gunlatch_after.png.
  *   GRX_HAND=0              1: the right controller tracked (as GRX_GUN_TEST) without the step
+ *   GRX_HAND_YAW/_PITCH=0   degrees (+ left / up) the right controller is turned in place; the gestures aiml / aimr
+ *                           (yaw +-20) and aimu / aimd (pitch +-12) turn it while held (aim checks)
+ *   GRX_HAND_POS            "x,y,z" metres from the head centre where the right controller is held (0.12,-0.22,-0.35)
  *   GRX_CONTROLS=0          1: both controllers tracked, for the VR controls' gestures (BLACKVR_INPUT_TRACE=1 logs the
  *                           game's side: intents, weapon state, magazine)
  */
@@ -171,6 +174,8 @@ static void trajectory(int64_t t, XrPosef *head, XrPosef eye[2], XrFovf fov[2])
 static int s_hand_on, s_gun_test, s_controls;
 static volatile int s_gun_step;                  /* 0: the base pose; 1: turned by s_gun_yaw about the head centre */
 static double s_gun_yaw = 5.0 * M_PI / 180.0;
+static double s_hand_yaw, s_hand_pitch;          /* GRX_HAND_YAW / GRX_HAND_PITCH, radians */
+static double s_hand_pos[3] = { 0.12, -0.22, -0.35 };   /* GRX_HAND_POS "x,y,z": the right controller from the head */
 static double s_swing_t0 = -1.0;
 static int button_down(const char *name);
 
@@ -183,7 +188,8 @@ static void head_pose_at(XrTime t, XrPosef *head)
 
 static int hand_pose(int hand, int grip, XrTime t, XrPosef *pose)
 {
-    const XrVector3f centre = { 0.0f, 1.6f, 0.0f }, base = { 0.12f, -0.22f, -0.35f };
+    const XrVector3f centre = { 0.0f, 1.6f, 0.0f };
+    const XrVector3f base = { (float)s_hand_pos[0], (float)s_hand_pos[1], (float)s_hand_pos[2] };
     XrQuaternionf q = { 0, 0, 0, 1 };
     XrVector3f r;
     (void)grip;
@@ -201,6 +207,19 @@ static int hand_pose(int hand, int grip, XrTime t, XrPosef *pose)
     if (hand == 1 && s_gun_step) { q.y = (float)sin(s_gun_yaw / 2); q.w = (float)cos(s_gun_yaw / 2); }
     r = q_rot(q, base);
     pose->orientation = q;
+    if (hand == 1) {
+        /* GRX_HAND_YAW / GRX_HAND_PITCH (degrees, + = left / up) and the gestures aiml/aimr (yaw +-20) and aimu/aimd
+         * (pitch +-12): the controller turned in place, its position unchanged (aim checks) */
+        double yaw = s_hand_yaw, pitch = s_hand_pitch;
+        XrQuaternionf qy = { 0, 0, 0, 1 }, qx = { 0, 0, 0, 1 };
+        if (button_down("aiml")) yaw += 20.0 * M_PI / 180.0;
+        if (button_down("aimr")) yaw -= 20.0 * M_PI / 180.0;
+        if (button_down("aimu")) pitch += 12.0 * M_PI / 180.0;
+        if (button_down("aimd")) pitch -= 12.0 * M_PI / 180.0;
+        qy.y = (float)sin(yaw / 2); qy.w = (float)cos(yaw / 2);
+        qx.x = (float)sin(pitch / 2); qx.w = (float)cos(pitch / 2);
+        pose->orientation = q_mul(q, q_mul(qy, qx));
+    }
     pose->position.x = centre.x + r.x; pose->position.y = centre.y + r.y; pose->position.z = centre.z + r.z;
     if (hand == 1) {
         if (button_down("swing")) {
@@ -932,6 +951,9 @@ int main(int argc, char **argv)
     s_exact_hold = (int)envf("GRX_EXACT_HOLD", 0);
     s_hand_on = s_gun_test || (int)envf("GRX_HAND", 0) || s_controls;
     s_gun_yaw = envf("GRX_GUN_YAW", 5.0) * M_PI / 180.0;
+    s_hand_yaw = envf("GRX_HAND_YAW", 0.0) * M_PI / 180.0;
+    s_hand_pitch = envf("GRX_HAND_PITCH", 0.0) * M_PI / 180.0;
+    if (getenv("GRX_HAND_POS")) sscanf(getenv("GRX_HAND_POS"), "%lf,%lf,%lf", &s_hand_pos[0], &s_hand_pos[1], &s_hand_pos[2]);
     if (s_gun_test) { s_sway = 0; if (!getenv("GRX_ROT_AT")) s_rot_at = 1e9; }   /* the head holds still */
     s_sway = (int)envf("GRX_SWAY", s_sway);
     script = getenv("GRX_INPUT") ? getenv("GRX_INPUT") : k_default_script;

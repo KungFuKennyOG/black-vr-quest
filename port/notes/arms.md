@@ -21,8 +21,10 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
 - `vra_apply` collapses palette matrices to a single point (the posed wrist joint):
   - `arms = hands` (default): Shoulder/Elbow/twist of both arms fold into their wrist. The hand stays.
   - the off hand hidden: every bone of the left arm folds to its wrist, so its triangles have no area.
-- `left_hand = tracked` (default): the game's left hand follows the off controller, and takes the game's own pose on
-  the gun while the two-handed grip is engaged (`g_two.engaged`). `grip`: shown only while gripping. `always`: the
+- `left_hand = tracked` (default): the game's left hand follows the off controller, also while the two-handed grip is
+  engaged (the controller is then on the gun, so the glove is on the foregrip). The game's own off-hand pose is not
+  used there: for the rifles it keeps the left wrist about 0.55 m low and level with the camera, out of view
+  (harness, inventory weapon 5446152380DB8000). `grip`: the game's pose, shown only while gripping. `always`: the
   game's pose. `never`: hidden.
 - How the tracked hand is placed: the stock arms are mirror images across model x = 0 (bind pose checked on the gun
   models). The game thread computes A = K^-1 * rel * S * K (`vgm_off_hand_mirror`): K = the gun hand's frame from the

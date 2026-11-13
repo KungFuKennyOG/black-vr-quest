@@ -43,8 +43,8 @@
  *   hud_distance      = 2.0       ; metres: the head-locked HUD / virtual screen
  *   hud_width         = 2.4       ; metres (4:3)
  *   arms              = hands     ; hands: the first-person arms end at the wrists (VR) | full: the game's arms
- *   left_hand         = tracked   ; tracked: the game's off hand follows the off controller, and takes the game's
- *                                 ; pose on the gun while gripping (two-handed) | grip: shown only while gripping
+ *   left_hand         = tracked   ; tracked: the game's off hand follows the off controller (on the gun while
+ *                                 ; gripping two-handed) | grip: the game's pose, shown only while gripping
  *                                 ; | always: the game's pose | never (port/notes/arms.md)
  *   haptic_fire       = 0.7       ; 0..1: shot pulse on the gun hand's controller (0 = off; the game's own rumble stays)
  *   gun_latch         = on        ; on | off: the first-person weapon follows the hand pose latched at display

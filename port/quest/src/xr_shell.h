@@ -29,9 +29,13 @@
 #include "vr_input_map.h"
 
 #define XLOG_TAG "BlackVR"
-#define XLOGI(...) __android_log_print(ANDROID_LOG_INFO, XLOG_TAG, __VA_ARGS__)
-#define XLOGW(...) __android_log_print(ANDROID_LOG_WARN, XLOG_TAG, __VA_ARGS__)
-#define XLOGE(...) __android_log_print(ANDROID_LOG_ERROR, XLOG_TAG, __VA_ARGS__)
+/* Every shell line goes to logcat and into the on-headset log file (logs/blackvr_last.log) once the game has opened
+ * it; lines from before that (PREFLIGHT, the blackvr.ini summary, the display rate, the performance level) are kept,
+ * up to 64 KB, and written then. vr_bridge.c xlog_line; the file side is vr_log_sink (vr_bridge.h). */
+void xlog_line(int prio, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+#define XLOGI(...) xlog_line(ANDROID_LOG_INFO, __VA_ARGS__)
+#define XLOGW(...) xlog_line(ANDROID_LOG_WARN, __VA_ARGS__)
+#define XLOGE(...) xlog_line(ANDROID_LOG_ERROR, __VA_ARGS__)
 
 #define XR_MAX_SWAPCHAIN_IMAGES 8
 

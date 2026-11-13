@@ -13,6 +13,7 @@
 #ifndef VR_BRIDGE_H
 #define VR_BRIDGE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -372,6 +373,11 @@ typedef struct {
     int32_t  session_running, renderer_started;
 } VrDiagCounters;
 void vr_diag_counters(VrDiagCounters *out);
+
+/* The game's on-headset log file, for the shell's own lines (PREFLIGHT, blackvr.ini, display, performance level,
+ * settings): called by the game (src/main.c) once the file is open. Lines logged before are written to it then. */
+typedef void (*VrLogSink)(const char *tag, const char *line, size_t n);
+void vr_log_sink(VrLogSink sink);
 
 /* ======================================================================
  * Additions (gun-latch stream: the first-person weapon follows the hand

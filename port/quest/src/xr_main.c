@@ -83,7 +83,7 @@ static const char k_default_ini[] =
     "hud_distance = 2.0       ; metres: the head-locked HUD\n"
     "hud_width = 2.4          ; metres (4:3)\n"
     "arms = hands             ; hands: the arms end at the wrists | full: the game's whole arms\n"
-    "left_hand = tracked      ; tracked: follows your off controller (on the gun while gripping) | grip | always | never\n"
+    "left_hand = tracked      ; tracked: follows your off controller | grip | always | never\n"
     "haptic_fire = 0.7        ; 0..1: shot pulse on the gun hand (0 = off); the game's own rumble (hits) stays\n"
     "gun_latch = on           ; on | off: the weapon follows the controller at display time\n"
     "# env RECOMP_BLACK_HZ=60\n"
@@ -139,6 +139,15 @@ static void export_config(XrShell *s)
           s->cfg.errors, s->cfg.game.aim_mode == VR_AIM_HAND ? "hand" : "head", (int)s->cfg.input.turn_mode,
           s->cfg.refresh_hz, s->cfg.game_hz, s->cfg.resolution_scale, s->cfg.foveation, s->cfg.raster_workers,
           s->cfg.raster_spin_us);
+    {   /* which file, and its env lines: a log shows whether an edit reached the running game */
+        char envs[900] = "";
+        size_t l = 0;
+        int i;
+        for (i = 0; i < s->cfg.env_count && l + 4 < sizeof(envs); i++)
+            l += (size_t)snprintf(envs + l, sizeof(envs) - l, "%s%s", i ? ", " : "", s->cfg.env[i]);
+        if (l >= sizeof(envs)) l = sizeof(envs) - 1;
+        XLOGI("blackvr.ini: %s/blackvr.ini, %d env line(s)%s%s", s->game_root, s->cfg.env_count, l ? ": " : "", envs);
+    }
 }
 
 /* JNI: on Android 11+ reading a game folder outside the app's own (/sdcard/BlackVR, /sdcard/Download/BlackVR,
