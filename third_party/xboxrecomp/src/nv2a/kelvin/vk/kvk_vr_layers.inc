@@ -64,10 +64,14 @@ static void vrl_relatch(void)
     KvkStereoFrame st;
     KvkFrame *f = cur_frame();
     int i;
-    if (!kvk_vr_stereo_hook(&st, &V.cfg, KVK_VR_PHASE_FLIP)) return;
+    if (!kvk_vr_stereo_hook(&st, &V.cfg, KVK_VR_PHASE_FLIP)) { tr_flip_relatch(false, NULL, false, NULL); return; }
     V.st = st;
     /* gun latch: the weapon's block, with the hand delta latched with these poses (else the frame's own) */
-    if (!kvk_vr_viewmodel_hook(&V.st_vm, &V.cfg, KVK_VR_PHASE_FLIP)) V.st_vm = V.st;
+    {
+        const bool vm_ok = kvk_vr_viewmodel_hook(&V.st_vm, &V.cfg, KVK_VR_PHASE_FLIP);
+        tr_flip_relatch(true, &st, vm_ok, &V.st_vm);
+        if (!vm_ok) V.st_vm = V.st;
+    }
     for (i = 0; i < f->nchunk; i++) {
         if (f->chunk[i].stereo) vrl_write_block(f->chunk[i].b.map + f->chunk[i].stereo_off, &V.st);
         if (f->chunk[i].stereo_vm) vrl_write_block(f->chunk[i].b.map + f->chunk[i].stereo_vm_off, &V.st_vm);
@@ -130,6 +134,7 @@ static void vrl_pass(KvkEyeView *ev, const VrlQuad *q, int nq)
     bi.renderArea.extent.height = ev->h;
     bi.clearValueCount = 1;
     bi.pClearValues = &cv;
+    ipass_begin();
     vkCmdBeginRenderPass(cmd(), &bi, VK_SUBPASS_CONTENTS_INLINE);
     P.pipe = VK_NULL_HANDLE; P.set1 = VK_NULL_HANDLE; P.bound0 = false; P.dyn = false;
     for (i = 0; i < nq; i++) {
@@ -152,6 +157,7 @@ static void vrl_pass(KvkEyeView *ev, const VrlQuad *q, int nq)
         vkCmdDraw(cmd(), 4, 1, 0, 0);
     }
     vkCmdEndRenderPass(cmd());
+    ipass_end(GT_COMPOSE, "a flat/HUD layer image", ev->w, ev->h, 1, LOAD_CLEAR, 0.0, (double)ev->w * ev->h * 4.0 / (1024.0 * 1024.0));
     P.pipe = VK_NULL_HANDLE; P.set1 = VK_NULL_HANDLE; P.bound0 = false; P.dyn = false;
 }
 
@@ -173,9 +179,9 @@ static bool vrl_compose_flat(KvkSurf *main_cs)
     if (kvk_vr_frame_mode() <= 0 || !vr_active() || !vr_acquire_flat_target(&ft)) return false;
     s_vrl.flat = true;
     hud_cs = vrl_hud_surface(main_cs);
+    PASS_END_WHY("the flip (flat composition)", main_cs->va);
     surf_for_read(main_cs);
     if (hud_cs) surf_for_read(hud_cs);
-    pass_end();
     if (!(ev = vrl_target_view(&ft))) return true;
     q[nq].s = main_cs; q[nq].layer = 0; q[nq].opaque = true; q[nq].blend = false; nq++;
     if (hud_cs) { q[nq].s = hud_cs; q[nq].layer = 0; q[nq].opaque = false; q[nq].blend = true; nq++; }
@@ -233,7 +239,7 @@ static void vrl_capture_record(KvkSurf *main_cs, KvkSurf *hud_cs, bool world, ui
         return;
     }
     s_cap.on = true; s_cap.w = w; s_cap.h = h;
-    pass_end();
+    PASS_END_WHY("the capture", 0u);
     barrier(cmd(), &s_cap.img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     compose_pass(ev, 0, main_cs, hud_cs, world);
     barrier(cmd(), &s_cap.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);

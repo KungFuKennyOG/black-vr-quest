@@ -271,6 +271,7 @@ each) costs more than glslang and exists whichever way SPIR-V is produced.
 | `kvk-shadergen` | 400 random combiner configs and 300 random vertex programs (all opcodes, swizzles, negation, write masks, relative addressing, R12/oPos aliasing, constant writes refused) compile with glslang. After a fixed HLSL→GLSL spelling map, their bodies are **text-identical** to what the production D3D11 generators (extracted from `kelvin_gpu_pss.inc`/`kelvin_gpu_vsh.inc` by `extract_d3d.py`) emit. The PS key equals `ps_key_of`. All fixed shaders compile. Position classification is checked on hand-written programs. Mutation check: changing one constant in the GLSL generator fails 255 configs. | pass (native + arm64) |
 | `kvk-backend-cpu-parity` | 384 random combiner configs (1–4 stages, final combiner, swizzled/linear/DXT1 textures, projective coords, alpha test, alpha kill, colour keys) are drawn through `kgpu_draw` and through `kpix_fragment`/`ktex_*` (Kelvin's CPU renderer), byte-compared. Then 384 random vertex programs on the GPU path vs the `nv2a_vsh_cpu` emulator. Plus every attribute format (CMP, UB_D3D, UB_OGL, S1, F, S32K, unaligned), depth test LESS/GREATER, masked and partial clears, depth-as-colour (Z24S8 packing). | specialised shaders, MSB mux: **0/384 differ, max 1/255**. Random mux: 3/384 (see 8). Vertex programs: 3/384 beyond 2/255 (RSQ precision, one SLT boundary). |
 | `kvk-backend-uber` | Same combiner comparison with the ubershader, DXT decoded on the CPU (Quest has no BC). | MSB: 0/384, max 1/255 |
+| `kvk-backend-passes` | A BLACK-shaped frame (world, glows, sprite, depth read as colour by side work, a sprite joining the parked main pass, the main target sampled into a 160x120 target, composite, a late depth-tested draw) drawn with `RECOMP_KVK_PASS_MERGE` off and on, poisoning on (section 13). | byte-identical main and glare targets, 10 passes -> 6 |
 | `kvk-backend-stereo` | Stereo multiview with a fake shell (`vr_*` strong symbols) and an Xbox-style transform program. Each eye's quad centre matches trigonometry within 0.2 px (136.00 vs 136.19 px, 120.00 vs 119.81 px). The HUD is auto-detected, kept out of the world layers, and appears on the virtual screen in both eye images at the expected place and parallax (within 0.2 px). A menu frame goes on the virtual screen. The eye targets are released once per flip. | pass |
 
 ## 8. Findings in existing code (not changed)
@@ -445,6 +446,172 @@ column next to a building) was still wrong.
 - **Harness:** `GRX_INPUT` buttons `lc`/`rc` (thumbstick clicks), `rt`/`lt` (triggers). Captures land in
   `<scratch>/root/shots`. vr_glue checks that a requested capture's PNGs equal the released eye images (worst
   difference 0) in both swapchain modes.
+
+## 13. Render passes on the tiler: pass map, merging, GPU timers (2026-11-13)
+
+Why: at resolution_scale 1.2 the headset is GPU-bound (bx-pusher ~50% busy, waiting on the GPU), and a fragment
+density map made things slower (branch `foveation`). The working hypothesis was that the main target is ended and
+reopened ~3 times per frame, each a full LOAD/STORE round trip through memory on Adreno's tiler.
+
+### 13.1 The pass map (measured, level 1 start room)
+
+Recorded with the call trace (13.4) in game_render_x86 and replayed with `RECOMP_KVK_PASSLOG=1`; one steady stereo
+frame (both eyes are one multiview pass on a 2-layer image, so "per eye" = the same passes). C = main colour
+(BGRA8), Z = main depth (D24S8 on the Quest), both 2 layers at the eye size.
+
+| # | Before (`RECOMP_KVK_PASS_MERGE=0`) | Ops (C / Z) | Why it ends |
+|---|---|---|---|
+| 1 | 64x32 target (3 draws) | CLEAR / - | sampled later |
+| 2 | **world** C+Z, 734 draws | CLEAR/STORE, CLEAR/STORE | the glare chain samples Z (depth read as colour) |
+| 3 | d2c: Z -> RGBA8 at full eye size | DONTCARE/STORE | (internal) |
+| 4-7 | glare: Z downsampled to 160x120 / 80x60, colour->depth (c2d), 6 glare sources depth-tested at 160x120 | small | |
+| 8 | **reopen** C+Z: 10 particle/smoke/fire sprites (3516849B, depth-tested, no write) | LOAD/STORE, LOAD/STORE | a draw on another target (the glare chain goes on) |
+| 9-15 | glare blur steps (F833FAD3, 8ADAFB52 ping-pong 160x120/80x60) | small | |
+| 16 | **reopen** C only: the glare composite (A82C1860, full-screen, additive) | LOAD/STORE | a draw needs Z again |
+| 17 | **reopen** C+Z: 3 depth-writing draws (the weapon) | LOAD/STORE, LOAD/STORE | a draw samples its own target |
+| - | feedback copy: vkCmdCopyImage C -> copy (full size) | | |
+| 18 | **reopen** C only: one full-screen blended pass (94EDF4FB) reading the copy of C | LOAD/STORE | the HUD (another target) |
+| 19 | HUD 1280x960 mono, colour + depth | CLEAR/STORE | the flip |
+| 20 | HUD quad-layer copy 1280x960 | CLEAR/STORE | |
+| 21 | composition into the eye images | DONTCARE/STORE | |
+
+So the main target is opened **5 times** per frame (4 of them loading C, 2 loading Z), not 3. The particles do
+cause a reopen, but only because the glare chain cut the world pass for its depth read; the glare composite, the
+weapon and a full-screen pass that reads its own target (94EDF4FB, via a full-size feedback copy) cause the rest.
+
+Attachment traffic of that frame (`tests/kelvin_vk/pass_traffic.py` on the replay's pass log, a tiler's view: LOAD
+reads an attachment in, STORE writes it out, CLEAR/DONT_CARE move nothing; textures, copies and the composition's
+reads come on top):
+
+| Eye size (device) | Before | After (default) | Saved |
+|---|---|---|---|
+| 1680x1760 (resolution_scale 1.0) | 378 MiB/frame, 21 passes | 242 MiB/frame, 18 passes | 136 MiB (36%) |
+| 2016x2112 (1.2) | 537 MiB/frame | 342 MiB/frame | 196 MiB (36%) |
+
+At 60 frames/s that is 22 -> 14 GiB/s at 1.0 and 31 -> 20 GiB/s at 1.2. Full-size traffic outside the attachments,
+unchanged: the d2c pass reads Z (1 unit = 22.6 MiB at 1.0, 32.5 at 1.2), the feedback copy reads and writes C (2), the
+94EDF4FB pass reads the copy (1), the composition reads C (1). Eye sizes from the device logs: `host raster 1680x1760`
+(1.0) and `2016x2112` (1.2); the eye swapchain is the raster size (xr_session.c).
+
+### 13.2 What changed (`RECOMP_KVK_PASS_MERGE`, default on)
+
+After: the main target is opened **3 times** (world+particles, composite+weapon, the 94EDF4FB pass).
+
+1. **Parking** (`kvk_backend.c`, "parking"): when the open main pass (C, Z) must end for side work that does not read
+   C and does not write C or Z (here: the glare chain reading Z), the pass is left open in its command buffer and the
+   side work is recorded into a new primary command buffer of the same frame, submitted after it. A later draw or
+   clear on C that samples no render target, and does not write Z once the side work has read Z, joins the parked
+   pass: it executes before the side work, which gives the same result because the side work never sees C and sees Z
+   unchanged. Anything else that touches C or Z (a draw sampling a render target, a clear outside a pass, a copy, the
+   flip, a readback, the frame's end) closes the parked pass first ("unpark") and recording goes on in the side
+   stream. Layouts stay consistent: the parked pass keeps C and Z in attachment layouts, which is where the side
+   work's first barrier on Z starts. Up to 6 parkings per frame (`KVK_XSTREAMS`). Result: the 10 particle draws join
+   the world pass (pass 8 gone).
+2. **Depth attached at a reopen** (learned from the last frame): the k-th colour-only (re)open of the main target in a
+   frame gets Z attached (LOAD/STORE, contents kept) if in the last frame that open was followed directly by a
+   depth-using draw on C. The glare composite and the weapon then share one pass (pass 16 merged into 17). A wrong
+   guess costs a depth load and store, never a different picture. Learned per frame for "the main target" (the
+   title's two back buffers alternate).
+3. **Depth kept for colour-only draws**: a draw on the open pass's colour target without depth or stencil test keeps
+   the pass (its depth stays attached, untouched: no test, no write) instead of ending it. Exact and free; it does
+   not occur in the measured frames (their colour-only draws come right after other targets), but glows and fades
+   drawn mid-world would hit it.
+
+Not done (each needs a decision the recorder cannot make yet; see 13.6): DONT_CARE stores of Z at the end of the
+frame, removing the feedback copy, a cheaper d2c.
+
+Pipelines: draws that now run in a pass with Z attached (the glare composite) use the (C, Z) render-pass variant of
+their pipeline. On the headset with async pipelines such a draw is skipped for the frame or two its pipeline takes
+the first time, then the pipeline manifest has it for the next start.
+
+### 13.3 Switches (environment; on the headset `env NAME=value` lines in blackvr.ini)
+
+| Switch | Default | What |
+|---|---|---|
+| `RECOMP_KVK_PASS_MERGE` | 1 | 0: the pass structure exactly as before (no parking, no attaching, no keeping) |
+| `RECOMP_KVK_GPUTIME` | 0 | 1: GPU timestamps around every render pass, per-stage ms in a `GPUTIME` line every 10 s |
+| `RECOMP_KVK_PASSLOG`, `_FRAME`, `_EVERY` | 0, 600, 0 | one `PASS` line per pass of frame `_FRAME` (and every `_EVERY`-th frame): target, size, layers, load/store ops, draws, why it ended; `parked`/`unparked` lines |
+| `RECOMP_KVK_TRACE`, `_N`, `_EVERY` | off | host builds only (`KVK_TRACE`): record the backend's calls (13.4) |
+| `RECOMP_KVK_POISON` | 0 | test aid: an attachment a main pass stores with DONT_CARE is overwritten with garbage right after the pass |
+| `RECOMP_KVK_SYNC_COMPILE` | 0 | test aid: shader compiles on the calling thread (deterministic replays) |
+
+### 13.4 Proof: recorded traces replayed both ways
+
+Two live harness runs are not comparable (game time follows the wall clock), so the comparison is made on recorded
+input:
+
+- **Trace** (`kvk_trace.h`, `kvk_trace.inc`; built only without `__ANDROID__`): `RECOMP_KVK_TRACE=<dir>` arms it; a
+  file `<dir>/now` (or `_EVERY`) starts a trace at the next flip, `_N` flips long. It holds every `kgpu_*` call with
+  deep copies of what it reads (vertex arrays or records, indices, constants, texture and palette bytes, deduplicated
+  by content), the vertex programs' microcode, and every answer of the VR glue (first-draw and flip stereo
+  transforms, frame mode, gun-latch classification, which shell targets the flip got). Level 1: 10-16 MB per flip
+  (textures are written once per trace), menus 0.15 MB.
+- **Replay** (`tests/kelvin_vk/kvk_replay.c`, target `kvk-replay`): a fresh backend on SwiftShader, the glue's answers
+  replayed, compiles synchronous (`RECOMP_KVK_SYNC_COMPILE=1`, `RECOMP_KGPU_PIPE_ASYNC=0`); after every flip both eye
+  layers, the flat and HUD layer images and both layers of the flipped main target are read back and written, or
+  compared byte for byte with a reference run's (`--compare`).
+- **A/B** (`tests/kelvin_vk/replay_ab.sh`): reference with `RECOMP_KVK_PASS_MERGE=0`, then
+  `RECOMP_KVK_PASS_MERGE=1 RECOMP_KVK_POISON=1`. Poisoning overwrites an attachment stored with DONT_CARE with garbage,
+  so a wrong DONT_CARE would show even on SwiftShader (which otherwise keeps attachment contents whatever the op
+  says). The merging above adds no DONT_CARE (every merged pass loads and stores what it did before); the poisoning is
+  in place for the next step (13.6).
+- **Unit test** `kvk-backend-passes` (ctest): a synthetic BLACK-shaped frame (world, glows, sprite, depth read as
+  colour by side work, a sprite joining the parked pass, the main target sampled, composite, a late depth-tested
+  draw) drawn with merging off and on, with poisoning: main and glare targets byte-identical, 10 passes -> 6.
+
+Results (2026-11-13; local `build-logs/replay-ab-final.txt`, traces from two game_render_x86 runs, 480x512 eyes;
+the traces hold game data and stay local):
+23 traces, 61 flips, **291 pictures, every one byte-identical** (largest channel difference 0): 54 flips x (both eye
+layers + the HUD layer image), 7 flat-menu flips (the flat layer image), 61 x both layers of the flipped main target.
+
+| Scene | Traces (first frame) | Main target opens per frame, before -> after | Result |
+|---|---|---|---|
+| Front-end menu (flat: START MISSION / OPTIONS) | 1292, 1736 | 1 -> 1 | identical |
+| Level 1 first stereo frames (behind the intro card) | 3266 | 4 -> 3 | identical |
+| Level 1 start room, HUD, fire and smoke through the windows (glare chain active) | 3341, 2403, 2409, 2416, 2426 | 5 -> 3 | identical |
+| Firing: muzzle flash, its glare, gun smoke | 3365, 2391, 3627, 3775 | 4-5 -> 3 | identical |
+| Walking / turning in the room | 3439, 3544, 2438-2558 | 4-5 -> 3 | identical |
+| Pause menu | not reached: in VR the Menu tap is a timed gesture (vr_input_map.h) and at 3-5 s per harness frame it did not pause the game; a pause frame is a FLAT_MENU frame like the front-end menu (one main pass + the flat layer copy) | | |
+| Level 1 street | not reached: the scripted walk stayed in the start room; its fire and smoke are visible through the windows in the frames above | | |
+
+"After" counts come from 2-3 flip traces, so their first flip has nothing learned yet (4 opens); the per-trace
+averages printed by `replay_ab.sh` are 3.33-3.50 for that reason, steady state is 3. Live game (game_render_x86 with
+the change, 227 stereo frames): `PASSES ... main target opened 3.00x ... 1.00 parked (9-10 draws joined)`, no Vulkan
+or backend errors in the log (the validation layers are not installed on this host, so they did not run).
+
+### 13.5 What to look at in the device log
+
+- Every 10 s, next to `[KVK] frames ...` (and the shell's HEARTBEAT): `[KVK] PASSES 10.0 s, N frames (M stereo), pass
+  merge on: per frame P passes, main target opened Ox (L loading it), depth loaded/stored, est. attachment traffic X MiB
+  ... | merging: ... parked (J draws joined)`. In level 1 expect about 18 passes, O = 3 (5 with
+  `RECOMP_KVK_PASS_MERGE=0`) and X about 242 MiB at 1.0 / 342 MiB at 1.2 (378 / 537 without merging); menus: 2 passes,
+  O = 1. The traffic is an estimate from load/store ops, not a measurement.
+- With `env RECOMP_KVK_GPUTIME=1`: `[KVK] GPUTIME N frames, ms/frame: total T (worst W) | world fx glare hud compose
+  other | between passes`. "world" is a main-target pass with depth writes (with merging it holds the particles
+  too), "fx" main-target passes without depth writes (the menus' one pass shows here), "glare" the 160x120/80x60 chain and the d2c pass, "compose" the
+  eye images and layer copies, "between" copies/clears/barriers. Compare T with and without
+  `env RECOMP_KVK_PASS_MERGE=0` at resolution_scale 1.2 in the same spot, together with HEARTBEAT fps and the bx-pusher
+  busy share (a GPU-bound frame shows bx-pusher waiting).
+- The timers cost 2 timestamps per pass outside render passes (none inside a multiview pass); leave them off for fps
+  measurements, on for the stage split.
+
+### 13.6 Next (not done)
+
+- **End-of-frame depth store**: Z's last store each frame (pass 17) is dead if the next frame clears Z first (it
+  always does in the traces) - 22.6 MiB/frame at 1.0, 32.5 at 1.2. Within a frame every remaining store is needed, so
+  this needs knowledge of the next frame: a prediction learned over frames (a wrong guess shows garbage depth for one
+  frame on a tiler), which is why it was left out of the default. Same for the HUD depth (4.7 MiB).
+- **94EDF4FB feedback**: a full-screen alpha-blended pass (SRC_ALPHA / ONE_MINUS_SRC_ALPHA, RGB only) that samples its
+  own target through a full-size copy (copy 2 units + reopen 2 units, ~90 MiB/frame at 1.0). It reads 1:1: its
+  vertices have oT0 == oPos (0,0 / 1280,0 / 0,960: one triangle over the 640x480 target, rect texture 640x480;
+  `RECOMP_KVK_PASSLOG` prints them as "feedback draw vertex" lines), so every fragment samples its own pixel. Reading
+  the pixel as an input attachment (subpass self-dependency) inside the composite+weapon pass would remove the copy
+  and the reopen: main target opened twice per frame. Needs a combiner shader variant (input attachment instead of
+  texture stage 0) and a main render pass with the self-dependency (all main pipelines would change compatibility).
+- **d2c at full size** for one 160x120 downsample: sampling Z directly in that draw's shader (packing in the shader)
+  would drop a full-size store and read; exact only for point sampling.
+- `VK_EXT_load_store_op_none` (if the Quest driver has it): an attached-but-unused depth at LOAD_OP_NONE/STORE_OP_NONE
+  costs nothing, which would make attaching Z to every main reopen free.
 
 ## 10. Requests
 

@@ -841,6 +841,155 @@ static void test_depth_as_color(void)
     free(a.cpu); free(a.zcpu); free(b.cpu); free(b.zcpu);
 }
 
+/* ---- render pass structure (RECOMP_KVK_PASS_MERGE) ---- */
+
+/* A frame shaped like BLACK's: the world (depth-tested, written), a glow without depth test, a depth-tested sprite, a
+ * second glow, then the glare chain (the main target sampled into a 160x120 target) composited back without depth,
+ * then a depth-tested draw after it. Drawn with pass merging off and on: the same pixels, fewer passes. */
+static uint64_t pass_scene(Tgt *m, Tgt *gl, uint8_t *out, unsigned int hw, unsigned int hh)
+{
+    KPixelState ps;
+    Quad q;
+    KvkStats a, b;
+    unsigned int w = 0, h = 0;
+    int i;
+    kvk_get_stats(&a);
+    kgpu_note_kick();
+    clear_both(m, 0xFF101010u, 640, 480);
+    clear_both(gl, 0xFF000000u, 160, 120);
+    memset(&q, 0, sizeof(q));
+    for (i = 0; i < 4; i++) q.t[i][3] = 1.0f;
+    /* the world: red at z 0.5 over the left two thirds */
+    ps_base(&ps, 640, 480);
+    ps.num_stages = 1;
+    final_passthrough(&ps, 4);
+    ps.depth_test = true; ps.depth_write = true; ps.depth_func = 3;          /* LEQUAL */
+    q.d0[0] = 0.8f; q.d0[3] = 1.0f;
+    q.x0 = 0; q.y0 = 0; q.x1 = 420; q.y1 = 480; q.z = 0.5f * 16777215.0f;
+    gpu_quad(m, &ps, &q);
+    /* a glow: no depth test, additive green */
+    ps.depth_test = false; ps.depth_write = false;
+    ps.blend = true; ps.blend_sfactor = 1; ps.blend_dfactor = 1; ps.blend_eqn = 2;   /* ONE, ONE, ADD */
+    q.d0[0] = 0.0f; q.d0[1] = 0.25f; q.d0[2] = 0.0f;
+    q.x0 = 100; q.y0 = 100; q.x1 = 500; q.y1 = 300; q.z = 0.9f * 16777215.0f;
+    gpu_quad(m, &ps, &q);
+    /* a sprite: depth-tested behind the world (hidden there), no depth write, alpha blended blue */
+    ps.depth_test = true; ps.depth_write = false; ps.depth_func = 3;
+    ps.blend_sfactor = 4; ps.blend_dfactor = 5;                                /* SRC_ALPHA, ONE_MINUS_SRC_ALPHA */
+    q.d0[0] = 0.0f; q.d0[1] = 0.0f; q.d0[2] = 1.0f; q.d0[3] = 0.5f;
+    q.x0 = 300; q.y0 = 200; q.x1 = 640; q.y1 = 400; q.z = 0.7f * 16777215.0f;
+    gpu_quad(m, &ps, &q);
+    /* a second glow */
+    ps.depth_test = false;
+    ps.blend_sfactor = 1; ps.blend_dfactor = 1;
+    q.d0[0] = 0.1f; q.d0[1] = 0.0f; q.d0[2] = 0.1f; q.d0[3] = 1.0f;
+    q.x0 = 0; q.y0 = 350; q.x1 = 640; q.y1 = 480; q.z = 0.1f * 16777215.0f;
+    gpu_quad(m, &ps, &q);
+    /* side work that reads the main depth as colour into the glare target (the main pass is parked across it) */
+    {
+        KPixelState sp;
+        Quad sq;
+        ps_base(&sp, 160, 120);
+        sp.num_stages = 1;
+        final_passthrough(&sp, 8);
+        sp.tex_mode[0] = PS_TEXTUREMODES_PROJECT2D;
+        memset(&sp.tex[0], 0, sizeof(sp.tex[0]));
+        sp.tex[0].valid = true; sp.tex[0].kind = TK_8888; sp.tex[0].bpp = 4; sp.tex[0].linear = true;
+        sp.tex[0].base = m->t.zeta_va; sp.tex[0].width = 640; sp.tex[0].height = 480; sp.tex[0].pitch = 640 * 4;
+        sp.tex[0].levels = 1; sp.tex[0].level_w[0] = 640; sp.tex[0].level_h[0] = 480; sp.tex[0].mem = m->zcpu;
+        sp.tex[0].addr[0] = sp.tex[0].addr[1] = 3; sp.tex[0].min_filter = 1; sp.tex[0].mag_filter = 1;
+        sp.rect_tex[0] = true;
+        memset(&sq, 0, sizeof(sq));
+        sq.x0 = 0; sq.y0 = 0; sq.x1 = 160; sq.y1 = 60;
+        sq.t[0][0] = 200.0f; sq.t[0][1] = 200.0f; sq.t[0][3] = 1.0f;       /* a texel of the world's depth */
+        gpu_quad(gl, &sp, &sq);
+    }
+    /* a sprite after the side work: depth-tested, no depth write (joins the parked pass) */
+    ps.depth_test = true; ps.depth_write = false; ps.depth_func = 3;
+    ps.blend_sfactor = 4; ps.blend_dfactor = 5;
+    q.d0[0] = 0.0f; q.d0[1] = 0.6f; q.d0[2] = 0.6f; q.d0[3] = 0.5f;
+    q.x0 = 200; q.y0 = 420; q.x1 = 600; q.y1 = 470; q.z = 0.4f * 16777215.0f;
+    gpu_quad(m, &ps, &q);
+    /* the glare chain: the main target sampled into the 160x120 target */
+    ps_base(&ps, 160, 120);
+    ps.num_stages = 1;
+    final_passthrough(&ps, 8);                                               /* the pixel is texture 0 */
+    ps.tex_mode[0] = PS_TEXTUREMODES_PROJECT2D;
+    memset(&ps.tex[0], 0, sizeof(ps.tex[0]));
+    ps.tex[0].valid = true; ps.tex[0].kind = TK_8888; ps.tex[0].bpp = 4; ps.tex[0].linear = true;
+    ps.tex[0].base = m->t.color_va; ps.tex[0].width = 640; ps.tex[0].height = 480; ps.tex[0].pitch = 640 * 4;
+    ps.tex[0].levels = 1; ps.tex[0].level_w[0] = 640; ps.tex[0].level_h[0] = 480; ps.tex[0].mem = m->cpu;
+    ps.tex[0].addr[0] = ps.tex[0].addr[1] = 3; ps.tex[0].min_filter = 1; ps.tex[0].mag_filter = 1;
+    ps.rect_tex[0] = true;
+    memset(&q, 0, sizeof(q));
+    q.x0 = 0; q.y0 = 0; q.x1 = 160; q.y1 = 120;
+    q.t[0][0] = 320.0f; q.t[0][1] = 240.0f; q.t[0][3] = 1.0f;                /* one texel: the middle */
+    gpu_quad(gl, &ps, &q);
+    /* composited back over the main target, additive, no depth */
+    ps_base(&ps, 640, 480);
+    ps.num_stages = 1;
+    final_passthrough(&ps, 8);
+    ps.tex_mode[0] = PS_TEXTUREMODES_PROJECT2D;
+    memset(&ps.tex[0], 0, sizeof(ps.tex[0]));
+    ps.tex[0].valid = true; ps.tex[0].kind = TK_8888; ps.tex[0].bpp = 4; ps.tex[0].linear = true;
+    ps.tex[0].base = gl->t.color_va; ps.tex[0].width = 160; ps.tex[0].height = 120; ps.tex[0].pitch = 160 * 4;
+    ps.tex[0].levels = 1; ps.tex[0].level_w[0] = 160; ps.tex[0].level_h[0] = 120; ps.tex[0].mem = gl->cpu;
+    ps.tex[0].addr[0] = ps.tex[0].addr[1] = 3; ps.tex[0].min_filter = 1; ps.tex[0].mag_filter = 1;
+    ps.rect_tex[0] = true;
+    ps.blend = true; ps.blend_sfactor = 1; ps.blend_dfactor = 1; ps.blend_eqn = 2;
+    q.x0 = 0; q.y0 = 0; q.x1 = 320; q.y1 = 240;
+    q.t[0][0] = 80.0f; q.t[0][1] = 60.0f; q.t[0][3] = 1.0f;
+    gpu_quad(m, &ps, &q);
+    /* a depth-tested draw after it (the weapon): only where it is in front of the world */
+    ps_base(&ps, 640, 480);
+    ps.num_stages = 1;
+    final_passthrough(&ps, 4);
+    ps.depth_test = true; ps.depth_write = true; ps.depth_func = 1;          /* LESS */
+    memset(&q, 0, sizeof(q));
+    for (i = 0; i < 4; i++) q.t[i][3] = 1.0f;
+    q.d0[0] = 1.0f; q.d0[1] = 1.0f; q.d0[3] = 1.0f;
+    q.x0 = 380; q.y0 = 0; q.x1 = 640; q.y1 = 100; q.z = 0.6f * 16777215.0f;
+    gpu_quad(m, &ps, &q);
+    CHECK(kvk_read_surface(m->t.color_va, 0, out, (size_t)hw * 4, &w, &h, (size_t)hw * hh * 4) && w == hw && h == hh,
+          "pass scene: readback %ux%u", w, h);
+    kvk_get_stats(&b);
+    /* the glare target after it all (what the side work drew from the depth, then the main colour), after the main */
+    CHECK(kvk_read_surface(gl->t.color_va, 0, out + (size_t)hw * hh * 4, 160 * 4, &w, &h, 160 * 120 * 4) && w == 160 && h == 120,
+          "pass scene: glare readback %ux%u", w, h);
+    return b.passes - a.passes;
+}
+
+static void test_passes(void)
+{
+    const unsigned int hw = 160, hh = 120;            /* the raster this mode runs at */
+    Tgt m, gl;
+    const size_t bytes = ((size_t)hw * hh + 160 * 120) * 4;      /* the main target, then the glare target */
+    uint8_t *off = (uint8_t *)calloc(bytes, 1), *on = (uint8_t *)calloc(bytes, 1);
+    uint64_t n_off, n_on;
+    size_t i, diff = 0;
+    int px;
+    tgt_init(&m, 0x06000000u, 0x06100000u, 640, 480);
+    tgt_init(&gl, 0x06200000u, 0, 160, 120);
+    kvk_set_pass_merge(0);
+    n_off = pass_scene(&m, &gl, off, hw, hh);
+    kvk_set_pass_merge(1);
+    n_on = pass_scene(&m, &gl, on, hw, hh);
+    for (i = 0; i < bytes; i++) diff += off[i] != on[i];
+    printf("pass scene: %llu passes without merging, %llu with\n", (unsigned long long)n_off, (unsigned long long)n_on);
+    CHECK(diff == 0, "pass scene: merged and unmerged pictures differ in %zu bytes", diff);
+    CHECK(n_on < n_off, "pass scene: merging saved no pass (%llu vs %llu)", (unsigned long long)n_on, (unsigned long long)n_off);
+    /* the scene drew what it should: the world red, the glow added in green, the composite added in the corner */
+    px = (int)((60 * hw / 480) * hw + (200 * hw / 640));                       /* guest (200, 60): world + glare */
+    CHECK(on[px * 4 + 2] > 150, "pass scene: world red at (200,60): %02X%02X%02X", on[px * 4 + 2], on[px * 4 + 1], on[px * 4]);
+    px = (int)((150 * hh / 480) * hw + (200 * hw / 640));                      /* guest (200, 150): world + glow */
+    CHECK(on[px * 4 + 1] >= 0x3F, "pass scene: glow green at (200,150): %02X", on[px * 4 + 1]);
+    px = (int)((300 * hh / 480) * hw + (550 * hw / 640));                      /* guest (550, 300): the sprite over the clear */
+    CHECK(on[px * 4] > 0x60, "pass scene: sprite blue at (550,300): %02X", on[px * 4]);
+    px = (int)((50 * hh / 480) * hw + (600 * hw / 640));                       /* guest (600, 50): the late depth-tested draw */
+    CHECK(on[px * 4 + 2] > 0xF0 && on[px * 4 + 1] > 0xF0, "pass scene: late draw yellow at (600,50)");
+    free(off); free(on); free(m.cpu); free(m.zcpu); free(gl.cpu); free(gl.zcpu);
+}
+
 /* ---- stereo ---- */
 
 static VkImage s_eye_img;
@@ -1085,6 +1234,11 @@ int main(int argc, char **argv)
         g_vr_on = 1;
         kvk_set_stereo(true);
         kvk_set_raster_size(256, 192);
+    } else if (!strcmp(mode, "passes")) {
+        kvk_set_stereo(false);
+        kvk_set_raster_size(160, 120);
+        setenv("RECOMP_KVK_SYNC_COMPILE", "1", 1);      /* the same shaders in both runs (no ubershader race) */
+        setenv("RECOMP_KVK_POISON", "1", 1);            /* a wrong DONT_CARE shows */
     } else {
         kvk_set_stereo(false);
         kvk_set_raster_size(640, 480);
@@ -1094,6 +1248,8 @@ int main(int argc, char **argv)
     kgpu_note_kick();
     if (!strcmp(mode, "stereo")) {
         test_stereo();
+    } else if (!strcmp(mode, "passes")) {
+        test_passes();
     } else if (!strcmp(mode, "uber")) {
         printf("device BC textures: %s\n", bc ? "native" : "decoded on the CPU");
         test_combiners(false, true);

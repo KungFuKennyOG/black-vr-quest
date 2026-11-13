@@ -5,7 +5,10 @@
 #   kvk-backend    (host only) the whole backend on a Vulkan device (SwiftShader works): draws compared pixel by
 #                  pixel with Kelvin's own CPU renderer (kelvin_pixel.c, kelvin_texture.c) and the NV2A vertex
 #                  program emulator (nv2a_vsh_cpu); stereo/multiview, the VR composition, HUD redirection, clears,
-#                  depth reinterpretation. Skipped (exit 77) without a Vulkan device.
+#                  depth reinterpretation; "passes": a BLACK-shaped frame drawn with RECOMP_KVK_PASS_MERGE off and on
+#                  (byte-identical pictures, fewer render passes). Skipped (exit 77) without a Vulkan device.
+#   kvk-replay     (host only, not a ctest) a recorded game trace replayed for bit-exact A/B comparisons
+#                  (replay_ab.sh, pass_traffic.py; port/notes/renderer.md section 13).
 #   kvk_linkcheck  (Android) libkvk_linkcheck.so: the static kelvin_vk library linked with --no-undefined against
 #                  the NDK's libvulkan, every public entry point referenced.
 # With /root/xtool/android-arm64-static.cmake the arm64 kvk-stereo and kvk-shadergen run under QEMU (ctest).
@@ -66,7 +69,16 @@ add_executable(kvk-backend test_backend.c)
 target_include_directories(kvk-backend PRIVATE ${XSRC} ${XSRC}/nv2a ${XSRC}/platform ${KEL} ${KEL}/vk)
 target_compile_definitions(kvk-backend PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(kvk-backend PRIVATE kelvin_vk kvk_test_cpuref kvk_test_vsh m)
-foreach(mode cpu-parity uber stereo)
+# kvk-replay: a recorded backend call trace (RECOMP_KVK_TRACE in game_render_x86) drawn on a fresh backend, the
+# pictures written or compared with a reference run's (port/notes/renderer.md section 13). Not a ctest: traces hold
+# game data and stay local.
+add_executable(kvk-replay kvk_replay.c)
+target_include_directories(kvk-replay PRIVATE ${XSRC} ${XSRC}/nv2a ${XSRC}/platform ${KEL} ${KEL}/vk)
+target_compile_definitions(kvk-replay PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(kvk-replay PRIVATE -Wall -Wno-unused-parameter -Wno-missing-field-initializers)
+target_link_libraries(kvk-replay PRIVATE kelvin_vk kvk_test_vsh m)
+
+foreach(mode cpu-parity uber stereo passes)
     add_test(NAME kvk-backend-${mode} COMMAND kvk-backend ${mode})
     set_tests_properties(kvk-backend-${mode} PROPERTIES SKIP_RETURN_CODE 77)
     if(KVK_TEST_ICD)

@@ -15,6 +15,7 @@ typedef void (*AnyFn)(void);
 __attribute__((visibility("default"))) const AnyFn kvk_linkcheck_table[] = {
     (AnyFn)kvk_set_device, (AnyFn)kvk_set_raster_size, (AnyFn)kvk_set_stereo, (AnyFn)kvk_set_cache_dir,
     (AnyFn)kvk_shutdown, (AnyFn)kvk_read_surface, (AnyFn)kvk_get_stats, (AnyFn)kvk_wait_compiles,
+    (AnyFn)kvk_set_pass_merge,
     (AnyFn)kgpu_enabled, (AnyFn)kgpu_active, (AnyFn)kgpu_init, (AnyFn)kgpu_report, (AnyFn)kgpu_note_kick,
     (AnyFn)kgpu_host_size, (AnyFn)kgpu_vs_enabled, (AnyFn)kgpu_vs_ready, (AnyFn)kgpu_draw, (AnyFn)kgpu_clear,
     (AnyFn)kgpu_flip, (AnyFn)kgpu_set_viewmodel, (AnyFn)kgpu_set_view, (AnyFn)kgpu_set_ao_camera,
