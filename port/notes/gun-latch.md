@@ -266,3 +266,58 @@ After the game-thread CPU pass (perf.md §9) the harness reached level 1 at a di
 so "world changed" and patch-error checks failed. The latch itself still moved the weapon by the hand delta (-40 px vs
 -41 expected). Waiting 90 steady weapon frames lands on a still pose: PASS, median patch error 0.4 px, 90/95 % within
 3 px (L/R), after == settled. Run: `build-perf-x86/gun_at90.log`.
+
+## 6. The muzzle glow follows the hand (2026-11-12)
+
+**Symptom (headset):** firing the shotgun or the UZI, the flash at the muzzle was right, but a second, dimmer orange
+glow floated some distance from the gun. Reproduced in the x86 harness with the controller held low
+(`GRX_HAND=1 GRX_HAND_POS=0.25,-0.50,-0.30`, the pistol): the flash at the gun (left eye ~(402,454) of 480x512) and an
+orange ball in the middle of the room (~(331,276)), rising and fading over 5 frames.
+
+**What it is:** not a draw of the flash. A shot (1DBD50 -> 169960) starts a *held effect* ([2D1990]+65690, recomp_manual.c
+`BLACK_FX_AT`) on the player's first-person record 5 (the muzzle). Its update (176BD0) places its two emitters where
+the record is -- `[[actor+328]+30+where*4]+40`, the first-person model where the flat game holds it -- and spawns
+particles in the world there. One of them is the glow: a screen-space sprite (`3516849B`, 4 quads, additive) drawn into
+the glare chain's 160x120 source image (va 83248000), blurred and added over the view, hence soft. The gun latch moves
+the weapon's MVPs, not those records, so the glow stayed at the flat weapon's place. Evidence (`RECOMP_KVK_SPRITELOG=2`,
+`BLACKVR_AIM_TRACE=1`): the glare sprite's eye position computed as `kvk_finish` places it matches the ghost in the
+images to ~5 px; emitter 1 sits 2 cm from the flash's own pre-re-target origin; nothing else new is drawn near it.
+Moving the emitters around the world draw does nothing (the particles are already in the world), so the fix is at spawn.
+
+**Fix (`src/black_vr.inc`, `src/recomp_manual.c`):**
+- `camera_after_world` captures, with the weapon's re-target, the world transform the weapon got
+  (X = w_head * yv * w_head^-1 = w_hand * grip^-1 * w_entity^-1) and the player's records 0..7 (`bvr_fx_capture`).
+- `sub_00176BD0` (already manual) wraps the game's update with `black_vr_fx_update_begin/_end` in VR: the records are
+  set to X * record (plus the record's own translation since that render: the player walking, the recoil), the effects
+  follow them, and the records are put back. The flash (16B1E0) still reads the game's record 5 and is re-targeted
+  through its MVP as before. Only STEREO frames whose weapon was re-targeted; other owners and `where 8` untouched.
+- **`BLACKVR_GUN_FX=0`** (env or blackvr.ini `env BLACKVR_GUN_FX=0`): off, for A/B.
+- Result: the glow starts at the hand-held muzzle and drifts forward along the barrel
+  (`build-vrmenu-x86/frames-ghost7-on/ghost_before_after_{shot,next,next2}.png`, top row `BLACKVR_GUN_FX=0`, same
+  binary and input). The emitter moves by exactly the flash's re-target delta (default pose: (-0.4, -3.3, +4.8) cm vs
+  the flash's (-0.4, -4.2, +5.1) cm).
+- Limits: X is the last render's, so the spawn point lags the hand's own motion by one game frame (the late latch
+  does not apply to effects). Shell casings (thrown from Bullet_Loc by an animation event, 162FE0) are not moved.
+- Tests: `tests/xr_shell` hooks 447 -> 510 checks (both variants) (records moved to X and carried by the record's motion, absent records and
+  other owners untouched, restored bit for bit, nothing outside STEREO or without a re-target); two mutations caught.
+
+**Diagnostics added:** `RECOMP_KVK_SPRITELOG=2` (also blended perspective world draws as `PFX` lines with guest-pixel
+extents and view depth; every `SPRITE` line gets the eye NDC its centre lands at), `BLACKVR_AIM_TRACE=1` (`AIM`, `FX`,
+`MUZZLE` lines), harness `GRX_HAND_POS`, `GRX_HAND_YAW/_PITCH` and the gestures `aiml/aimr/aimu/aimd`.
+
+## 7. Where the shots go vs where the gun points (2026-11-12, measured, not changed)
+
+- Bullets: 1DBD50 fires from the actor's eye toward `weapon+10` (spread from the magazine), which the game puts on
+  the first surface along the look direction. That direction is exactly what `black_vr_look` asks (`vgm_aim_dir`:
+  eye -> the point 10 m along the controller's aim ray): aim points matched it to 5 digits in all 5 logged shots.
+  (The D2F40 camera entity reads 1.5 deg above that pitch; the bullets do not use it, and the latch strips it.)
+- Barrel: the muzzle record's idle axis is +1.0 deg up, -0.4 deg left of the camera entity, so the latched barrel
+  points 1 deg above the controller ray (2-3 deg in the shot frame with recoil); the muzzle sits ~3 cm left, 9 cm up,
+  11 cm ahead of the controller's aim origin (grip offset 0.12,-0.18,0.30).
+- So the hit is off the barrel line by: 9-14 cm at 2.7-3.1 m, 21-31 cm at 6.6 m (default hand pose, 0.12/-0.22/-0.35 m),
+  and 1.6-2.4 m at 26.6 m with the controller held low (0.25/-0.50/-0.30); 0.9 m off the controller ray there. Most of it
+  is the designed parallax (shots from the eye, converging on the controller ray at `aim_converge` = 10 m), plus the
+  barrel's 1 deg tilt.
+- Options (not done): converge at the distance of the last aim point (`weapon+10`) instead of a fixed 10 m, so the
+  shot crosses the controller ray at the surface it hits; and/or turn the latch by the muzzle record's idle tilt so the
+  barrel lies on the controller ray.

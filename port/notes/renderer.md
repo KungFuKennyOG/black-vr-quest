@@ -439,6 +439,9 @@ column next to a building) was still wrong.
   - the draw that begins the HUD;
   - the blended draws into offscreen targets, with their decision;
   - the HUD draws.
+  `RECOMP_KVK_SPRITELOG=2` also logs each blended perspective world draw (`PFX`: guest-pixel extents, view depth, the
+  constant registers its position reads, gun-latch class) and adds to every `SPRITE` line the eye NDC where its centre
+  lands (gun-latch.md section 6).
 - **Harness:** `GRX_INPUT` buttons `lc`/`rc` (thumbstick clicks), `rt`/`lt` (triggers). Captures land in
   `<scratch>/root/shots`. vr_glue checks that a requested capture's PNGs equal the released eye images (worst
   difference 0) in both swapchain modes.

@@ -2687,12 +2687,71 @@ static bool np_fullscreen(const NpExt *x, const KelvinTarget *t)
     return x->tri_max >= 0.45f * w * h || (x->area >= 0.98f * w * h && x->z1 - x->z0 <= 1.0f);
 }
 
-/* RECOMP_KVK_SPRITELOG=1: one line per non-perspective world-pass draw of a stereo frame (what screen_effect decided) */
+/* RECOMP_KVK_SPRITELOG=1: one line per non-perspective world-pass draw of a stereo frame (what screen_effect decided);
+ * 2: also the blended perspective ones (persp_fx_log) */
 static int s_spritelog = -1;
 static bool spritelog(void)
 {
-    if (s_spritelog < 0) { const char *e = getenv("RECOMP_KVK_SPRITELOG"); s_spritelog = e && *e && *e != '0'; }
+    if (s_spritelog < 0) { const char *e = getenv("RECOMP_KVK_SPRITELOG"); s_spritelog = e && *e ? atoi(e) : 0; }
     return s_spritelog > 0;
+}
+
+/* RECOMP_KVK_SPRITELOG=2 also logs every blended perspective world-pass draw on the main target: where it lands in the
+ * game camera's picture (x/w, y/w in guest pixels over a sample of its vertices), its view depth w, the program and the
+ * constant registers its position reads, and whether the gun latch took it (vm). Finds effects drawn through a matrix. */
+/* A guest pixel (x, y) at view depth w through the frame's preliminary eye transforms (FROM_W form, as kvk_finish):
+ * each eye's NDC (x right, y up). Diagnostics only. */
+static void eye_ndc(float px, float py, float w, const KelvinTarget *t, float e0[2], float e1[2])
+{
+    float v[4], c[4];
+    int e;
+    v[0] = (px * 2.0f / (float)t->guest_width - 1.0f) * w;
+    v[1] = (1.0f - py * 2.0f / (float)t->guest_height) * w;
+    v[2] = w; v[3] = 1.0f;
+    for (e = 0; e < 2; e++) {
+        float *o = e ? e1 : e0;
+        kvk_mat4_apply(c, V.st.eye_clip[e], v);
+        o[0] = c[3] != 0.0f ? c[0] / c[3] : 0.0f;
+        o[1] = c[3] != 0.0f ? c[1] / c[3] : 0.0f;
+    }
+}
+
+static void persp_fx_log(const KGpuDraw *d, const KvkVs *ve, bool vm)
+{
+    const KPixelState *ps = d->ps;
+    static NpEval s_ev;                                              /* pusher thread only */
+    float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f, w0 = 1e30f, w1 = -1e30f, e0[2], e1[2];
+    char regs[64] = "";
+    uint32_t i, n = 0;
+    int r, k = 0;
+    if (!d->indices || !d->icount || (d->gvs && !d->gvs->constants)) return;
+    np_eval_init(&s_ev, d);
+    /* the program's oPos is screen space: x, y in guest pixels, w the view depth */
+    for (i = 0; i < d->icount && i < 3u * NP_MAX_TRIS; i++) {
+        float o[4];
+        if (d->indices[i] == 0xFFFFFFFFu || !np_eval(&s_ev, d->indices[i], o) || !(o[3] > 0.0f)) continue;
+        if (o[0] < x0) x0 = o[0];
+        if (o[0] > x1) x1 = o[0];
+        if (o[1] < y0) y0 = o[1];
+        if (o[1] > y1) y1 = o[1];
+        if (o[3] < w0) w0 = o[3];
+        if (o[3] > w1) w1 = o[3];
+        n++;
+    }
+    if (!n) return;
+    eye_ndc(0.5f * (x0 + x1), 0.5f * (y0 + y1), 0.5f * (w0 + w1), d->t, e0, e1);
+    for (r = 0; ve && r < 192 && k < 56; r++) {
+        int e2 = r;
+        if (!(ve->pos_consts[r >> 5] & (1u << (r & 31)))) continue;
+        while (e2 + 1 < 192 && (ve->pos_consts[(e2 + 1) >> 5] & (1u << ((e2 + 1) & 31)))) e2++;
+        k += snprintf(regs + k, sizeof(regs) - (size_t)k, "%s%d-%d", k ? "," : "", r, e2);
+        r = e2;
+    }
+    LOG("PFX f %llu vs %08X ic %u vm %d pos %s | px x %.1f..%.1f y %.1f..%.1f w %.4g..%.4g (%u v) | z t%d w%d f%d blend %d %d %d"
+        " | eyeL %.3f %.3f eyeR %.3f %.3f",
+        (unsigned long long)G.st.frames, d->gvs ? d->gvs->hash : 0u, d->icount, vm, regs, (double)x0, (double)x1, (double)y0, (double)y1,
+        (double)w0, (double)w1, n, ps->depth_test, ps->depth_write, ps->depth_func, ps->blend, ps->blend_sfactor,
+        ps->blend_dfactor, (double)e0[0], (double)e0[1], (double)e1[0], (double)e1[1]);
 }
 
 static bool screen_effect(const KGpuDraw *d, const KvkVs *ve, bool *fullscreen)
@@ -2703,12 +2762,24 @@ static bool screen_effect(const KGpuDraw *d, const KvkVs *ve, bool *fullscreen)
     *fullscreen = false;
     ok = np_extent(d, &x);
     fs = ok && np_fullscreen(&x, d->t);
-    if (spritelog())
-        LOG("SPRITE f %llu vs %08X ic %u -> %s | x %.1f..%.1f y %.1f..%.1f z %.6g..%.6g area %.0f | z t%d w%d f%d blend %d %d %d",
+    if (spritelog()) {
+        const float zm = ps->zmax > 0.0f ? ps->zmax : 16777215.0f;
+        float e0[2] = { 0, 0 }, e1[2] = { 0, 0 }, vw = 0.0f;
+        if (ok && s_spritelog >= 2) {
+            /* where the extent's centre lands in each eye (eye NDC, y up), as kvk_finish places it */
+            const float zn = 0.5f * (x.z0 + x.z1) / zm, A = V.st.misc[2], B = V.st.misc[3];
+            vw = B / (zn - A);
+            if (!(zn > 0.0f && vw > 0.0f && isfinite(vw))) vw = 0.5f * B / (1.0f - A);
+            eye_ndc(0.5f * (x.x0 + x.x1), 0.5f * (x.y0 + x.y1), vw, d->t, e0, e1);
+        }
+        LOG("SPRITE f %llu vs %08X ic %u -> %s | x %.1f..%.1f y %.1f..%.1f z %.6g..%.6g area %.0f | z t%d w%d f%d blend %d %d %d"
+            " | w %.3g eyeL %.3f %.3f eyeR %.3f %.3f",
             (unsigned long long)G.st.frames, d->gvs ? d->gvs->hash : 0u, d->icount, !ok ? "unknown (left)" : fs ? "full-screen (left)" : "corrected",
-            (double)x.x0, (double)x.x1, (double)x.y0, (double)x.y1, (double)(x.z0 / (ps->zmax > 0.0f ? ps->zmax : 16777215.0f)),
-            (double)(x.z1 / (ps->zmax > 0.0f ? ps->zmax : 16777215.0f)), (double)x.area, ps->depth_test, ps->depth_write,
-            ps->depth_func, ps->blend, ps->blend_sfactor, ps->blend_dfactor);
+            (double)x.x0, (double)x.x1, (double)x.y0, (double)x.y1, (double)(x.z0 / zm),
+            (double)(x.z1 / zm), (double)x.area, ps->depth_test, ps->depth_write,
+            ps->depth_func, ps->blend, ps->blend_sfactor, ps->blend_dfactor, (double)vw, (double)e0[0], (double)e0[1],
+            (double)e1[0], (double)e1[1]);
+    }
     (void)ve;
     *fullscreen = fs;
     return ok && !fs;
@@ -2936,6 +3007,8 @@ static void draw_now(const KGpuDraw *d)
     /* VR gun latch: a world draw whose position is made through this frame's weapon MVP reads the weapon's block */
     if (stereo && !sprite && is_main(ref->gw, ref->gh) && d->gvs && d->gvs->constants)
         vm = kvk_vr_viewmodel_draw(d->gvs->constants, ve->pos_consts);
+    if (stereo && !sprite && ps->blend && is_main(ref->gw, ref->gh) && spritelog() && s_spritelog >= 2 && stereo_world_pass())
+        persp_fx_log(d, ve, vm);
     if (stereo && !is_main(ref->gw, ref->gh)) G.st.offscreen_stereo_draws++;
     if (s_vmlog > 0 && V.st.valid) vm_log_draw(d, ve, stereo, vm, cs, zs);
     /* RECOMP_KVK_SPRITELOG: blended draws into other targets of a stereo frame (effects drawn offscreen) */

@@ -2010,7 +2010,16 @@ void sub_00176BD0(void)
     uint16_t one[BLACK_FX_SLOTS], two[BLACK_FX_SLOTS], spare[BLACK_FX_SLOTS];
     unsigned n1 = 0, n2 = 0, nf = 0, mine = 0, theirs = 0, cap, k;
     uint32_t then;
-    if (!black_p2_playing() || black_p2_in || !fx || fx != black_fx()) { sub_00176BD0_gen(); return; }
+    if (!black_p2_playing() || black_p2_in || !fx || fx != black_fx()) {
+#ifdef BLACK_VR
+        black_vr_fx_update_begin();   /* the weapon's held effects (muzzle glow, smoke) start at the hand-held muzzle */
+        sub_00176BD0_gen();
+        black_vr_fx_update_end();
+#else
+        sub_00176BD0_gen();
+#endif
+        return;
+    }
     cap = GUEST16(fx + 0x344Au);
     then = GUEST32(fx + 0x3454u);
     for (k = 0; k < cap; k++) {
@@ -2730,6 +2739,7 @@ void sub_001EE820(void)
     if (!pc_split_enabled() || !(camera = black_photo_world_camera()) || !black_pc_ram_span(esp, 8u)) {
 #ifdef BLACK_VR
         black_vr_world_mark(1);
+        bvr_fx_trace();
         sub_001EE820_gen();
         black_vr_world_mark(0);
 #else
