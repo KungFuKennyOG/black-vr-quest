@@ -23,8 +23,15 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
   - the off hand hidden: every bone of the left arm folds to its wrist, so its triangles have no area.
 - `left_hand = tracked` (default): the game's left hand follows the off controller; while the two-handed grip is
   engaged it snaps onto the gun line: straight ahead of the gun hand at the off controller's distance (at least 8 cm),
-  with the gun hand's orientation, so it mirrors the right hand's grip further along the gun. A short haptic tick on
-  the off hand when the grip engages. The game's own off-hand pose is not
+  with the gun hand's orientation. While gripping, the left hand is the exact mirror of the game's right hand
+  (`vra_mirror_off_hand`: P_lft = A * P_rt * S, using the bind pose's mirror symmetry), so its fingers close on the
+  gun instead of keeping the game's relaxed left-hand pose. A short haptic tick on the off hand when the grip engages.
+  The grip button latches: it takes the gun at 50 % and lets go under 25 % (with one 60 % threshold, a relaxed hold
+  dropped the grip after 0.2–2.7 s in Kenny's device log).
+- **Loose parts** (shell, magazine, clip, bullets, rocket, case...): the game's reload animations move them with its
+  own left hand. A loose part more than 3 cm off its place on the gun (relative to the gun's `*_Root`) and nearer the
+  game's left wrist than its right follows the moved left hand (fully from 8 cm). Before this, the shotgun shell
+  floated where the game's hand had been. The game's own off-hand pose is not
   used there: for the rifles it keeps the left wrist about 0.55 m low and level with the camera, out of view
   (harness, inventory weapon 5446152380DB8000). `grip`: the game's pose, shown only while gripping. `always`: the
   game's pose. `never`: hidden.

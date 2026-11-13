@@ -17,6 +17,7 @@
 #ifndef VR_ARMS_H
 #define VR_ARMS_H
 
+#include <math.h>
 #include <string.h>
 
 #define VRA_MAX_BONES 64
@@ -35,7 +36,22 @@ typedef struct {
     float mirror[12];                /* bind_rt^-1 * S * bind_lft, S = diag(-1, 1, 1): the bind pose's left/right
                                       * mirror in the right wrist's frame (the stock arms mirror across model x = 0) */
     int   mirror_ok;
+    /* loose parts the game's left hand carries in reload animations (shell, magazine, clip, bullets, rocket...):
+     * they follow the moved left hand while they are off their place on the gun */
+    unsigned char loose[VRA_MAX_BONES];
+    int   gun_root;                  /* the gun's *_Root bone, -1 if none */
+    float bindk[VRA_MAX_BONES][12];  /* every bone's bind frame (3x4) */
+    signed char pair[VRA_MAX_BONES]; /* a left-arm bone's right twin (same name, _rt), -1 if none */
 } VrArmRig;
+
+/* a gun part that can come off the gun in the game's hands */
+static inline int vra_is_loose(const char *s)
+{
+    static const char *const k[] = { "Shell", "Magazine", "Clip", "Bullet", "Rocket", "Case", "Lead", "loader", "Cap" };
+    unsigned i;
+    for (i = 0; i < sizeof(k) / sizeof(k[0]); i++) if (strstr(s, k[i])) return 1;
+    return 0;
+}
 
 /* ---- 3x4 affine helpers (rows; column vectors: p' = M p) ---- */
 static inline void vra_m34_mul(const float a[12], const float b[12], float o[12])
@@ -107,6 +123,7 @@ static inline int vra_build_rig(VrArmRig *rig, const char *const *names, const f
     int k, last_side = -1;
     memset(rig, 0, sizeof(*rig));
     rig->wrist[0] = rig->wrist[1] = -1;
+    rig->gun_root = -1;
     if (n <= 0 || n > VRA_MAX_BONES) return 0;
     rig->n = n;
     for (k = 0; k < n; k++) {
@@ -123,6 +140,27 @@ static inline int vra_build_rig(VrArmRig *rig, const char *const *names, const f
         if (role == VRA_HAND && vra_starts_with(s, "Wrist_")) rig->wrist[side] = k;
         if (!inverse_bind || !vra_joint_from_inverse_bind(inverse_bind[k], rig->joint[k]))
             rig->joint[k][0] = rig->joint[k][1] = rig->joint[k][2] = 0.0f;
+        if (role == VRA_OTHER) {
+            const size_t len = strlen(s);
+            if (len > 5 && !strcmp(s + len - 5, "_Root") && rig->gun_root < 0) rig->gun_root = k;
+            else if (vra_is_loose(s)) rig->loose[k] = 1;
+        }
+        if (!inverse_bind || !vra_bind_from_inverse_bind(inverse_bind[k], rig->bindk[k])) {
+            memset(rig->bindk[k], 0, sizeof(rig->bindk[k]));
+            rig->loose[k] = 0;
+            if (rig->gun_root == k) rig->gun_root = -1;
+        }
+    }
+    for (k = 0; k < n; k++) {
+        const char *s = names[k] ? names[k] : "";
+        const size_t len = strlen(s);
+        int j;
+        rig->pair[k] = -1;
+        if (rig->side[k] != VRA_LEFT || len < 5 || len > 40) continue;
+        for (j = 0; j < n; j++) {
+            const char *t = names[j] ? names[j] : "";
+            if (strlen(t) == len - 1 && !strncmp(s, t, len - 4) && !strcmp(t + len - 4, "_rt")) { rig->pair[k] = (signed char)j; break; }
+        }
     }
     if (inverse_bind && rig->wrist[0] >= 0 && rig->wrist[1] >= 0 &&
         vra_bind_from_inverse_bind(inverse_bind[rig->wrist[0]], rig->bind[0]) &&
@@ -189,6 +227,32 @@ static inline int vra_place_off_hand(const VrArmRig *rig, float *constants, cons
     vra_m34_mul(target, rig->mirror, target);
     if (!vra_m34_inv(fl, fl_inv)) return 0;
     vra_m34_mul(target, fl_inv, g);
+    /* loose parts first (they are judged against the game's own left hand, before it moves): one off its place on the
+     * gun by more than 3 cm and nearer the game's left wrist than its right follows the hand, fully from 8 cm off */
+    if (rig->gun_root >= 0) {
+        float root_now[12], root_inv[12], root_bind_inv[12];
+        vra_m34_mul(vra_rows(constants, rig->gun_root), rig->bindk[rig->gun_root], root_now);
+        if (vra_m34_inv(root_now, root_inv) && vra_m34_inv(rig->bindk[rig->gun_root], root_bind_inv)) {
+            for (k = 0; k < rig->n; k++) {
+                float now[12], rel_now[12], rel_bind[12], moved[12], dx, dy, dz, off, dl, dr, w;
+                float *rows;
+                int j;
+                if (!rig->loose[k]) continue;
+                rows = vra_rows(constants, k);
+                vra_m34_mul(rows, rig->bindk[k], now);
+                vra_m34_mul(root_inv, now, rel_now);
+                vra_m34_mul(root_bind_inv, rig->bindk[k], rel_bind);
+                dx = rel_now[3] - rel_bind[3]; dy = rel_now[7] - rel_bind[7]; dz = rel_now[11] - rel_bind[11];
+                off = sqrtf(dx * dx + dy * dy + dz * dz);
+                dl = (now[3] - fl[3]) * (now[3] - fl[3]) + (now[7] - fl[7]) * (now[7] - fl[7]) + (now[11] - fl[11]) * (now[11] - fl[11]);
+                dr = (now[3] - fr[3]) * (now[3] - fr[3]) + (now[7] - fr[7]) * (now[7] - fr[7]) + (now[11] - fr[11]) * (now[11] - fr[11]);
+                if (!(off > 0.03f) || !(dl < dr)) continue;
+                w = off >= 0.08f ? 1.0f : (off - 0.03f) / 0.05f;
+                vra_m34_mul(g, rows, moved);
+                for (j = 0; j < 12; j++) rows[j] += w * (moved[j] - rows[j]);
+            }
+        }
+    }
     for (k = 0; k < rig->n; k++) {
         float *rows;
         if (rig->side[k] != VRA_LEFT) continue;
@@ -196,6 +260,32 @@ static inline int vra_place_off_hand(const VrArmRig *rig, float *constants, cons
         vra_m34_mul(g, rows, rows);
     }
     return 1;
+}
+
+/* Gripping two-handed: the left hand becomes the exact mirror of the game's right hand (its fingers closed around the
+ * grip), carried by a (as vra_place_off_hand) onto the gun. The stock arms' bind pose is mirror-symmetric across model
+ * x = 0 (S), so a left vertex S v skins to a * P_rt * v: P_lft = a * P_rt * S. A left bone without a twin (the twist)
+ * takes the left wrist's. Returns 1 when it did. */
+static inline int vra_mirror_off_hand(const VrArmRig *rig, float *constants, const float a[16])
+{
+    const float a34[12] = { a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11] };
+    float out[VRA_MAX_BONES][12];
+    int k, have = 0;
+    if (rig->wrist[VRA_LEFT] < 0 || rig->wrist[VRA_RIGHT] < 0 || VRA_PALETTE_BASE + 3 * rig->n > 192) return 0;
+    for (k = 0; k < 12; k++) if (!(a[k] == a[k])) return 0;
+    for (k = 0; k < rig->n; k++) {
+        const int twin = rig->side[k] != VRA_LEFT ? -1 : rig->pair[k] >= 0 ? rig->pair[k] : rig->wrist[VRA_RIGHT];
+        float ps[12];
+        int r;
+        if (twin < 0) continue;
+        memcpy(ps, vra_rows(constants, twin), sizeof(ps));
+        for (r = 0; r < 3; r++) ps[r * 4] = -ps[r * 4];                    /* P_rt * S */
+        vra_m34_mul(a34, ps, out[k]);
+        have = 1;
+    }
+    for (k = 0; k < rig->n; k++)
+        if (rig->side[k] == VRA_LEFT) memcpy(vra_rows(constants, k), out[k], sizeof(out[k]));
+    return have;
 }
 
 #endif /* VR_ARMS_H */

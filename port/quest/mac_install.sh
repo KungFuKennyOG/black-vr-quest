@@ -14,7 +14,7 @@
 #
 # Options:
 #   --iso PATH       disc image (default: the only *.iso / *.xiso in this folder)
-#   --apk PATH       APK (default: ./blackvr.apk)
+#   --apk PATH       APK (default: the newest ./blackvr*.apk)
 #   --repush         copy the game files again even if they are already on the headset
 #   --no-launch      install only
 #   --log-only       skip everything, just launch and record the log
@@ -30,7 +30,7 @@ REMOTE=/sdcard/BlackVR
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
-ISO=""; APK="$HERE/blackvr.apk"; REPUSH=0; LAUNCH=1; LOGONLY=0; PULLONLY=0
+ISO=""; APK=""; REPUSH=0; LAUNCH=1; LOGONLY=0; PULLONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --iso) ISO="$2"; shift 2;;
@@ -122,6 +122,14 @@ free_kb=$(adb shell df /sdcard 2>/dev/null | awk 'NR==2 {print $4}' | tr -d '\r'
 # ---------------------------------------------------------------- 4. install
 if [ $LOGONLY -eq 0 ]; then
   say "4/6 Install APK"
+  if [ -z "$APK" ]; then
+    # the newest blackvr*.apk here: a browser saves a second download as "blackvr (1).apk", and the old blackvr.apk
+    # would otherwise be installed again
+    APK="$(ls -t "$HERE"/blackvr*.apk 2>/dev/null | head -1)"
+    [ -n "$APK" ] || die "no blackvr*.apk next to this script"
+    n_apk="$(ls "$HERE"/blackvr*.apk 2>/dev/null | wc -l | tr -d ' ')"
+    echo "==> installing $(basename "$APK") (the newest of $n_apk blackvr*.apk here, $(date -r "$APK" '+%b %d %H:%M'))"
+  fi
   [ -f "$APK" ] || die "APK not found: $APK"
   adb install -r -g "$APK" 2>&1 | tail -2 | grep -q Success || {
     echo "   install failed; retrying after uninstalling the old copy (this also removes the game files on the headset; step 5 copies them again)"

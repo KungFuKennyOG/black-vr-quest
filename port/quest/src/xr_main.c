@@ -40,6 +40,9 @@ XrShell g_xr;
 #ifndef BLACKVR_XBE_SIG
 #define BLACKVR_XBE_SIG ""
 #endif
+#ifndef BLACKVR_GIT
+#define BLACKVR_GIT "unknown commit"
+#endif
 #ifndef BLACKVR_VERSION
 #define BLACKVR_VERSION "dev"
 #endif
@@ -340,7 +343,7 @@ void android_main(struct android_app *app)
     /* Device preflight (port/notes/device-preflight.md): one "PREFLIGHT <check>: OK|WARN|FAIL" line per check, tag
      * BlackVR, before anything can crash for a device-only reason. The game folder and storage are checked while
      * finding the folder; the rest after blackvr.ini, whose "env BLACKVR_PREFLIGHT=0" line skips them. */
-    bvr_pf_begin(BLACKVR_VERSION);
+    bvr_pf_begin(BLACKVR_VERSION " (" BLACKVR_GIT ", built " __DATE__ " " __TIME__ ")");
     find_game_root(s);
     load_config(s);
     export_config(s);

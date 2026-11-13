@@ -192,6 +192,48 @@ int main(void)
             vra_m34_mul(vra_rows(c2, idx("Wrist_lft")), rm.bind[VRA_LEFT], f2);
             CHECK(NEAR(f2[3] - f1[3], 0.25, 1e-5) && NEAR(f2[7] - f1[7], -0.1, 1e-5) && NEAR(f2[11], f1[11], 1e-5));
         }
+        /* gripping: the left hand is the mirror of the right one carried by a (P_lft = a * P_rt * S), so a left vertex
+         * S v lands where a takes the right vertex v; twins are found by name; a bone without one takes the wrist's */
+        {
+            float c3[192 * 4], am[16] = { -1, 0, 0, 0.1f, 0, 1, 0, -0.05f, 0, 0, 1, 0.3f, 0, 0, 0, 1 };
+            const float v[3] = { 0.12f, -0.04f, 0.2f }, sv[3] = { -0.12f, -0.04f, 0.2f };
+            float l[3], rr[3], ar[3];
+            CHECK(rm.pair[idx("Finger1_Top_lft")] == idx("Finger1_Top_rt") && rm.pair[idx("Wrist_lft")] == idx("Wrist_rt"));
+            CHECK(rm.pair[idx("Thumb_Tip_lft")] == -1 && rm.pair[idx("Joint_wrist_twist")] == -1 && rm.pair[idx("Wrist_rt")] == -1);
+            memcpy(c3, base, sizeof(c3));
+            CHECK(vra_mirror_off_hand(&rm, c3, am) == 1);
+            apply_rows(c3, idx("Finger1_Top_lft"), sv, l);
+            apply_rows(base, idx("Finger1_Top_rt"), v, rr);
+            ar[0] = -rr[0] + 0.1f; ar[1] = rr[1] - 0.05f; ar[2] = rr[2] + 0.3f;
+            CHECK(NEAR(l[0], ar[0], 1e-5) && NEAR(l[1], ar[1], 1e-5) && NEAR(l[2], ar[2], 1e-5));
+            apply_rows(c3, idx("Thumb_Tip_lft"), sv, l);
+            apply_rows(base, idx("Wrist_rt"), v, rr);
+            CHECK(NEAR(l[0], -rr[0] + 0.1f, 1e-5) && NEAR(l[1], rr[1] - 0.05f, 1e-5) && NEAR(l[2], rr[2] + 0.3f, 1e-5));
+            /* the right arm and the gun are untouched */
+            CHECK(!memcmp(vra_rows(c3, idx("Finger1_Top_rt")), vra_rows(base, idx("Finger1_Top_rt")), 12 * sizeof(float)));
+            CHECK(!memcmp(vra_rows(c3, idx("SMG_Slide")), vra_rows(base, idx("SMG_Slide")), 12 * sizeof(float)));
+        }
+        /* a loose part (the gun's shell) follows the moved left hand only when it is off the gun near that hand */
+        {
+            static const char *const ln[] = { "World", "Shotgun_Root", "Shotgun_Shell", "Wrist_lft", "Wrist_rt" };
+            float lib[5][16], c4[192 * 4], at[16] = { 1, 0, 0, 0.5f, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+            const float lj[5][3] = { {0,0,0}, {0,0,0}, {0.05f,-0.02f,0.30f}, {-0.15f,-0.1f,0.25f}, {0.15f,-0.1f,0.05f} };
+            VrArmRig rl;
+            int b2;
+            for (b2 = 0; b2 < 5; b2++) inverse_bind(lib[b2], lj[b2], 0.0f);
+            CHECK(vra_build_rig(&rl, ln, (const float (*)[16])lib, 5) == 1 && rl.gun_root == 1 && rl.loose[2] && !rl.loose[1]);
+            memset(c4, 0, sizeof(c4));
+            for (b2 = 0; b2 < 5; b2++) { float *q = vra_rows(c4, b2); q[0] = q[5] = q[10] = 1.0f; }
+            /* the shell on the gun (bind place): it stays */
+            CHECK(vra_place_off_hand(&rl, c4, at) == 1);
+            CHECK(NEAR(vra_rows(c4, 2)[3], 0.0, 1e-6));
+            /* the shell taken off the gun to the game's left hand (12 cm off its place): it moves with the hand (+0.5 x) */
+            memset(c4, 0, sizeof(c4));
+            for (b2 = 0; b2 < 5; b2++) { float *q = vra_rows(c4, b2); q[0] = q[5] = q[10] = 1.0f; }
+            vra_rows(c4, 2)[3] = -0.12f;
+            CHECK(vra_place_off_hand(&rl, c4, at) == 1);
+            CHECK(NEAR(vra_rows(c4, 2)[3], -0.12f + 0.5f, 1e-4) || vra_rows(c4, 2)[3] > 0.2f);
+        }
         /* a NaN mirror or a rig without one does nothing */
         a[0] = NAN;
         memcpy(c, base, sizeof(c));

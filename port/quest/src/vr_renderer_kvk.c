@@ -576,7 +576,8 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
     {
         static unsigned logged, changes;
         static int last_logged_engaged = -1;
-        int placed = place && vra_place_off_hand(&e->rig, constants, off);
+        /* gripping: the mirror of the game's right hand, closed on the gun; free: the game's own left hand, moved */
+        int placed = place && (engaged ? vra_mirror_off_hand(&e->rig, constants, off) : vra_place_off_hand(&e->rig, constants, off));
         if (engaged != last_logged_engaged && changes < 16) { changes++; last_logged_engaged = engaged; logged = 0; }
         if (logged < 3) {
             float pl[3], pr[3];
