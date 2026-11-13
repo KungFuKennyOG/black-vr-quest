@@ -819,10 +819,20 @@ static int bvr_m4_near(VrMat4 a, VrMat4 b, float rot, float pos)
             if (!(fabsf(VRM_AT(a, r, c) - VRM_AT(b, r, c)) <= (c == 3 ? pos : rot))) return 0;
     return 1;
 }
+/* A rotation and a position (orthonormal axes to 1e-2): what an aim matrix is, not unset memory */
+static int bvr_m4_rigid(VrMat4 a)
+{
+    const VrVec3 x = vgm_col(a, 0), y = vgm_col(a, 1), z = vgm_col(a, 2);
+    return fabsf(vrm_dot(x, x) - 1.0f) < 1e-2f && fabsf(vrm_dot(y, y) - 1.0f) < 1e-2f &&
+           fabsf(vrm_dot(z, z) - 1.0f) < 1e-2f && fabsf(vrm_dot(x, y)) < 1e-2f && fabsf(vrm_dot(y, z)) < 1e-2f &&
+           fabsf(vrm_dot(x, z)) < 1e-2f;
+}
 
 static struct {
     int ok;
     uint32_t frame, aim;                      /* aim: the player's aim matrix, when it was this render's camera entity */
+    uint32_t aim_off;                         /* ... when it was not, but readable: the camera entity was off it by */
+    VrMat4 a_last;                            /* a_last^-1 * w_entity (a melee lunge, a menu's camera) */
     VrMat4 x, back, w_body, w_hand, w_entity;
     uint32_t at[8];
     VrMat4 l[8];
@@ -831,7 +841,7 @@ static struct { int ok, fresh; uint32_t frame, at; VrVec3 p, p_old; } bvr_fxd;  
 /* The muzzle check in the log (always; ~every 30 s of STEREO with the gun in the hand): how far the held effects'
  * update put the muzzle record from where the next render puts the hand-held muzzle (0 when the placement is right),
  * and how many updates had to do without the aim matrix (the fallback, which keeps the shot's recoil in the spawn). */
-static struct { unsigned n, fallback; double sum, max, body_yaw; } bvr_fxs;
+static struct { unsigned n, fallback, offset; double sum, max, body_yaw; } bvr_fxs;
 static uint32_t bvr_fxu_at[8];
 static uint8_t bvr_fxu_kept[8][0x40];
 static unsigned bvr_fxu_n;
@@ -868,12 +878,16 @@ static void bvr_fx_capture(void)
     bvr_fxl.w_entity = bvr.w_entity;
     va = bvr_aim_va();
     bvr_fxl.aim = va && bvr_aim_view(va, &a) && bvr_m4_near(a, bvr.w_entity, 2e-3f, 2e-3f * cfg->units_per_metre) ? va : 0;
+    bvr_fxl.aim_off = !bvr_fxl.aim && va && bvr_aim_view(va, &a) && bvr_m4_rigid(a) && bvr_m4_rigid(bvr.w_entity) &&
+                      vrm_len(vrm_sub(vgm_col(a, 3), vgm_col(bvr.w_entity, 3))) <= 1.0f * cfg->units_per_metre ? va : 0;
+    if (bvr_fxl.aim_off) bvr_fxl.a_last = a;
     {
         static int logged;
         if (!logged && !bvr_fxl.aim) {
             logged = 1;
             fprintf(stderr, "[BLACK_VR] gun fx: the player's aim matrix is not this render's camera (logged once): the held "
-                    "effects use the last render's transform\n");
+                    "effects carry the camera's offset from it%s\n", bvr_fxl.aim_off ? "" : " (unreadable: the last render's "
+                    "transform, moved with the hand)");
         }
     }
     for (r = 0; r < 8u; r++)
@@ -893,17 +907,19 @@ static void bvr_fx_capture(void)
         if (bvr_aim_trace())
             fprintf(stderr, "[BLACK_VR] FXC gf %u muzzle effects started at update after gf %u: %.4f from the hand-held "
                     "muzzle (e856ad7: %.4f)%s\n", bvr.game_frame, bvr_fxd.frame, dm,
-                    (double)vrm_len(vrm_sub(bvr_fxd.p_old, t)), bvr_fxd.fresh ? "" : ", no aim matrix");
+                    (double)vrm_len(vrm_sub(bvr_fxd.p_old, t)),
+                    bvr_fxd.fresh == 1 ? "" : bvr_fxd.fresh == 2 ? ", camera off the aim matrix" : ", no aim matrix");
         dm /= (double)cfg->units_per_metre;
         if (fabs(vrm_wrap_deg(bvr.body_yaw - bvr_fxs.body_yaw)) > 0.5) goto turned;   /* a snap/smooth turn: below */
         bvr_fxs.n++;
         bvr_fxs.sum += dm;
         if (dm > bvr_fxs.max) bvr_fxs.max = dm;
         if (!bvr_fxd.fresh) bvr_fxs.fallback++;
+        if (bvr_fxd.fresh == 2) bvr_fxs.offset++;
         if (bvr_fxs.n >= 1800u) {
             fprintf(stderr, "[BLACK_VR] gun fx check: %u updates, muzzle effects started %.1f cm (mean) / %.1f cm (max) "
-                    "from the hand-held muzzle, %u without the aim matrix\n", bvr_fxs.n, 100.0 * bvr_fxs.sum / bvr_fxs.n,
-                    100.0 * bvr_fxs.max, bvr_fxs.fallback);
+                    "from the hand-held muzzle; %u with the camera off the aim matrix, %u without the aim matrix\n",
+                    bvr_fxs.n, 100.0 * bvr_fxs.sum / bvr_fxs.n, 100.0 * bvr_fxs.max, bvr_fxs.offset, bvr_fxs.fallback);
             memset(&bvr_fxs, 0, sizeof(bvr_fxs));
         }
     }
@@ -953,6 +969,23 @@ static void black_vr_fx_update_begin(void)
             } else {
                 dp = vrm_v3(0, 0, 0);
             }
+        } else if (bvr_fxl.aim_off && bvr_aim_va() == bvr_fxl.aim_off && bvr_aim_view(bvr_fxl.aim_off, &m_now) &&
+                   bvr_m4_rigid(m_now) && vrm_m4_inverse(bvr_fxl.a_last, &minv)) {
+            /* The last render's camera entity was off the aim matrix (O = A_last^-1 * E_last: a melee lunge, a menu's
+             * camera). The records are still posed on the aim matrix, now with this frame's recoil: the next render's
+             * camera entity is taken as A_now * O, so X = h_now * grip^-1 * (A_now * O)^-1 keeps the recoil out of the
+             * spawn as above. (The last render's X alone kept it in: the shotgun's 8 deg kick put its fireball ~10 cm
+             * above the muzzle.) */
+            const VrMat4 e_next = vrm_m4_mul(m_now, vrm_m4_mul(minv, bvr_fxl.w_entity));
+            VrMat4 einv;
+            dp = vrm_sub(vgm_col(e_next, 3), vgm_col(bvr_fxl.w_entity, 3));
+            if (vrm_len(dp) <= 1.0f * cfg->units_per_metre && vrm_m4_inverse(e_next, &einv)) {
+                VRM_AT(h_now, 0, 3) += dp.x; VRM_AT(h_now, 1, 3) += dp.y; VRM_AT(h_now, 2, 3) += dp.z;
+                x = vrm_m4_mul(h_now, vrm_m4_mul(bvr_fxl.back, einv));
+                fresh = 2;
+            } else {
+                dp = vrm_v3(0, 0, 0);
+            }
         }
         if (!fresh && vrm_m4_inverse(bvr_fxl.w_hand, &hinv)) x = vrm_m4_mul(h_now, vrm_m4_mul(hinv, bvr_fxl.x));
         for (r = 0; r < 8u; r++) {
@@ -987,10 +1020,10 @@ static void black_vr_fx_update_begin(void)
                     (double)(VRM_AT(h_now, 2, 3) - VRM_AT(bvr_fxl.w_hand, 2, 3)), (double)dp.x, (double)dp.y, (double)dp.z,
                     bvr_fxl.aim && black_pc_ram_span(bvr_fxl.aim + 0x3F4u, 4u) && bvr_f32_ok(bvr_fxl.aim + 0x3F4u)
                         ? (double)bvr_f32(bvr_fxl.aim + 0x3F4u) : 0.0,
-                    fresh ? "" : ", no aim matrix");
+                    fresh == 1 ? "" : fresh == 2 ? ", camera off the aim matrix" : ", no aim matrix");
         if (bvr_fxu_n && (++bvr_fxu_updates == 1u || !(bvr_fxu_updates & 4095u)))
             fprintf(stderr, "[BLACK_VR] gun fx: the weapon's held effects follow it to the hand (%u updates%s)\n",
-                    bvr_fxu_updates, fresh ? "" : ", without the aim matrix");
+                    bvr_fxu_updates, fresh == 1 ? "" : fresh == 2 ? ", the camera off the aim matrix" : ", without the aim matrix");
         BVR_FP_END;
     }
 }

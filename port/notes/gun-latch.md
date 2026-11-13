@@ -388,7 +388,19 @@ UZI). To tell, every log now carries, about every 30 s of STEREO with the gun in
 
 0 / 0 / 0 is the harness result. F > 0 or X of several cm on the headset points at the placement; all 0 points at
 the drawing of the fireball itself (the screen-space sprite's per-eye correction, renderer.md 11). The per-frame
-`FXC` lines stay behind `BLACKVR_AIM_TRACE=1`.
+`FXC` lines stay behind `BLACKVR_AIM_TRACE=1`. Turn frames are left out (a snap turn between the update and the
+render puts that one update's spawn off by the turn: ~40 cm for 35 deg, one puff; smooth turning a few cm).
+
+**The camera off the aim matrix** (same day). The harness showed the self-check failing for ~20 frames after the
+objectives screen and after a melee: the camera entity is then off the aim matrix (a lunge, a menu's camera). The
+fallback there was the last render's X moved with the hand, which keeps a shot's recoil in the spawn (the e856ad7
+error, ~10 cm for the shotgun). Now, while the aim matrix is readable (a rigid matrix within 1 m of the camera), the
+update takes the next render's camera entity as `A_now * O` with `O = A_last^-1 * E_last` (the offset seen at the
+last render): `X = h_now * grip^-1 * (A_now * O)^-1`, the body moved by that camera's step. With `O = I` it is the
+fresh path. Only an unreadable aim matrix still uses the old fallback. The check line counts both:
+`...; N with the camera off the aim matrix, F without the aim matrix`. Hook test: an offset camera (2 deg, 2 cm),
+an 8 deg kick, a 5 cm step, record 5 animating 3 deg and the hand moving: every component exact, and the old
+fallback over 3 cm off (690 checks; undoing the path, the offset or the body step fails it).
 
 ## 7. Where the shots go vs where the gun points (2026-11-12, measured, not changed)
 
