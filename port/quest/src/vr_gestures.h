@@ -41,7 +41,7 @@ typedef struct {
     int   scope_raise;           /* on/off */
     float scope_distance;        /* m, 0.15 */
     int   two_hand;              /* on/off */
-    float two_hand_engage_m;     /* 0.45 (0.20 caught a hand on a rifle's handguard only now and then) */
+    float two_hand_engage_m;     /* 0.60, within 30 deg of the gun's ray (0.20 caught a hand on a handguard only now and then) */
 } VrGestureConfig;
 
 static inline void vrg_default_config(VrGestureConfig *c)
@@ -57,7 +57,7 @@ static inline void vrg_default_config(VrGestureConfig *c)
     c->scope_raise = 1;
     c->scope_distance = 0.15f;
     c->two_hand = 1;
-    c->two_hand_engage_m = 0.45f;
+    c->two_hand_engage_m = 0.60f;
 }
 
 /* ---- swing -> melee ---------------------------------------------------------------------------------------- */
@@ -321,11 +321,12 @@ static inline VrPose vrg_two_hand_update(VrTwoHand *s, const VrGestureConfig *c,
     dist = vrm_len(d);
     along = vrm_dot(d, fwd);
     s->last_dist = dist;
+    /* the off hand must be on the gun's line ahead (within 30 deg of the controller's ray): the aim turns toward it, so a
+     * hand off to the side within reach turned the gun sideways (the shotgun held across the view on the headset) */
     if (!s->engaged) {
-        const VrVec3 ahead = vrm_add(gun.position, vrm_scale(fwd, 0.30f));
-        if ((dist <= c->two_hand_engage_m || vrm_len(vrm_sub(off_pos, ahead)) <= c->two_hand_engage_m) && along > 0.0f)
+        if (dist <= c->two_hand_engage_m && dist > 0.08f && along > dist * 0.866f)
             s->engaged = 1;
-    } else if (along < 0.02f || dist > 0.9f) {
+    } else if (along < 0.02f || dist > 0.9f || along < dist * 0.707f) {
         s->engaged = 0;
     }
     if (!s->engaged) { s->blend = 0.0f; return gun; }

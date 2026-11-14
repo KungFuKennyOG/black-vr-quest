@@ -171,3 +171,8 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
   holds the gun still 6+ deg off the locked rest for 2 s (left hand at rest, no shot for 1 s), the rest pose is taken
   again (`arms: the game holds the gun ... taking the rest pose again`).
 - Shotgun: a shell sat under the free left hand (the game keeps one in its left hand at rest; loose parts near that hand used to follow the moved hand). The free hand does no reloading now, so such parts are hidden while the hand is free; the game's own hand shows them in its animations.
+- Video 01:31:59 (16803ea): the shotgun turned sideways across the view while gripped: the loosened two-hand test
+  (45 cm anywhere ahead) took a left hand off to the side, and two-handed aim points the gun at the off hand. Now the
+  off hand must be within 30 deg of the controller's ray (out to 60 cm), released past 45 deg.
+- The shotgun's spare shell (the game parks it in its left hand) is hidden except in reloads: at rest, in the raise
+  and cock, with the hold and with the free hand (vra_hide_left_loose).

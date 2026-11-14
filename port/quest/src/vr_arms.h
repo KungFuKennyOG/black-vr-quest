@@ -215,6 +215,36 @@ static inline int vra_apply(const VrArmRig *rig, float *constants, int cut, int 
  * vgm_off_hand_mirror) takes the gun hand's pose to the off hand's, mirrored, in model space. The left wrist goes to
  * a * (posed right wrist) * mirror, and every left-arm bone moves rigidly with it, so the game's own finger pose is
  * kept. Returns 1 when it moved the hand. */
+/* The loose parts the game's left hand holds (off their place on the gun by 3+ cm, nearer the left wrist than the
+ * right: the shotgun's spare shell, parked there even at rest and through the raise and cock) are hidden: their rows
+ * zeroed, their triangles collapse to a point. Returns how many. */
+static inline int vra_hide_left_loose(const VrArmRig *rig, float *constants)
+{
+    const int wl = rig->wrist[VRA_LEFT], wr = rig->wrist[VRA_RIGHT];
+    float fr[12], fl[12], root_now[12], root_inv[12], root_bind_inv[12];
+    int k, j, n = 0;
+    if (wl < 0 || wr < 0 || rig->gun_root < 0 || VRA_PALETTE_BASE + 3 * rig->n > 192) return 0;
+    vra_m34_mul(vra_rows(constants, wr), rig->bind[VRA_RIGHT], fr);
+    vra_m34_mul(vra_rows(constants, wl), rig->bind[VRA_LEFT], fl);
+    vra_m34_mul(vra_rows(constants, rig->gun_root), rig->bindk[rig->gun_root], root_now);
+    if (!vra_m34_inv(root_now, root_inv) || !vra_m34_inv(rig->bindk[rig->gun_root], root_bind_inv)) return 0;
+    for (k = 0; k < rig->n; k++) {
+        float now[12], rel_now[12], rel_bind[12], dx, dy, dz, dl, dr, *rows;
+        if (!rig->loose[k]) continue;
+        rows = vra_rows(constants, k);
+        vra_m34_mul(rows, rig->bindk[k], now);
+        vra_m34_mul(root_inv, now, rel_now);
+        vra_m34_mul(root_bind_inv, rig->bindk[k], rel_bind);
+        dx = rel_now[3] - rel_bind[3]; dy = rel_now[7] - rel_bind[7]; dz = rel_now[11] - rel_bind[11];
+        dl = (now[3] - fl[3]) * (now[3] - fl[3]) + (now[7] - fl[7]) * (now[7] - fl[7]) + (now[11] - fl[11]) * (now[11] - fl[11]);
+        dr = (now[3] - fr[3]) * (now[3] - fr[3]) + (now[7] - fr[7]) * (now[7] - fr[7]) + (now[11] - fr[11]) * (now[11] - fr[11]);
+        if (!(sqrtf(dx * dx + dy * dy + dz * dz) > 0.03f) || !(dl < dr)) continue;
+        for (j = 0; j < 12; j++) rows[j] = 0.0f;
+        n++;
+    }
+    return n;
+}
+
 static inline int vra_place_off_hand(const VrArmRig *rig, float *constants, const float a[16])
 {
     const int wl = rig->wrist[VRA_LEFT], wr = rig->wrist[VRA_RIGHT];

@@ -788,7 +788,7 @@ static int arms_game_left_on_gun(const ArmsEntry *e, const float *constants, VrM
 bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
 {
     ArmsEntry *e = NULL;
-    int cut, mode, engaged, show_off, have_k = 0, place = 0, moved = 0, game_hold = 0, i;
+    int cut, mode, engaged, show_off, have_k = 0, place = 0, moved = 0, game_hold = 0, reloading = 0, hid = 0, i;
     static int last_engaged, last_game_hold = -1;
     float kf[16], off[16], used[3] = { 0.0f, 0.0f, 0.0f };
     VrMat4 k;
@@ -893,6 +893,7 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
                  busy ? "on the gun: the game's animation" : "back to the controller", e->root_turn, e->left_dev, loose);
         }
         if (busy) { game_hold = 1; show_off = 1; }
+        reloading = busy && e->have_root;
     }
     if (mode == VR_LEFT_HAND_TRACKED && have_k && !game_hold) {
         const VrRenderGun *g = vr_render_gun();
@@ -904,7 +905,10 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
             place = 1;
         }
     }
-    if (!cut && show_off && !place && !moved) return false;   /* the game's arms, unchanged */
+    /* the parts the game's left hand holds (the shotgun's spare shell) show only in its reloads: hidden at rest, in the
+     * raise and cock, with the hold and with the free hand */
+    if (mode == VR_LEFT_HAND_TRACKED && !reloading && !place) hid = vra_hide_left_loose(&e->rig, constants) > 0;
+    if (!cut && show_off && !place && !moved && !hid) return false;   /* the game's arms, unchanged */
     {
         static unsigned logged, changes;
         static int last_logged_engaged = -1;
@@ -922,7 +926,7 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
         if (placed) show_off = 1;
     }
     /* the model's right arm holds the gun (the gun hand, whichever controller it is on); its left is the off hand */
-    return vra_apply(&e->rig, constants, cut, show_off, 1) > 0 || place || moved;
+    return vra_apply(&e->rig, constants, cut, show_off, 1) > 0 || place || moved || hid;
 }
 
 /* The hand delta in stage space, D = hand_late * inverse(hand_game), and whether it is applied: gun_latch on, both
