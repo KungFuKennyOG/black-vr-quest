@@ -143,3 +143,17 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
   15+ deg from the game's rest, and 0.35 s after (not loose parts: firing throws the AK's 14 cm every shot; their
   check is against their rest places now, the AK keeps one 22 cm from its bind place). Firing does not trip it (two-handed:
   the hand moves with the gun; one-handed: the hand stays in the view).
+
+## Every gun checked (harness, level 1, Nov 13-14)
+| gun | hold | straightened |
+|---|---|---|
+| AK (ak1), assault rifle (asr), heavy MG (hvy), shotgun (shg) | two-handed (grip takes it, two-handed aim) | no |
+| pistol (pst) | look only (cupped hand, no two-handed aim) | no |
+| RPG | look only (left hand 18 cm beside the tube) | 36 deg |
+| sniper (snr) | look only (left wrist at rest 15 cm up-left of the hand) | 33 deg |
+| UZI (smg) | one-handed | no |
+| *5 variants (ak5, as5, hv5, ps5, sh5, sm5, sn5) | not in level 1's gun table: untested (same models as the base guns) | |
+| bns | accepted, but never held still for the rest capture (wrist lock only) | |
+- Straightening now uses the game's muzzle record (game thread -> `vr_gun_barrel`), not the gun root's z: same
+  answer for the RPG (36) and the sniper (33).
+- The left-wrist trigger for the game's animations is 8 cm (the sniper's idle moves it 4.6 cm).

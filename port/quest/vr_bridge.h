@@ -425,6 +425,10 @@ void vr_grip_lock(float l[16]);
  * ahead: the grip takes it, two-handed aim), 1 a hold only (the pistol's cupped hand: the grip shows it, no aim), 0
  * one-handed (the UZI: the grip does nothing, the left hand stays free). */
 void vr_set_gun_two_handed(int two);
+/* Game thread: the drawn gun's barrel as the game holds it (the muzzle record's at, unit, in the gun hand's LH frame,
+ * before the arms' lock), valid 0/1. Render thread: read it to point an angled gun along the controller. */
+void vr_set_gun_barrel(const float d[3], int valid);
+int vr_gun_barrel(float d[3]);
 /* Game thread: the player fired (the muzzle flash was drawn). Render thread: the time of the last shot (CLOCK_MONOTONIC
  * ns, 0 = none) and the recoil kick scale (blackvr.ini recoil). */
 void vr_note_shot(void);

@@ -516,14 +516,16 @@ static void arms_m34_from_m4(VrMat4 m, float o[12])
 }
 
 /* Guns the game draws angled across the screen toward the flat crosshair (the RPG's tube ~35 deg off straight ahead;
- * the UZI's within 2) would sit in the hand pointing that far off the controller. At the rest capture, a gun root
- * whose z (the barrel, as the muzzle record's at) is 8..50 deg off the hand's forward is turned about the wrist's
- * target so it points along the controller, hand and all. */
+ * the UZI's within 2) would sit in the hand pointing that far off the controller. At the rest capture, a gun whose
+ * barrel (the muzzle record's at, from the game thread: vr_gun_barrel) is 8..50 deg off the hand's forward is turned
+ * about the wrist's target so it points along the controller, hand and all. */
 static void arms_straighten(ArmsEntry *e, const float target[3])
 {
     float z[3], n, c, sn, ax[3], q[12], t1[12], out[12];
     int i;
-    for (i = 0; i < 3; i++) z[i] = e->root_t[i * 4 + 2];
+    /* the barrel: the game's muzzle record (the shots' own), in the hand frame; the gun root's z is no measure (the
+     * sniper's is 33 deg off its barrel) */
+    if (!vr_gun_barrel(z)) return;
     n = sqrtf(z[0] * z[0] + z[1] * z[1] + z[2] * z[2]);
     if (!(n > 1e-9f)) return;
     for (i = 0; i < 3; i++) z[i] /= n;
@@ -832,7 +834,7 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
     } else {
         last_game_hold = 0;
     }
-    /* the game's own animations of the left hand (a reload, a switch...): its left wrist leaves its rest (4 cm, on the
+    /* the game's own animations of the left hand (a reload, a switch...): its left wrist leaves its rest (8 cm; the sniper idles 4.6, on the
      * gun and in the view) or the game tilts the gun (15 deg from its rest; firing stays under 10). The game's own left hand is shown doing it, on the gun
      * in your hand, for the whole animation and 0.35 s after; then it is back at your controller */
     if (mode == VR_LEFT_HAND_TRACKED && !game_hold && e->rig.wrist[VRA_LEFT] >= 0) {
@@ -846,7 +848,7 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
         const float loose = e->have_root ? vra_loose_off(&e->rig, constants) : 0.0f;
         /* (until the rest capture, ~1 s after the gun comes up, the hand stays free) */
         /* (not the loose parts: firing throws the AK's 14 cm, every shot) */
-        if (e->have_root && (e->root_turn > 15.0f || (e->have_lw && e->left_dev > 0.04f)))
+        if (e->have_root && (e->root_turn > 15.0f || (e->have_lw && e->left_dev > 0.08f)))
             busy_until = now + 350000000LL;
         busy = now < busy_until;
         if (busy != last_busy) {

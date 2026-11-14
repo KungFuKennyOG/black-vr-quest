@@ -842,6 +842,25 @@ void vr_grip_lock(float l[16])
 
 void vr_set_gun_two_handed(int two) { __atomic_store_n(&g_gun_two_handed, two < 0 ? 0 : two > 2 ? 2 : two, __ATOMIC_RELAXED); }
 
+static float g_gun_barrel[3];
+static int g_gun_barrel_ok;
+void vr_set_gun_barrel(const float d[3], int valid)
+{
+    pthread_mutex_lock(&g_lock);
+    if (valid) memcpy(g_gun_barrel, d, sizeof(g_gun_barrel));
+    g_gun_barrel_ok = valid;
+    pthread_mutex_unlock(&g_lock);
+}
+int vr_gun_barrel(float d[3])
+{
+    int ok;
+    pthread_mutex_lock(&g_lock);
+    memcpy(d, g_gun_barrel, sizeof(g_gun_barrel));
+    ok = g_gun_barrel_ok;
+    pthread_mutex_unlock(&g_lock);
+    return ok;
+}
+
 void vr_note_shot(void) { __atomic_store_n(&g_last_shot_ns, mono_ns(), __ATOMIC_RELAXED); }
 int64_t vr_last_shot_ns(void) { return __atomic_load_n(&g_last_shot_ns, __ATOMIC_RELAXED); }
 float vr_recoil_scale(void) { return g_xr.cfg.recoil; }

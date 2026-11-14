@@ -473,6 +473,37 @@ static int bvr_barrel_in_hand(VrVec3 *p, VrVec3 *a)
     return vrm_len(*p) < 1.5f && a->z < -0.985f;
 }
 
+/* The drawn gun's barrel as the game holds it, before the arms' lock: the muzzle record's at through the last camera
+ * entity and the grip (bvr_barrel_in_hand without L), LH hand frame (z forward), published for the arms' straightening */
+static void bvr_publish_flat_barrel(void)
+{
+    uint32_t core, m, t;
+    VrMat4 ei, back = vrm_m4_identity(), x;
+    float r[4], q[4], d[3];
+    int c, ok = 0;
+    if (bvr.yv_ok && black_pc_ram_span(0x2D45D4u, 4u)) {
+        core = GUEST32(0x2D45D4u);
+        m = black_pc_ram_span(core, 0x35Cu) ? GUEST32(core + 0x358u) : 0u;
+        t = black_pc_ram_span(m, 0x48u) ? GUEST32(m + 0x44u) : 0u;
+        if (black_pc_ram_span(t + 0x40u, 0x40u) && vrm_m4_inverse(bvr.w_entity, &ei)) {
+            VRM_AT(back, 0, 3) = -bvr.grip.x; VRM_AT(back, 1, 3) = -bvr.grip.y; VRM_AT(back, 2, 3) = -bvr.grip.z;
+            x = vrm_m4_mul(back, ei);
+            for (c = 0; c < 3; c++) r[c] = bvr_f32(t + 0x60u + (uint32_t)c * 4u);   /* row 2: at */
+            r[3] = 0.0f;
+            vrm_m4_apply(x, r, q);
+            {
+                VrVec3 v = vrm_v3(q[0], q[1], q[2]);
+                if (vrm_normalize(&v)) {
+                    if (v.z < 0.0f) v = vrm_scale(v, -1.0f);
+                    d[0] = v.x; d[1] = v.y; d[2] = v.z;
+                    ok = d[2] > 0.5f;                                  /* within 60 deg of ahead: a held gun */
+                }
+            }
+        }
+    }
+    vr_set_gun_barrel(d, ok);
+}
+
 static void black_vr_look(uint32_t look)
 {
     const VrGameConfig *cfg;
@@ -498,6 +529,7 @@ static void black_vr_look(uint32_t look)
         hand_rel = vgm_relative(origin, f->hand[cfg->aim_hand & 1].aim);
         hand_mode = cfg->aim_mode == VR_AIM_HAND && f->hand[cfg->aim_hand & 1].valid;
         d = vgm_aim_dir(hand_mode, head_rel, hand_rel, vrm_v3(0, 0, 0), cfg->aim_converge_m);
+        bvr_publish_flat_barrel();
         if (hand_mode && cfg->aim_barrel) {
             /* shots converge on the drawn gun's barrel line (not the controller's ray), aim_converge metres out */
             VrVec3 bp, ba;
