@@ -110,6 +110,26 @@ LEVEL_PLAN_FAST = [
     ("waits", 6), ("end",),
 ]
 
+# the pause menu's Options page and its VR SETTINGS entry (pause, down 3 to OPTIONS, down 5 = the last row)
+LEVEL_PLAN_PAUSEVR = [
+    ("waits", 20), ("event", "settled"),
+    ("press", "menu", ("s", 0.3), "pause"), ("untilmode", 1, 90), ("waitf", 16, 120), ("event", "pause menu up"), ("cap",),
+    ("press", "down", ("s", 0.7), "pause: down"), ("waitf", 16, 90),
+    ("press", "down", ("s", 0.7), "pause: down 2"), ("waitf", 16, 90),
+    ("press", "down", ("s", 0.7), "pause: down to OPTIONS"), ("waitf", 16, 90), ("cap",),
+    ("press", "a", ("s", 0.7), "pause: OPTIONS"), ("waitf", 30, 150), ("event", "options page"), ("cap",)] + [x for k in range(5) for x in (
+    ("press", "down", ("s", 0.7), "options: down %d" % (k + 1)), ("waitf", 16, 90))] + [
+    ("event", "vr settings row"), ("cap",),
+    ("press", "a", ("s", 0.7), "options: VR SETTINGS"), ("waitf", 30, 150), ("event", "vr settings page"), ("cap",),
+    ("press", "down", ("s", 0.7), "vr settings: down"), ("waitf", 16, 90),
+    ("press", "a", ("s", 0.7), "vr settings: COMFORT"), ("waitf", 30, 150), ("event", "comfort rows"), ("cap",),
+    ("press", "b", ("s", 0.7), "back"), ("waitf", 30, 150), ("cap",),
+    ("press", "b", ("s", 0.7), "back"), ("waitf", 30, 150), ("event", "options again"), ("cap",),
+    ("press", "b", ("s", 0.7), "back"), ("waitf", 30, 150),
+    ("press", "b", ("s", 0.7), "close pause"), ("stereo", 60, [("menu", 0.3), ("b", 0.4), ("a", 0.4)]),
+    ("waits", 6), ("end",),
+]
+
 # level 1 in depth: walk on through the level (with turns, shots and use presses) for ~1350 stereo frames
 LEVEL_PLAN_DEEP = [("waits", 20), ("event", "settled"), ("cap",)] + [x for i in range(4) for x in (
     ("press", "fwd", ("f", 120), "deep %d: walk" % i), ("waits", 124),
@@ -191,7 +211,7 @@ FRONTEND_PLAN = [
     ("waitt", 5), ("end",),
 ]
 
-PLANS = {"level": LEVEL_PLAN, "fast": LEVEL_PLAN_FAST, "deep": LEVEL_PLAN_DEEP, "scope": LEVEL_PLAN_SCOPE, "scope2": LEVEL_PLAN_SCOPE2,
+PLANS = {"pausevr": LEVEL_PLAN_PAUSEVR, "level": LEVEL_PLAN, "fast": LEVEL_PLAN_FAST, "deep": LEVEL_PLAN_DEEP, "scope": LEVEL_PLAN_SCOPE, "scope2": LEVEL_PLAN_SCOPE2,
          "rpg": LEVEL_PLAN_RPG, "frontend": FRONTEND_PLAN, "idle": [("waits", 200), ("end",)]}
 
 
