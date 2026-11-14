@@ -453,6 +453,12 @@ Why: at resolution_scale 1.2 the headset is GPU-bound (bx-pusher ~50% busy, wait
 density map made things slower (branch `foveation`). The working hypothesis was that the main target is ended and
 reopened ~3 times per frame, each a full LOAD/STORE round trip through memory on Adreno's tiler.
 
+**Headset A/B, 2026-11-13** (Quest 3, resolution_scale 1.0, level 1, 9 ten-second windows each way in gameplay,
+`RECOMP_KVK_PASS_AB`): GPU 15.15 -> 13.53 ms per frame (median 15.29 -> 13.51; adjacent pairs 1.6 ms apart, 15 of
+16 in favour), the fx stage 3.32 -> 1.35 ms, world / glare / compose unchanged; main target opened 4.20 -> 3.14x;
+estimated attachment traffic 301 -> 213 MiB. 60 fps either way (the game is at 60 Hz): headroom, about 3.1 ms of
+the 16.7 ms frame instead of 1.5 ms. No Vulkan errors.
+
 ### 13.1 The pass map (measured, level 1 start room)
 
 Recorded with the call trace (13.4) in game_render_x86 and replayed with `RECOMP_KVK_PASSLOG=1`; one steady stereo
@@ -529,7 +535,7 @@ the first time, then the pipeline manifest has it for the next start.
 | Switch | Default | What |
 |---|---|---|
 | `RECOMP_KVK_PASS_MERGE` | 1 | 0: the pass structure exactly as before (no parking, no attaching, no keeping) |
-| `RECOMP_KVK_PASS_AB` | 1 on Android (test branch), 0 on the host | 1: an A/B in one session: pass merging flips on/off after every 10 s `PASSES` report (at the next frame start), GPU timers on, so the log alternates `pass merge on (A/B)` / `off (A/B)` windows with their `GPUTIME` lines; `kvk_set_pass_merge()` turns it off. **Set `KVK_PASS_AB_DEFAULT` to 0 before this branch merges.** |
+| `RECOMP_KVK_PASS_AB` | 0 (was 1 on Android for the 2026-11-13 headset A/B) | 1: an A/B in one session: pass merging flips on/off after every 10 s `PASSES` report (at the next frame start), GPU timers on, so the log alternates `pass merge on (A/B)` / `off (A/B)` windows with their `GPUTIME` lines; `kvk_set_pass_merge()` turns it off. |
 | `RECOMP_KVK_GPUTIME` | 0 | 1: GPU timestamps around every render pass, per-stage ms in a `GPUTIME` line every 10 s |
 | `RECOMP_KVK_PASSLOG`, `_FRAME`, `_EVERY` | 0, 600, 0 | one `PASS` line per pass of frame `_FRAME` (and every `_EVERY`-th frame): target, size, layers, load/store ops, draws, why it ended; `parked`/`unparked` lines |
 | `RECOMP_KVK_TRACE`, `_N`, `_EVERY` | off | host builds only (`KVK_TRACE`): record the backend's calls (13.4) |

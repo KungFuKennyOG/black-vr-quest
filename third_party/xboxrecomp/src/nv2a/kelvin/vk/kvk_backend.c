@@ -803,11 +803,7 @@ static bool pass_merge(void)
  * log alternates "PASSES ... pass merge on" / "off" lines, each followed by its GPUTIME line. 0 turns it off.
  * KVK_PASS_AB_DEFAULT is the value without the env line. kvk_set_pass_merge() (tests) turns the A/B off. */
 #ifndef KVK_PASS_AB_DEFAULT
-#if defined(__ANDROID__)
-#define KVK_PASS_AB_DEFAULT 1   /* gpu-pass-merge test branch only: set to 0 before this merges to main */
-#else
-#define KVK_PASS_AB_DEFAULT 0   /* host harness and tests: never flip on their own */
-#endif
+#define KVK_PASS_AB_DEFAULT 0   /* the headset A/B is done (2026-11-13: 15.2 -> 13.5 ms GPU per frame) */
 #endif
 static int s_pass_ab = -1;
 static bool s_pass_ab_flip;
