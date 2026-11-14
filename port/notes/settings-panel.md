@@ -7,7 +7,7 @@ Status 2026-11-12:
   `/root/black/build-vrmenu-x86`): front end Options shows VR SETTINGS under the stock buttons; selecting it opens
   the VR SETTINGS page (sections), each section's rows change with left/right/A, B goes back, leaving saves
   blackvr.ini. Screenshots: `/root/black/build-vrmenu-x86/evidence/*.png` (listed below). The pause menu's Options
-  page (PauseMenuOptionXbox) has no entry; see "Pause menu".
+  page (PauseMenuOptionXbox) has the entry too; see "Pause menu".
 - **Fallback: the floating Dear ImGui panel** (xr_panel.c, `settings_menu = panel` or `both`): a world-locked quad
   layer opened with the left stick click in a menu. Unit- and integration-tested (tests/vr_glue), described from
   "The floating panel" below.
@@ -79,13 +79,14 @@ Not in the harness: the laser (the page is pad-driven), the Quest glyphs' final 
 stream's), sounds (no audio device on the host).
 
 ### Pause menu
-**Removed on 2026-11-12, by the user's choice.** The entry on `PauseMenuOptionXbox` (holder Main, the stock
-ToggleCrouch button copied, placed 27 units under MUSIC VOLUME, the "SELECT" legend prompt hidden) drew the button
-over the music volume bar: that page's volume rows are a label plus a bar, 64 units apart, so 27 lands on the bar
-(seen on the headset and reproduced in the harness). In the harness its VR SETTINGS page and GRAPHICS rows did open.
-To bring it back, restore the table entry in `src/black_vr_menu.inc` with a drop of about 66.5, the hidden SELECT
-prompt's slot. The harness could not pause before: a Menu press spanning one slow XR frame read as a 1 s hold
-(objectives). `vr_input_map.h` now times a hold from the frame the press is first seen, so a tap pauses there too.
+**Back on 2026-11-14** (Kenny asked for it again). The entry on `PauseMenuOptionXbox` (holder Main, the stock
+ToggleCrouch button copied, ring toggleCrouchButton..musicVolumeButton, the "SELECT" legend prompt hidden) now sits
+**66.5** units under MUSIC VOLUME, below that row's bar, in the hidden SELECT prompt's slot. The first version
+(2026-11-12, removed the same day) used 27, which drew the button over the music volume bar: that page's volume rows
+are a label plus a bar, 64 units apart. Harness (`sweep_drive.py --plan pausevr`, level 1: pause, down 3 to OPTIONS,
+down 5 to VR SETTINGS, A, down, A = COMFORT, back out; `BLACKVR_MENU_TRACE=1` logs the page and inputs): the button
+sits under the bar with the stock spacing, takes the selection bar, opens the VR SETTINGS list and the COMFORT rows,
+and B goes back to the Options page. The harness drops menu presses while a page slides; the plan holds each 0.7 s.
 
 ## The floating panel (fallback: `settings_menu = panel | both`)
 
