@@ -329,6 +329,26 @@ recomp_manual.c hook calls (all `#ifdef BLACK_VR`):
   start, checkpoint, menu) built its view from an unset or old body yaw: the first frame of every level
   faced 55-96 deg off (sweep issue 1). `black_vr_camera_after_world` now steps the body yaw from the
   game's facing first (the look's own step: unset -> anchored; a change of 20 deg or more absorbed).
+- **Tutorial hints that stop the game** (2026-11-13, Kenny: they had stopped showing, and when they
+  showed they dropped to the flat screen). Two separate things:
+  - *Why they stopped.* `sub_0012F650` queues hint `esi` (through `12B3C0`) only if its shown byte
+    `[2DB670+id]` is clear (64 bytes, cleared at mission load), the frontend's level selection
+    `[2D45F0]+2020C` is 0 (mission 1), and the mission's completion record
+    `[2D0D84 + difficulty*0x100 + level*0x20]` (2 = completed, -1 = never; the menus read it) is not
+    above 0 on **any** difficulty. Kenny beat mission 1 on Easy (ResultsEasy in his logs), so the game
+    stopped showing them everywhere: the game's own behaviour, not the prompts work. VR setting
+    `tutorial_hints` (Comfort tab, on by default) wraps `sub_0012F650`: the records read as not
+    completed for the call and are restored after it (`recomp_manual.c`; generate.py renames the
+    original to `sub_0012F650_gen`).
+  - *Which ones stop the game.* `12B3C0` adds the "PRESS A TO CONTINUE" line for the ids at `28AA80`:
+    12, 13 (health packs), 23, 87, 24. The game then stops its world clock (so
+    `black_pc_input_gameplay_blocked_query` is true and the look integrator stops) but keeps drawing
+    the frozen world each frame, blurred by the action blur. `bvr_hint_stop` (element of `1314E0`:
+    pending `+22A4` / active `+2110` in that list, state `+1B` 5..8, the pause menu `main+210C8` not open)
+    keeps `black_vr_decide` STEREO with the head tracked, the hint on the HUD quad, and lets the action
+    blur through (`sub_001772E0`, otherwise off in STEREO). The camera after the hint gets a fresh
+    look count, so no flat frame. `BLACKVR_TEST_HINT=id[,hud_updates]` queues a hint in the harness;
+    `[BLACK_VR] tutorial hints:` lines log the gate inputs, each hint shown, and the element's state.
 - **Self-checks** (logged once):
   - **Screen-right convention:** the RW right row is the screen's left (docs/photo-mode.md). This
     is confirmed by 32 static world-draw MVPs whose view axes match the head frame, and flipped after 8 contrary ones.

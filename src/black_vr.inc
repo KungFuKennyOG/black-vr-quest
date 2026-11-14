@@ -186,10 +186,41 @@ static float bvr_scope_zoom_min(void)
     return bvr_weapon_scoped() && z > 2.0f ? 2.0f : z;
 }
 
+/* The tutorial hint element (ecx of its update, 1314E0), noted by black_vr_hint_probe each HUD update. */
+static uint32_t bvr_hint_el;
+static int bvr_hint_was;      /* black_vr_decide: the last world camera was kept STEREO for a hint */
+
+/* A tutorial hint that stops the game is up: the element's pending (+22A4) or active (+2110) hint is one of the five
+ * that 12B3C0 gives a "PRESS A TO CONTINUE" line (the id list at 28AA80: 12, 13, 23, 87, 24), while its state byte
+ * (+1B) is 5..8 (fading in, shown, fading out), and the pause menu (main +210C8) is not open over it. The game stops
+ * its world clock for these (black_pc_input_gameplay_blocked_query) but keeps drawing the frozen world each frame
+ * (blurred, the hint at the bottom), so VR stays STEREO with the head tracked: Kenny 2026-11-13, "needs to be changed
+ * into smt that doesnt change you to flat screen", "has to look like the stop-the-game hints in the original game". */
+static int bvr_hint_stop(void)
+{
+    const uint32_t el = bvr_hint_el;
+    uint32_t a, p, st, i;
+    if (!el || !black_pc_ram_span(el, 0x2300u) || !black_pc_ram_span(0x0028AA80u, 20u)) return 0;
+    st = GUEST8(el + 0x1Bu);
+    if (st < 5u || st > 8u) return 0;
+    a = GUEST32(el + 0x2110u);
+    p = GUEST32(el + 0x22A4u);
+    if (black_pc_ram_span(0x002D45F0u, 4u)) {
+        const uint32_t main = GUEST32(0x002D45F0u);
+        if (black_pc_ram_span(main, 0x210C9u) && GUEST8(main + 0x210C8u)) return 0;
+    }
+    for (i = 0; i < 5u; i++) {
+        const uint32_t id = GUEST32(0x0028AA80u + i * 4u);
+        if (id == a || id == p) return 1;
+    }
+    return 0;
+}
+
 /* -2: not the world camera (state untouched); -1: VR presentation inactive. */
 static int black_vr_decide(uint32_t camera)
 {
     uint32_t renderer;
+    int hint;
     if (!black_pc_ram_span(BVR_RENDERER, 4u)) return -2;
     renderer = GUEST32(BVR_RENDERER);
     if (!black_pc_ram_span(renderer, 0xD4F0u) || camera != renderer + 0xD450u) return -2;
@@ -197,9 +228,15 @@ static int black_vr_decide(uint32_t camera)
     if (bvr.look_cams < 1000000u) bvr.look_cams++;
     if (pc_photo_active() || pc_split_enabled() || black_split_pass) return VR_PRESENT_FLAT_MENU;
     if (!black_photo_world_camera()) return VR_PRESENT_FLAT_CINEMA;     /* scripted / not the player's view */
-    if (black_pc_input_gameplay_blocked_query()) return VR_PRESENT_FLAT_MENU;
-    if (!bvr.look || bvr.look_cams > BVR_LOOK_STALE_CAMS) return VR_PRESENT_FLAT_MENU;
-    if (bvr_look_stale_s() > 0.0 && black_vr_now() - bvr.look_time > bvr_look_stale_s()) return VR_PRESENT_FLAT_MENU;
+    /* a stop-the-game tutorial hint: the clock is stopped and the look integrator with it; the world stays 3D */
+    hint = bvr.look && bvr_hint_stop();
+    /* the hint just went: the look integrator runs again from the next game frame; a fresh count of cameras, so the
+     * frame between does not drop to the flat quad (harness 2026-11-13: one flat frame there) */
+    if (bvr_hint_was && !hint) bvr.look_cams = 0;
+    bvr_hint_was = hint;
+    if (!hint && black_pc_input_gameplay_blocked_query()) return VR_PRESENT_FLAT_MENU;
+    if (!bvr.look || (!hint && bvr.look_cams > BVR_LOOK_STALE_CAMS)) return VR_PRESENT_FLAT_MENU;
+    if (!hint && bvr_look_stale_s() > 0.0 && black_vr_now() - bvr.look_time > bvr_look_stale_s()) return VR_PRESENT_FLAT_MENU;
     if (bvr_zoom() >= bvr_scope_zoom_min()) return VR_PRESENT_FLAT_SCOPE;
     return VR_PRESENT_STEREO;
 }
@@ -214,6 +251,59 @@ static int black_vr_decide(uint32_t camera)
  * lists ([2D12E4] +A0 + layer * A8, next at +8). Called each frame from the messages element's update (1314E0).
  * Kenny 2026-11-13: no message seen on picking up a recon map; this tells a message the game never posted from one
  * that was posted but not seen. */
+static void black_vr_msg_watch(void);
+
+/* Tutorial hints (the ones that stop the game): sub_0012F650 queues hint esi through 12B3C0 only if its "shown" byte
+ * ([2DB670+id]) is clear, and, for the in-mission callers (args 0,1), only if the frontend's level selection
+ * ([2D45F0]+2020C) is 0 and the level's record ([2D0D84 + difficulty*0x100 + index*0x20], the menu reads 2 there as
+ * "completed on this difficulty") is 0 on every difficulty. This logs those inputs when they change, and every hint
+ * whose shown byte gets set (= the game queued it). Kenny 2026-11-13: no stop-the-game hint on either difficulty. */
+static void black_vr_hint_probe(uint32_t el)
+{
+    static uint32_t last[8];
+    static uint8_t shown[0x40];
+    static int init;
+    uint32_t now[8];
+    unsigned i, n = 0, idx = 0xFFu;
+    if (!black_pc_ram_span(0x002D45F0u, 4u) || !black_pc_ram_span(0x002DB670u, 0x40u) ||
+        !black_pc_ram_span(0x002D0D84u, 0x400u) || !black_pc_ram_span(0x00288648u, 8u)) return;
+    {
+        const uint32_t g = GUEST32(0x002D45F0u);
+        if (!g || !black_pc_ram_span(g + 0x2014Cu, 4u) || !black_pc_ram_span(g + 0x2020Cu, 1u)) return;
+        now[0] = GUEST8(g + 0x2020Cu);
+        now[1] = GUEST32(g + 0x2014Cu);
+    }
+    for (i = 0; i < 8u; i++) if ((uint32_t)(int32_t)(int8_t)GUEST8(0x00288648u + i) == now[0]) { idx = i; break; }
+    now[2] = idx;
+    for (i = 0; i < 4u; i++) now[3 + i] = idx < 8u ? GUEST32(0x002D0D84u + i * 0x100u + idx * 0x20u) : 0xEEEEEEEEu;
+    for (i = 0; i < 0x40u; i++) n += GUEST8(0x002DB670u + i) != 0;
+    now[7] = n;
+    if (!init || memcmp(now, last, sizeof now)) {
+        fprintf(stderr, "[BLACK_VR] tutorial hints: level selection %u (index %d), difficulty %u, level record by "
+                "difficulty %d %d %d %d, %u hint(s) already shown%s\n", now[0], (int)(idx < 8u ? idx : -1), now[1],
+                (int)now[3], (int)now[4], (int)now[5], (int)now[6], n,
+                now[0] != 0u ? " - the game shows them only from level selection 0" :
+                ((int)now[3] > 0 || (int)now[4] > 0 || (int)now[5] > 0 || (int)now[6] > 0) ? " - the game skips them once this record is above 0" : "");
+        memcpy(last, now, sizeof now);
+    }
+    for (i = 0; i < 0x40u; i++) {
+        const uint8_t v = GUEST8(0x002DB670u + i);
+        if (v && !shown[i]) fprintf(stderr, "[BLACK_VR] tutorial hints: hint %u marked shown%s\n", i, init ? "" : " (before the first HUD update)");
+        shown[i] = v;
+    }
+    bvr_hint_el = el;
+    {   /* el, the hint element (ecx of 1314E0): active hint +2110, pending +22A4, state byte +1B */
+        static uint32_t la = 1, lp = 1, ls = 0x100;
+        if (black_pc_ram_span(el, 0x2300u)) {
+            const uint32_t a = GUEST32(el + 0x2110u), p = GUEST32(el + 0x22A4u), st = GUEST8(el + 0x1Bu);
+            if (a != la || p != lp || st != ls)
+                fprintf(stderr, "[BLACK_VR] tutorial hints: element %08X active %d pending %d state %u\n", el, (int)a, (int)p, st);
+            la = a; lp = p; ls = st;
+        }
+    }
+    init = 1;
+}
+
 static void black_vr_msg_watch(void)
 {
     static uint32_t seen_el, said;
