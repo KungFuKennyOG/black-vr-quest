@@ -287,14 +287,16 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
     {
         const int was = g_two.engaged;
         const float off_grip = gun ? touch->lgrip : touch->rgrip;
-        aim[gun] = vrg_two_hand_update(&g_two, gc, valid[gun] && in_game, aim[gun], valid[off], aim[off].position,
+        const int gun_hands = __atomic_load_n(&g_gun_two_handed, __ATOMIC_RELAXED);   /* 0 none, 1 hold only, 2 aim */
+        const VrPose two_aim = vrg_two_hand_update(&g_two, gc, valid[gun] && in_game, aim[gun], valid[off], aim[off].position,
                                        /* held: takes the gun at 50 %, lets go only under 25 % (a relaxed hold on a
                                         * foregrip hovers around one threshold, and dropped the grip every second) */
                                        (g_two.engaged ? off_grip > 0.25f : off_grip > 0.5f) &&
-                                           __atomic_load_n(&g_gun_two_handed, __ATOMIC_RELAXED), dt);
+                                           gun_hands > 0, dt);
+        if (gun_hands == 2) aim[gun] = two_aim;          /* a hold only (the pistol's cupped hand): the look, not the aim */
         if (g_two.engaged != was)
             XLOGI("two-hand %s (hands %.2f m apart)", g_two.engaged ? "on" : "off", g_two.last_dist);
-        g_two_hand_on = g_two.engaged;
+        g_two_hand_on = g_two.engaged && gun_hands == 2;
     }
     for (h = 0; h < 2; h++) {
         g_live.hand[h].aim = aim[h];
@@ -838,7 +840,7 @@ void vr_grip_lock(float l[16])
     pthread_mutex_unlock(&g_lock);
 }
 
-void vr_set_gun_two_handed(int two) { __atomic_store_n(&g_gun_two_handed, two ? 1 : 0, __ATOMIC_RELAXED); }
+void vr_set_gun_two_handed(int two) { __atomic_store_n(&g_gun_two_handed, two < 0 ? 0 : two > 2 ? 2 : two, __ATOMIC_RELAXED); }
 
 void vr_note_shot(void) { __atomic_store_n(&g_last_shot_ns, mono_ns(), __ATOMIC_RELAXED); }
 int64_t vr_last_shot_ns(void) { return __atomic_load_n(&g_last_shot_ns, __ATOMIC_RELAXED); }

@@ -132,7 +132,9 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
 ## The left hand, Kenny's rules (Nov 13 evening)
 - Not gripping: the left hand floats at the controller. (d6cfd4f broke this on straightened guns: the reload test
   measured the gun's turn against the straightened lock, ~36 deg always, so the game's hand stayed on.)
-- One-handed guns (the game's left wrist off the gun at the rest capture; the UZI/SMG measured -0.26 -0.41 -0.34 m,
+- One-handed guns: the UZI (left wrist at rest -0.26 -0.41 -0.34 m from the controller, > 25 cm): the grip does nothing.
+  The pistol (left hand cupped under the grip, 0.14 m): the grip shows the game's hold, the look only, no two-handed
+  aim (vr_set_gun_two_handed 1). Earlier text: one-handed guns (the game's left wrist off the gun at the rest capture,
   the pistol): the grip never takes the gun. No two-handed aim either (`vr_set_gun_two_handed`, gates the bridge's
   two-hand update). The mirrored right hand is gone.
 - Two-handed guns: gripping near the gun shows the game's own two-handed hold ("the original two hands on the gun").

@@ -809,10 +809,12 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
      * (the pistol stays one-handed, the left hand free) */
     if (e->have_root && !e->two_checked && have_k && e->rig.wrist[VRA_LEFT] >= 0) {
         float hl[3];
-        e->two_handed = arms_game_left_on_gun(e, constants, k, hl);
+        e->two_handed = arms_game_left_on_gun(e, constants, k, hl) ? 2 :
+                        sqrtf(hl[0] * hl[0] + hl[1] * hl[1] + hl[2] * hl[2]) < 0.25f ? 1 : 0;
         e->two_checked = 1;
         GLOG("arms: a %s gun (the game's left wrist at rest %.3f %.3f %.3f m in the gun hand frame)",
-             e->two_handed ? "two-handed" : "one-handed", hl[0], hl[1], hl[2]);
+             e->two_handed == 2 ? "two-handed" : e->two_handed ? "one-handed, left hand held on it (grip: the look only)"
+                                                              : "one-handed", hl[0], hl[1], hl[2]);
     }
     if (e->two_checked) vr_set_gun_two_handed(e->two_handed);
     engaged = engaged && e->two_checked && e->two_handed;
