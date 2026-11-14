@@ -213,7 +213,7 @@ int main(void)
             CHECK(!memcmp(vra_rows(c3, idx("Finger1_Top_rt")), vra_rows(base, idx("Finger1_Top_rt")), 12 * sizeof(float)));
             CHECK(!memcmp(vra_rows(c3, idx("SMG_Slide")), vra_rows(base, idx("SMG_Slide")), 12 * sizeof(float)));
         }
-        /* a loose part (the gun's shell) follows the moved left hand only when it is off the gun near that hand */
+        /* a loose part (the gun's shell) in the game's left hand (off the gun, near that hand) is hidden while the hand is free */
         {
             static const char *const ln[] = { "World", "Shotgun_Root", "Shotgun_Shell", "Wrist_lft", "Wrist_rt" };
             float lib[5][16], c4[192 * 4], at[16] = { 1, 0, 0, 0.5f, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
@@ -227,12 +227,13 @@ int main(void)
             /* the shell on the gun (bind place): it stays */
             CHECK(vra_place_off_hand(&rl, c4, at) == 1);
             CHECK(NEAR(vra_rows(c4, 2)[3], 0.0, 1e-6));
-            /* the shell taken off the gun to the game's left hand (12 cm off its place): it moves with the hand (+0.5 x) */
+            /* the shell off the gun in the game's left hand (12 cm off its place): hidden (rows zeroed) */
             memset(c4, 0, sizeof(c4));
             for (b2 = 0; b2 < 5; b2++) { float *q = vra_rows(c4, b2); q[0] = q[5] = q[10] = 1.0f; }
             vra_rows(c4, 2)[3] = -0.12f;
             CHECK(vra_place_off_hand(&rl, c4, at) == 1);
-            CHECK(NEAR(vra_rows(c4, 2)[3], -0.12f + 0.5f, 1e-4) || vra_rows(c4, 2)[3] > 0.2f);
+            CHECK(vra_rows(c4, 2)[0] == 0.0f && vra_rows(c4, 2)[3] == 0.0f && vra_rows(c4, 2)[5] == 0.0f &&
+                  vra_rows(c4, 2)[10] == 0.0f);
         }
         /* a NaN mirror or a rig without one does nothing */
         a[0] = NAN;

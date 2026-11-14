@@ -230,7 +230,10 @@ static inline int vra_place_off_hand(const VrArmRig *rig, float *constants, cons
     if (!vra_m34_inv(fl, fl_inv)) return 0;
     vra_m34_mul(target, fl_inv, g);
     /* loose parts first (they are judged against the game's own left hand, before it moves): one off its place on the
-     * gun by more than 3 cm and nearer the game's left wrist than its right follows the hand, fully from 8 cm off */
+     * gun by more than 3 cm and nearer the game's left wrist than its right is in the game's left hand (the shotgun
+     * keeps a shell there even at rest). The free hand at the controller does no reloading (the game's animations
+     * show the game's own hand), so such a part is hidden (its rows zeroed: its triangles collapse to a point), not
+     * carried under your hand */
     if (rig->gun_root >= 0) {
         float root_now[12], root_inv[12], root_bind_inv[12];
         vra_m34_mul(vra_rows(constants, rig->gun_root), rig->bindk[rig->gun_root], root_now);
@@ -249,9 +252,8 @@ static inline int vra_place_off_hand(const VrArmRig *rig, float *constants, cons
                 dl = (now[3] - fl[3]) * (now[3] - fl[3]) + (now[7] - fl[7]) * (now[7] - fl[7]) + (now[11] - fl[11]) * (now[11] - fl[11]);
                 dr = (now[3] - fr[3]) * (now[3] - fr[3]) + (now[7] - fr[7]) * (now[7] - fr[7]) + (now[11] - fr[11]) * (now[11] - fr[11]);
                 if (!(off > 0.03f) || !(dl < dr)) continue;
-                w = off >= 0.08f ? 1.0f : (off - 0.03f) / 0.05f;
-                vra_m34_mul(g, rows, moved);
-                for (j = 0; j < 12; j++) rows[j] += w * (moved[j] - rows[j]);
+                (void)w; (void)moved;
+                for (j = 0; j < 12; j++) rows[j] = 0.0f;
             }
         }
     }

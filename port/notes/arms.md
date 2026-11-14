@@ -170,3 +170,4 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
 - The AK twice kept a wrong angle: a rest pose captured mid-animation (43 frames in) stays locked. Now when the game
   holds the gun still 6+ deg off the locked rest for 2 s (left hand at rest, no shot for 1 s), the rest pose is taken
   again (`arms: the game holds the gun ... taking the rest pose again`).
+- Shotgun: a shell sat under the free left hand (the game keeps one in its left hand at rest; loose parts near that hand used to follow the moved hand). The free hand does no reloading now, so such parts are hidden while the hand is free; the game's own hand shows them in its animations.
