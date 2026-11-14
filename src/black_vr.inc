@@ -525,6 +525,11 @@ static void bvr_publish_laser(void)
         const float d = vrm_len(vrm_sub(t, e)) / cfg->units_per_metre;
         if (d == d) len = d < 0.5f ? 0.5f : d > 60.0f ? 60.0f : d;
     }
+    /* a suppressor fitted (weapon+108): the beam starts at its end, ~18 cm on, not inside it */
+    if (weapon && black_pc_ram_span(weapon, 0x109u) && GUEST8(weapon + 0x108u)) {
+        p = vrm_add(p, vrm_scale(a, 0.18f));
+        len = len > 0.68f ? len - 0.18f : 0.5f;
+    }
     pm[0] = p.x; pm[1] = p.y; pm[2] = p.z;
     am[0] = a.x; am[1] = a.y; am[2] = a.z;
     vr_set_gun_laser(pm, am, len, 1);

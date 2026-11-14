@@ -193,3 +193,7 @@ hidden by walls. Not tested on the headset or the harness (the harness has no XR
   placed from VrRenderGun.hand (the drawn gun's latched hand, two-handed aim included). Made to look like a real
   laser sight: a ~1.5 mm soft beam, faint (22% at the muzzle) and fading out along its length, and a small dot with a
   bright core and a soft glow (~0.35 deg), painted once into a 64x128 texture (beam x 0..15, dot x 32..63).
+- Suppressor (headset screenshot 02:52): it swung with the walk bob and the animations while the gun was locked: it
+  is not skinned (1D25D0 draws it after the gun through its own c10 MVP), so the palette lock never reached it. Now a
+  weapon draw with no arms rig gets the gun's lock as MVP * K^-1 * L * K (L: this frame's vr_grip_lock). The laser
+  starts 18 cm on when a suppressor is fitted (weapon+108), not inside it.

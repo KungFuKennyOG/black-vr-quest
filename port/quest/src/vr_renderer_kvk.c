@@ -805,7 +805,7 @@ static int arms_game_left_on_gun(const ArmsEntry *e, const float *constants, VrM
 bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
 {
     ArmsEntry *e = NULL;
-    int cut, mode, engaged, show_off, have_k = 0, place = 0, moved = 0, game_hold = 0, reloading = 0, hid = 0, i;
+    int cut, mode, engaged, show_off, have_k = 0, place = 0, moved = 0, game_hold = 0, reloading = 0, hid = 0, i, vreg = -1;
     static int last_engaged, last_game_hold = -1;
     float kf[16], off[16], used[3] = { 0.0f, 0.0f, 0.0f };
     VrMat4 k;
@@ -825,6 +825,7 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
                     memcmp(c->vm[v].mvp, constants + c->vm[v].reg * 4, sizeof(c->vm[v].mvp)) != 0) continue;
                 memcpy(kf, c->vm[v].k, sizeof(kf));
                 memcpy(used, c->vm[v].grip_corr, sizeof(used));
+                vreg = c->vm[v].reg;
                 have_k = 1;
                 break;
             }
@@ -847,7 +848,36 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
         e->ok = arms_load(e, vertex_data);
         e->retry = 120;
     }
-    if (!e->ok) return false;
+    if (!e->ok) {
+        /* not a skinned arms-and-gun mesh: the suppressor (1D25D0 draws it after the gun, through its own MVP at c10,
+         * placed on the game's animated gun). The gun's lock L (this frame's, in the hand frame) moves it with the
+         * gun: MVP * K^-1 * L * K. Without it the suppressor swung with the game's walk bob and animations while the
+         * gun under it was held still (Kenny 2026-11-14). */
+        if (have_k && vreg == 10) {
+            float lf[16];
+            VrMat4 l4, kinv, g4;
+            int r, c2, j;
+            vr_grip_lock(lf);
+            for (r = 0; r < 4; r++) for (c2 = 0; c2 < 4; c2++) VRM_AT(l4, r, c2) = lf[r * 4 + c2];
+            if (vrm_m4_inverse(k, &kinv)) {
+                float m[16], *rows = constants + 10 * 4;
+                g4 = vrm_m4_mul(kinv, vrm_m4_mul(l4, k));
+                memcpy(m, rows, sizeof(m));
+                for (r = 0; r < 4; r++)
+                    for (c2 = 0; c2 < 4; c2++) {
+                        float acc = 0.0f;
+                        for (j = 0; j < 4; j++) acc += m[r * 4 + j] * VRM_AT(g4, j, c2);
+                        rows[r * 4 + c2] = acc;
+                    }
+                {
+                    static int said;
+                    if (!said) { said = 1; GLOG("arms: a weapon part without bones (the suppressor) moves with the gun's lock"); }
+                }
+                return true;
+            }
+        }
+        return false;
+    }
     if (have_k && e->rig.wrist[VRA_RIGHT] >= 0) moved = arms_auto_grip(e, constants, k, used, F.mark.serial);
     /* a two-handed gun: at the rest capture, the game's left hand is on it. Only those are taken by the off hand's grip
      * (the pistol stays one-handed, the left hand free) */
