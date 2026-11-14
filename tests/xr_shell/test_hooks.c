@@ -401,6 +401,33 @@ int main(void)
         frame();
         CHECK(vrm_dot(f1, frame_forward()) > 0.99999f);
     }
+    /* a stop-the-game tutorial hint (Kenny 2026-11-13): the game stops its clock and the look integrator, and keeps
+     * drawing the frozen world; VR stays STEREO. The pause menu over it is flat; the frame after the hint is not. */
+    {
+        static const uint32_t stop_ids[5] = { 12, 13, 23, 87, 24 };
+        const uint32_t el = 0x520000u, gm = 0x600000u;
+        for (i = 0; i < 5; i++) GUEST32(0x0028AA80u + 4u * (uint32_t)i) = stop_ids[i];
+        GUEST32(0x002D45F0u) = gm;
+        bvr_hint_el = el;
+        GUEST32(el + 0x2110u) = 8u; GUEST32(el + 0x22A4u) = 0xFFFFFFFFu; GUEST8(el + 0x1Bu) = 7u;
+        blocked = 1; d2f40(); CHECK(present == VR_PRESENT_FLAT_MENU);      /* a hint that does not stop the game */
+        blocked = 0; frame(); CHECK(present == VR_PRESENT_STEREO);
+        GUEST32(el + 0x22A4u) = 13u; GUEST8(el + 0x1Bu) = 5u;               /* pending, fading in */
+        blocked = 1;
+        for (i = 0; i < 20; i++) { d2f40(); CHECK(present == VR_PRESENT_STEREO && pub_cam.valid); }
+        GUEST32(el + 0x2110u) = 13u; GUEST32(el + 0x22A4u) = 0xFFFFFFFFu; GUEST8(el + 0x1Bu) = 7u;
+        d2f40(); CHECK(present == VR_PRESENT_STEREO);
+        GUEST8(gm + 0x210C8u) = 1; d2f40(); CHECK(present == VR_PRESENT_FLAT_MENU);   /* the pause menu over it */
+        GUEST8(gm + 0x210C8u) = 0; d2f40(); CHECK(present == VR_PRESENT_STEREO);
+        GUEST32(el + 0x2110u) = 0xFFFFFFFFu; GUEST8(el + 0x1Bu) = 0u; blocked = 0;  /* gone, no look yet */
+        d2f40(); CHECK(present == VR_PRESENT_STEREO);
+        frame(); CHECK(present == VR_PRESENT_STEREO);
+        GUEST32(el + 0x2110u) = 13u; GUEST8(el + 0x1Bu) = 7u; blocked = 1;
+        d2f40(); CHECK(present == VR_PRESENT_STEREO);
+        GUEST32(el + 0x2110u) = 0xFFFFFFFFu; GUEST8(el + 0x1Bu) = 0u; blocked = 0;
+        bvr_hint_el = 0; GUEST32(0x002D45F0u) = 0;
+        frame(); CHECK(present == VR_PRESENT_STEREO);
+    }
     /* pause, photo mode, scripted camera */
     blocked = 1; frame(); CHECK(present == VR_PRESENT_FLAT_MENU); blocked = 0;
     photo_on = 1; frame(); CHECK(present == VR_PRESENT_FLAT_MENU); photo_on = 0;

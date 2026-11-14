@@ -455,9 +455,22 @@ static void test_menu_model(void)
     /* sections */
     n = vrs_section_settings(VRS_SEC_GRAPHICS, ids, 32);
     CHECK(n == 6 && ids[0] == VRS_RES_SCALE && ids[5] == VRS_SPRITE_DEBUG);
-    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 9 && vrs_section_settings(VRS_SEC_GESTURES, ids, 32) == 7);
-    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 9 && ids[6] == VRS_HUD_DIST && ids[7] == VRS_HUD_WIDTH &&
-          ids[8] == VRS_HUD_HEIGHT);
+    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 10 && vrs_section_settings(VRS_SEC_GESTURES, ids, 32) == 7);
+    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 10 && ids[6] == VRS_HUD_DIST && ids[7] == VRS_HUD_WIDTH &&
+          ids[8] == VRS_HUD_HEIGHT && ids[9] == VRS_TUTORIALS);
+    /* tutorial hints: on by default, live, the ini key the shell reads */
+    {
+        VrShellConfig t;
+        char tv[16];
+        vr_config_defaults(&t);
+        CHECK(t.game.tutorial_hints == 1 && vrs_get(&t, VRS_TUTORIALS) == 1.0f && vrs_is_live(VRS_TUTORIALS, &(VrsCaps){0}));
+        vrs_set(&t, VRS_TUTORIALS, 0.0f);
+        CHECK(t.game.tutorial_hints == 0);
+        vrs_format(&t, VRS_TUTORIALS, tv, sizeof(tv));
+        CHECK(!strcmp(tv, "off"));
+        CHECK(vr_config_line(&t, "tutorial_hints = on") && t.game.tutorial_hints == 1);
+        CHECK(vr_config_line(&t, "tutorial_hints = off") && t.game.tutorial_hints == 0);
+    }
     /* the HUD rows: live, written as the ini keys the shell reads */
     vr_config_defaults(&c);
     CHECK(vrs_step(&c, VRS_HUD_DIST, 1) && NEAR(c.hud_distance_m, 2.25, 1e-6));
