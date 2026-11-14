@@ -93,6 +93,7 @@ static const char k_default_ini[] =
     "recoil = 1.0             ; 0..2: the gun's kick in your hand per shot (0 = none)\n"
     "haptic_fire = 0.7        ; 0..1: shot pulse on the gun hand (0 = off); the game's own rumble (hits) stays\n"
     "hud_height = -12         ; degrees: the in-game HUD below (-) or above eye level\n"
+    "tutorial_hints = on      ; on: mission 1's control hints every time (off: only until you beat it, as the game does)\n"
     "gun_latch = on           ; on | off: the weapon follows the controller at display time\n"
     "# env RECOMP_BLACK_HZ=60\n"
     "# In the headset: Options -> VR SETTINGS (settings_menu = panel: the floating panel instead)\n";

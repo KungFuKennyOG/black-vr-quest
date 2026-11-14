@@ -229,6 +229,7 @@ typedef struct {
     float fov_margin;          /* game FOV enlargement factor over the eye FOV union */
     int   bob_filter;          /* 1: low-pass the camera's vertical position */
     int   hand_weapon;         /* 1: move first-person weapon to the aim hand */
+    int   tutorial_hints;      /* 1: mission 1's control hints show also after it was completed (game: until then) */
 } VrGameConfig;
 const VrGameConfig *vr_game_config(void);
 

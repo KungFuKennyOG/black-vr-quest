@@ -774,6 +774,20 @@ void black_level_override(uint8_t *level, uint8_t *stage)
             if (test_level > 99) test_level = -1;
             if (test_level >= 0) fprintf(stderr, "[BLACK] test level: level %d (frontend selection and mission core)\n", test_level);
         }
+        {   /* harness only: BLACKVR_TEST_RECORD=v with BLACKVR_TEST_RECORD_EARLY=1: mission 1's Easy completion record is
+             * v before the mission loads (a save that has beaten it: 2) */
+            const char *r = getenv("BLACKVR_TEST_RECORD");
+            if (r && *r && getenv("BLACKVR_TEST_RECORD_EARLY") && black_pc_ram_span(0x002D0D84u, 4u)) {
+                GUEST32(0x002D0D84u) = (uint32_t)atoi(r);
+                fprintf(stderr, "[BLACK_VR] test: mission 1 Easy record set to %d before the mission loads\n", atoi(r));
+            }
+            r = getenv("BLACKVR_TEST_DIFFICULTY");
+            if (r && *r && getenv("BLACKVR_TEST_RECORD_EARLY") && black_pc_ram_span(0x002D45F0u, 4u) &&
+                black_pc_ram_span(GUEST32(0x002D45F0u) + 0x2014Cu, 4u)) {
+                GUEST32(GUEST32(0x002D45F0u) + 0x2014Cu) = (uint32_t)atoi(r);
+                fprintf(stderr, "[BLACK_VR] test: difficulty %d before the mission loads\n", atoi(r));
+            }
+        }
         if (test_level >= 0 && black_pc_ram_span(0x002D45F0u, 4u) &&
             black_pc_ram_span(GUEST32(0x002D45F0u) + 0x2020Cu, 1u)) {
             fprintf(stderr, "[BLACK] test level: frontend asked for level %u, starting level %d\n",
@@ -3738,7 +3752,9 @@ void sub_001772E0(void)
     _mm_setcsr(caller_csr);
     if (video.action_blur_off || pc_photo_active()) GUEST32(effect + 0x34u) = 0u;   /* photo mode: no reload/aim blur */
 #ifdef BLACK_VR
-    if (black_vr_stereo()) GUEST32(effect + 0x34u) = 0u;   /* full-screen reload/aim blur in a headset */
+    /* full-screen reload/aim blur in a headset; kept behind a stop-the-game tutorial hint, the original look (the
+     * world frozen, blurred behind the hint), Kenny 2026-11-13 "like this, blurry too" */
+    if (black_vr_stereo() && !bvr_hint_stop()) GUEST32(effect + 0x34u) = 0u;
 #endif
     sub_001772E0_gen();
     GUEST32(effect + 0x34u) = mode;
@@ -5371,8 +5387,56 @@ void sub_001BD3F0(void)
 #endif
 #include "black_hud_input.inc"
 
+/* The tutorial hints (sub_0012F650, "PRESS <button> TO ... / PRESS A TO CONTINUE"). The game queues one only while the
+ * mission's completion record ([2D0D84 + difficulty * 0x100 + level * 0x20], 2 = completed, -1 = never) is not above
+ * 0 on any difficulty: once mission 1 is beaten on Easy, its hints never show again, on any difficulty. Kenny
+ * 2026-11-13: "it used to appear before" - before he first finished the mission. VR setting tutorial_hints (on by
+ * default: the Quest controls are new to everyone): the records read as not completed for the length of this call
+ * and are put back right after, so the save, the menus and the results screens see them unchanged. */
+extern void sub_0012F650_gen(void);
+void sub_0012F650(void)
+{
 #ifdef BLACK_VR
-void sub_001314E0(void) { black_vr_prompts_fonts(); black_vr_msg_watch(); black_hint_tick(); }
+    if (vr_game_config()->tutorial_hints && black_pc_ram_span(0x002D0D84u, 0x400u)) {
+        uint32_t kept[32];
+        unsigned i;
+        for (i = 0; i < 32u; i++) {
+            const uint32_t at = 0x002D0D84u + (i >> 3) * 0x100u + (i & 7u) * 0x20u;
+            kept[i] = GUEST32(at);
+            if ((int32_t)kept[i] > 0) GUEST32(at) = 0u;
+        }
+        sub_0012F650_gen();
+        for (i = 0; i < 32u; i++) GUEST32(0x002D0D84u + (i >> 3) * 0x100u + (i & 7u) * 0x20u) = kept[i];
+        return;
+    }
+#endif
+    sub_0012F650_gen();
+}
+
+#ifdef BLACK_VR
+/* Harness only: BLACKVR_TEST_HINT=id[,frames] queues tutorial hint `id` through the game's own gate (sub_0012F650, with
+ * the arguments that skip its level checks) once the HUD has updated `frames` times (default 300), to look at a
+ * stop-the-game hint without walking to its trigger. Without the variable, nothing. */
+static void black_vr_test_hint(void)
+{
+    static int id = -2, at = 300, n;
+    if (id == -2) {
+        const char *e = getenv("BLACKVR_TEST_HINT");
+        id = -1;
+        if (e && *e && sscanf(e, "%d,%d", &id, &at) >= 1 && (id < 0 || id >= 64)) id = -1;
+        if (id >= 0) fprintf(stderr, "[BLACK_VR] test: tutorial hint %d after %d HUD updates\n", id, at);
+    }
+    if (id < 0 || ++n != at) return;
+    {
+        BlackRegs r;
+        const uint32_t args[2] = { 1u, 0u };
+        memset(&r, 0, sizeof(r));
+        r.esi = (uint32_t)id;
+        fprintf(stderr, "[BLACK_VR] test: tutorial hint %d queued: %u\n", id,
+                black_guest_call(sub_0012F650, &r, args, 2, 0x00134DFCu));
+    }
+}
+void sub_001314E0(void) { black_vr_prompts_fonts(); black_vr_msg_watch(); black_vr_hint_probe(g_ecx); black_vr_test_hint(); black_hint_tick(); }
 #else
 void sub_001314E0(void) { black_hint_tick(); }
 #endif
