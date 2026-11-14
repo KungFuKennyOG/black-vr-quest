@@ -434,7 +434,8 @@ typedef struct {
     int have_root;              /* root_t captured: the gun (its *_Root bone) is what is locked */
     float root_t[12];           /* the gun root's locked pose in the hand frame (at rest the wrist is on target) */
     float root_turn;            /* how far (deg) the game's animation has turned the gun from its rest pose */
-    float turn_prev;            /* root_turn a frame ago */
+    float turn_prev, dev_prev;  /* root_turn and left_dev a frame ago */
+    float lw_prev[3];           /* the game's left wrist a frame ago (model, hand-frame scale) */
     unsigned drift_n;           /* frames the game has held the gun still, turned off the rest pose, hands idle */
     float root_g0[12];          /* the game's gun root at rest (hand frame), before the lock's move and straightening */
     int have_lw;                /* the game's left wrist at rest: */
@@ -586,7 +587,18 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
         /* the rest orientation: once the wrist has barely turned (< 0.4 deg a frame) for 15 frames */
         float tr = 0.0f;
         for (i = 0; i < 9; i++) tr += q[i] * e->q_prev[i];
-        if (e->corr_n > 0u && tr > 2.0f * cosf(0.4f * 0.0174533f) + 1.0f - 1e-6f) e->stable_n++;
+        /* ... and the game's left hand has stopped too (under 3 mm a frame in the view: a rest taken while the hand
+         * worked a reload or a pickup locked that pose) */
+        float lw_now[3] = { 0.0f, 0.0f, 0.0f }, lw_step = 0.0f;
+        if (e->rig.wrist[VRA_LEFT] >= 0) {
+            float lw[12];
+            vra_m34_mul(vra_rows(constants, e->rig.wrist[VRA_LEFT]), e->rig.bind[VRA_LEFT], lw);
+            lw_now[0] = lw[3]; lw_now[1] = lw[7]; lw_now[2] = lw[11];          /* model (the view); K's scale s */
+            for (i = 0; i < 3; i++) lw_step += (lw_now[i] - e->lw_prev[i]) * (lw_now[i] - e->lw_prev[i]);
+            lw_step = sqrtf(lw_step) * s / upm;
+            memcpy(e->lw_prev, lw_now, sizeof(lw_now));
+        }
+        if (e->corr_n > 0u && tr > 2.0f * cosf(0.4f * 0.0174533f) + 1.0f - 1e-6f && lw_step < 0.003f) e->stable_n++;
         else e->stable_n = 0;
         memcpy(e->q_prev, q, sizeof(q));
         /* (not within 0.6 s of a shot: the firing animation is no rest) */
@@ -594,7 +606,7 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
         int64_t now0, shot0 = vr_last_shot_ns();
         clock_gettime(CLOCK_MONOTONIC, &ts0);
         now0 = (int64_t)ts0.tv_sec * 1000000000LL + ts0.tv_nsec;
-        if (!e->have_r0 && e->corr_n >= 20u && e->stable_n >= 15u && (shot0 <= 0 || now0 - shot0 > 600000000LL)) {
+        if (!e->have_r0 && e->corr_n >= 45u && e->stable_n >= 25u && (shot0 <= 0 || now0 - shot0 > 600000000LL)) {
             memcpy(e->r0, q, sizeof(q));
             e->have_r0 = 1;
             /* the gun's rest pose, placed so the wrist is on target: root_t = T(target - wrist) * root now */
@@ -722,14 +734,19 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
             int64_t now1, shot1 = vr_last_shot_ns();
             clock_gettime(CLOCK_MONOTONIC, &ts1);
             now1 = (int64_t)ts1.tv_sec * 1000000000LL + ts1.tv_nsec;
-            if (e->root_turn > 6.0f && fabsf(e->root_turn - e->turn_prev) < 0.3f && (!e->have_lw || e->left_dev < 0.03f) &&
-                (shot1 <= 0 || now1 - shot1 > 1000000000LL))
+            /* (not the left hand's rest: taken mid-animation too, it kept this from ever firing: the AK straightened
+             * 42 deg in a pickup on the headset stayed so until the next switch) */
+            /* the left hand still too (a reload holds the gun tilted while the hand works) */
+            /* (or the left hand still, 6+ cm off its rest: a rest taken mid-animation left the game's hand shown for good) */
+            if ((e->root_turn > 6.0f || (e->have_lw && e->left_dev > 0.06f)) && fabsf(e->root_turn - e->turn_prev) < 0.3f &&
+                fabsf(e->left_dev - e->dev_prev) < 0.002f && (shot1 <= 0 || now1 - shot1 > 1000000000LL))
                 e->drift_n++;
             else
                 e->drift_n = 0;
             e->turn_prev = e->root_turn;
-            if (e->drift_n > 120u) {
-                GLOG("arms: the game holds the gun %.1f deg off the locked rest pose: taking the rest pose again", e->root_turn);
+            e->dev_prev = e->left_dev;
+            if (e->drift_n > 150u) {
+                GLOG("arms: the game holds the gun %.1f deg and its left hand %.3f m off the rest pose: taking the rest pose again", e->root_turn, e->left_dev);
                 e->have_r0 = 0;
                 e->have_root = 0;
                 e->have_lw = 0;

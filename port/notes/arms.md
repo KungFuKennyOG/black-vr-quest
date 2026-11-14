@@ -176,3 +176,8 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
   off hand must be within 30 deg of the controller's ray (out to 60 cm), released past 45 deg.
 - The shotgun's spare shell (the game parks it in its left hand) is hidden except in reloads: at rest, in the raise
   and cock, with the hold and with the free hand (vra_hide_left_loose).
+- The gun stuck at an angle (still on f5413b8/16803ea): the AK straightened 42 deg in a pickup at 01:23:32 (log
+  012221) stayed so until the next switch; the re-take never fired because it wanted the left hand at its rest,
+  measured against the same mid-animation baseline. Now: the rest capture waits for the gun and the game's left
+  hand to be still (25 frames, after 45) and not 0.6 s after a shot; the re-take fires when the gun is 6+ deg or the
+  left hand 6+ cm off the rest, both still, for 2.5 s with no shot for 1 s.
