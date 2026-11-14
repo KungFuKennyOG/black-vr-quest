@@ -278,9 +278,9 @@ static void black_vr_hint_probe(uint32_t el)
     {   /* harness only: BLACKVR_TEST_RECORD=v writes v into this level's Easy completion record once (a save that has
          * beaten mission 1 on Easy: 2) */
         static int tr = -2;
-        if (tr == -2) { const char *e = getenv("BLACKVR_TEST_RECORD"); tr = e && *e ? atoi(e) : -1000; }
+        if (tr == -2) { const char *e = getenv("BLACKVR_TEST_RECORD"); tr = e && *e && !getenv("BLACKVR_TEST_RECORD_EARLY") ? atoi(e) : -1000; }
         if (tr != -1000 && idx < 8u) {
-            const char *d = getenv("BLACKVR_TEST_DIFFICULTY");     /* and the difficulty, read live by most code */
+            const char *d = getenv("BLACKVR_TEST_RECORD_EARLY") ? NULL : getenv("BLACKVR_TEST_DIFFICULTY");
             if (d && *d) GUEST32(GUEST32(0x002D45F0u) + 0x2014Cu) = (uint32_t)atoi(d);
             GUEST32(0x002D0D84u + idx * 0x20u) = (uint32_t)tr;
             fprintf(stderr, "[BLACK_VR] test: level %u Easy record set to %d\n", idx, tr);

@@ -774,6 +774,20 @@ void black_level_override(uint8_t *level, uint8_t *stage)
             if (test_level > 99) test_level = -1;
             if (test_level >= 0) fprintf(stderr, "[BLACK] test level: level %d (frontend selection and mission core)\n", test_level);
         }
+        {   /* harness only: BLACKVR_TEST_RECORD=v with BLACKVR_TEST_RECORD_EARLY=1: mission 1's Easy completion record is
+             * v before the mission loads (a save that has beaten it: 2) */
+            const char *r = getenv("BLACKVR_TEST_RECORD");
+            if (r && *r && getenv("BLACKVR_TEST_RECORD_EARLY") && black_pc_ram_span(0x002D0D84u, 4u)) {
+                GUEST32(0x002D0D84u) = (uint32_t)atoi(r);
+                fprintf(stderr, "[BLACK_VR] test: mission 1 Easy record set to %d before the mission loads\n", atoi(r));
+            }
+            r = getenv("BLACKVR_TEST_DIFFICULTY");
+            if (r && *r && getenv("BLACKVR_TEST_RECORD_EARLY") && black_pc_ram_span(0x002D45F0u, 4u) &&
+                black_pc_ram_span(GUEST32(0x002D45F0u) + 0x2014Cu, 4u)) {
+                GUEST32(GUEST32(0x002D45F0u) + 0x2014Cu) = (uint32_t)atoi(r);
+                fprintf(stderr, "[BLACK_VR] test: difficulty %d before the mission loads\n", atoi(r));
+            }
+        }
         if (test_level >= 0 && black_pc_ram_span(0x002D45F0u, 4u) &&
             black_pc_ram_span(GUEST32(0x002D45F0u) + 0x2020Cu, 1u)) {
             fprintf(stderr, "[BLACK] test level: frontend asked for level %u, starting level %d\n",
