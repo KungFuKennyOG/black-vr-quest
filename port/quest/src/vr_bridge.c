@@ -199,6 +199,7 @@ static VrVec3 g_hand_vel[2];
 static int g_hand_vel_ok[2];
 static int g_duck_recal = 1, g_was_in_game;
 static VrInputContext g_last_ctx;
+static int g_scope_one_hand;                     /* frames the 3D scope has been held one-handed */
 static int g_gun_two_handed;                     /* the drawn gun takes the off hand (set by the renderer) */
 static int g_hold_on;                            /* the pistol's look-only hold: grip held, hands close */
 static int g_two_hand_on;                       /* the two-handed aim of the last input step (latch_gun) */
@@ -373,6 +374,15 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
             eye[0] = vrm_sub(head_pos, vrm_scale(right, half_ipd));
             eye[1] = vrm_add(head_pos, vrm_scale(right, half_ipd));
             scope = vrg_scope_update(&g_scope, gc, valid[gun], aim[gun], eye, fwd);
+            /* the 3D scope view, as in DrBeef's ports: a two-handed gun looks through its scope only with both hands on */
+            if (scope && s->cfg.game.scope_3d && __atomic_load_n(&g_gun_two_handed, __ATOMIC_RELAXED) == 2 &&
+                !g_two.engaged) {
+                if (!was) g_scope.engaged = 0;
+                else if (++g_scope_one_hand > 30) g_scope.engaged = 0, g_scope_one_hand = 0;  /* let go for 30 frames */
+                scope = g_scope.engaged;
+            } else {
+                g_scope_one_hand = 0;
+            }
             if (scope != was)
                 XLOGI("scope raise: %s (sight %.3f m from the eye, %.1f deg off the view, weapon scoped %d, aiming %d)",
                       scope ? "up" : "down", g_scope.last_dist, g_scope.last_angle_deg, game_known ? gin.scoped : -1,
@@ -394,6 +404,8 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
     ctx.move_rotate_deg = move_rot;
     ctx.melee_swing = swing;
     ctx.scope_up = in_game && game_known && gin.scoped && gin.aiming;
+    /* the 3D scope view: a third of the walk, no stick turning (RTCWQuest's comfort rules) */
+    ctx.scope_view = in_game && vr_scope_view() > 1.0f;
     /* taps last 2 of the game's rendered frames (each has >= 1 input update; pause and menus read once a frame) */
     ctx.ticks_valid = game_known;
     ctx.game_ticks = g_cam_count;
@@ -853,6 +865,21 @@ void vr_grip_lock(float l[16])
 
 void vr_set_gun_two_handed(int two) { __atomic_store_n(&g_gun_two_handed, two < 0 ? 0 : two > 2 ? 2 : two, __ATOMIC_RELAXED); }
 
+static uint32_t g_scope_view_bits;
+void vr_set_scope_view(float zoom)
+{
+    uint32_t b;
+    if (!(zoom > 1.0f)) zoom = 0.0f;
+    memcpy(&b, &zoom, sizeof(b));
+    __atomic_store_n(&g_scope_view_bits, b, __ATOMIC_RELAXED);
+}
+float vr_scope_view(void)
+{
+    const uint32_t b = __atomic_load_n(&g_scope_view_bits, __ATOMIC_RELAXED);
+    float z;
+    memcpy(&z, &b, sizeof(z));
+    return z;
+}
 static float g_laser_p[3], g_laser_d[3], g_laser_len;
 static int64_t g_laser_ns;
 void vr_set_gun_laser(const float muzzle[3], const float dir[3], float length_m, int valid)

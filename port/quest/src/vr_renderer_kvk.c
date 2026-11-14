@@ -52,6 +52,7 @@
 #include "kvk_vr_hooks.h"
 #include "vr_arms.h"
 #include "vr_game_math.h"
+#include "vr_gestures.h"
 #include "vr_bridge.h"
 #include "vr_math.h"
 
@@ -315,6 +316,94 @@ static void stereo_for(KvkStereoFrame *out, const KvkStereoConfig *cfg, const Vr
     memcpy(out->quad_mvp, q.quad_mvp, sizeof(out->quad_mvp));
 }
 
+/* ---- the 3D scope view (port/notes/scope.md) ---------------------------------------------------------------------
+ * After DrBeef's ports (RTCWQuest, JKXR, Lambda1VR, ioq3quest; ideas only, none of their code): a scoped weapon zoomed
+ * in keeps the world 3D. The eyes are drawn looking along the gun with their field of view narrowed in tangent space
+ * (tan / zoom), and submitted with the poses and fields of view the shell latched, so the compositor shows the narrow
+ * picture over the whole view: magnified, the gun's line at the centre. The game's zoom (vr_scope_view) eases in over
+ * a quarter second and out in an eighth; the weapon is hidden while the view is in. scope_mono: both eyes at their
+ * midpoint (one picture, as Lambda1VR); off: each eye its own (stereo, the depth magnified with the picture). */
+static struct {
+    float ease;          /* 0 out .. 1 in */
+    float zoom;          /* the game's zoom, smoothed (0: none yet) */
+    double t;
+    int logged;
+} SV;
+
+static double sv_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+/* Steps the ease (by wall time: called twice a frame, it moves once in all). Returns the shown zoom, 1: out. */
+static float scope_step(float *ease_out)
+{
+    const float target = vr_scope_view();
+    const double now = sv_now();
+    float dt = SV.t > 0.0 ? (float)(now - SV.t) : 0.0f, e;
+    SV.t = now;
+    if (!(dt > 0.0f)) dt = 0.0f;
+    if (dt > 0.1f) dt = 0.1f;
+    if (target > 1.0f) {
+        SV.zoom = SV.zoom > 1.0f ? SV.zoom + (target - SV.zoom) * (1.0f - expf(-dt / 0.08f)) : target;
+        SV.ease += dt / 0.25f;
+    } else {
+        SV.ease -= dt / 0.125f;
+    }
+    if (SV.ease > 1.0f) SV.ease = 1.0f;
+    if (SV.ease <= 0.0f) { SV.ease = 0.0f; SV.zoom = 0.0f; }
+    if ((SV.ease >= 1.0f) != SV.logged) {
+        SV.logged = SV.ease >= 1.0f;
+        if (SV.logged) GLOG("scope view: in, zoom %.2f (%s)", (double)SV.zoom, vr_game_config()->scope_mono ? "one picture" : "stereo");
+        else GLOG("scope view: out");
+    }
+    e = SV.ease * SV.ease * (3.0f - 2.0f * SV.ease);
+    *ease_out = e;
+    return SV.zoom > 1.0f ? 1.0f + e * (SV.zoom - 1.0f) : 1.0f;
+}
+
+/* the weapon is hidden once the view is a third of the way in (it sits at the eye) */
+static int scope_hides_weapon(void) { return SV.ease > 0.33f; }
+
+static VrQuat sv_nlerp(VrQuat a, VrQuat b, float t)
+{
+    if (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w < 0.0f) b = vrm_q(-b.x, -b.y, -b.z, -b.w);
+    return vrm_q_normalize(vrm_q(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t));
+}
+
+/* f's eyes for the scope view: hand = the gun hand's stage aim pose the weapon is drawn at (NULL: unknown). */
+static void scope_eyes(VrFrameState *f, const VrPose *hand)
+{
+    float e, pm[3], am[3], len;
+    const float z = scope_step(&e);
+    VrVec3 dir, up, mid;
+    VrQuat q;
+    int i;
+    if (!(z > 1.001f) || !(e > 0.0f)) return;
+    if (hand) {
+        dir = vr_gun_laser(pm, am, &len) ? vrm_v3(am[0], am[1], am[2]) : vrm_v3(0, 0, -1);   /* the barrel, else the ray */
+        dir = vrm_q_rotate(hand->orientation, dir);
+    } else {
+        dir = vrm_q_rotate(f->eye[0].pose.orientation, vrm_v3(0, 0, -1));
+    }
+    if (!vrm_normalize(&dir)) return;
+    up = vrm_q_rotate(f->eye[0].pose.orientation, vrm_v3(0, 1, 0));    /* the roll stays the head's */
+    q = vrg_look_rotation(dir, up);
+    mid = vrm_scale(vrm_add(f->eye[0].pose.position, f->eye[1].pose.position), 0.5f);
+    for (i = 0; i < VR_EYE_COUNT; i++) {
+        VrPose *p = &f->eye[i].pose;
+        VrFov *v = &f->eye[i].fov;
+        p->orientation = sv_nlerp(p->orientation, q, e);
+        if (vr_game_config()->scope_mono) p->position = vrm_add(p->position, vrm_scale(vrm_sub(mid, p->position), e));
+        v->left = atanf(tanf(v->left) / z);
+        v->right = atanf(tanf(v->right) / z);
+        v->up = atanf(tanf(v->up) / z);
+        v->down = atanf(tanf(v->down) / z);
+    }
+}
+
 bool kvk_vr_stereo_hook(KvkStereoFrame *out, const KvkStereoConfig *cfg, int phase)
 {
     VrFrameState f;
@@ -332,6 +421,11 @@ bool kvk_vr_stereo_hook(KvkStereoFrame *out, const KvkStereoConfig *cfg, int pha
         f.world_scale = rp->world_scale;
         f.predicted_display_time = rp->display_time;
         f.session_running = 1;
+        {
+            /* the scope view: drawn along the gun with narrowed fields of view; the shell still submits rp's */
+            const VrRenderGun *g = vr_render_gun();
+            scope_eyes(&f, g->valid ? &g->hand : NULL);
+        }
         stereo_for(out, cfg, &f, &rp->head);
         return true;
     }
@@ -345,6 +439,7 @@ bool kvk_vr_stereo_hook(KvkStereoFrame *out, const KvkStereoConfig *cfg, int pha
         to_g = vrm_pose_mul(head_g, vrm_pose_inv(fs->head));
         for (i = 0; i < VR_EYE_COUNT; i++) f.eye[i].pose = vrm_pose_mul(to_g, fs->eye[i].pose);
         f.head = head_g;
+        scope_eyes(&f, F.marked && F.cur.gun.valid ? &F.cur.gun.hand : NULL);
         stereo_for(out, cfg, &f, &head_g);
         return true;
     }
@@ -810,6 +905,11 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
     float kf[16], off[16], used[3] = { 0.0f, 0.0f, 0.0f };
     VrMat4 k;
     if (!g_on || !constants || !vertex_data || !&g_xbox_mem_offset) return false;
+    if (scope_hides_weapon()) {
+        /* the 3D scope view: the weapon (gun, arms, suppressor, flash) is at the eye; every position collapses */
+        memset(constants, 0, 192 * 4 * sizeof(float));
+        return true;
+    }
     vr_arms_state(&cut, &mode, &engaged);
     /* the off hand: tracked -> at the off controller (late latch), snapped onto the gun line while gripping two-handed;
      * grip -> the game's pose, only while gripping; always -> the game's pose; never -> hidden */

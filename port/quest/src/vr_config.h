@@ -38,7 +38,9 @@
  *   aim_barrel        = on        ; on: the shot converges on the drawn gun's barrel line, not the controller's ray
  *   hand_weapon       = 1         ; first-person weapon follows the hand (aim = hand only)
  *   weapon_offset     = 0.12 -0.18 0.30   ; weapon grip in camera space (x right, y up, z fwd), metres
- *   scope_zoom        = 2.5       ; zoom factor at which the scope view goes flat
+ *   scope_zoom        = 2.5       ; zoom factor at which the scope view starts (2.0 at most for scoped weapons)
+ *   scope_view        = zoom      ; zoom: the 3D view zooms, aimed with the gun, in a dark ring | flat: a flat window
+ *   scope_mono        = on        ; on | off: in the 3D scope both eyes see the same image
  *   fov_margin        = 1.10      ; game frustum enlargement over the eye FOV union (late-latch room)
  *   bob_filter        = 1
  *   hud_distance      = 2.0       ; metres: the head-locked HUD / virtual screen
@@ -157,6 +159,8 @@ static inline void vr_config_defaults(VrShellConfig *c)
     c->game.vm_offset_m[1] = -0.18f;
     c->game.vm_offset_m[2] = 0.30f;
     c->game.scope_zoom_min = 2.5f;
+    c->game.scope_3d = 1;
+    c->game.scope_mono = 1;
     c->game.fov_margin = 1.10f;
     c->game.bob_filter = 1;
     c->game.hand_weapon = 1;
@@ -329,6 +333,12 @@ static inline int vr_config_line(VrShellConfig *c, const char *line_in)
     if (!strcmp(key, "laser")) return vr_cfg_bool(val, &c->game.laser);
     if (!strcmp(key, "skip_movies")) return vr_cfg_bool(val, &c->game.skip_movies);
     if (!strcmp(key, "scope_zoom")) { if (!vr_cfg_float(val, 1.0f, 100, &f)) return 0; c->game.scope_zoom_min = f; return 1; }
+    if (!strcmp(key, "scope_view")) {
+        if (!strcmp(val, "zoom")) { c->game.scope_3d = 1; return 1; }
+        if (!strcmp(val, "flat")) { c->game.scope_3d = 0; return 1; }
+        return vr_cfg_bool(val, &c->game.scope_3d);         /* on | off, as VR SETTINGS saves it */
+    }
+    if (!strcmp(key, "scope_mono")) return vr_cfg_bool(val, &c->game.scope_mono);
     if (!strcmp(key, "fov_margin")) { if (!vr_cfg_float(val, 1.0f, 2.0f, &f)) return 0; c->game.fov_margin = f; return 1; }
     if (!strcmp(key, "weapon_offset")) {
         float v[3];

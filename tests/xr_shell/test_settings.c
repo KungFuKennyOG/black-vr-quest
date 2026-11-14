@@ -455,9 +455,10 @@ static void test_menu_model(void)
     /* sections */
     n = vrs_section_settings(VRS_SEC_GRAPHICS, ids, 32);
     CHECK(n == 6 && ids[0] == VRS_RES_SCALE && ids[5] == VRS_SPRITE_DEBUG);
-    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 12 && vrs_section_settings(VRS_SEC_GESTURES, ids, 32) == 7);
-    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 12 && ids[6] == VRS_HUD_DIST && ids[7] == VRS_HUD_WIDTH &&
-          ids[8] == VRS_HUD_HEIGHT && ids[9] == VRS_TUTORIALS && ids[10] == VRS_LASER && ids[11] == VRS_SKIP_MOVIES);
+    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 14 && vrs_section_settings(VRS_SEC_GESTURES, ids, 32) == 7);
+    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 14 && ids[6] == VRS_HUD_DIST && ids[7] == VRS_HUD_WIDTH &&
+          ids[8] == VRS_HUD_HEIGHT && ids[9] == VRS_TUTORIALS && ids[10] == VRS_LASER && ids[11] == VRS_SKIP_MOVIES &&
+          ids[12] == VRS_SCOPE_3D && ids[13] == VRS_SCOPE_MONO);
     /* the laser sight: off by default, live, blackvr.ini laser */
     {
         VrShellConfig lc;
@@ -470,6 +471,11 @@ static void test_menu_model(void)
         CHECK(!strcmp(lv, "on"));
         CHECK(vr_config_line(&lc, "laser = off") && lc.game.laser == 0);
         CHECK(lc.game.skip_movies == 0 && vr_config_line(&lc, "skip_movies = on") && vrs_get(&lc, VRS_SKIP_MOVIES) == 1.0f);
+        CHECK(lc.game.scope_3d == 1 && lc.game.scope_mono == 1 && vrs_get(&lc, VRS_SCOPE_3D) == 1.0f);
+        CHECK(vr_config_line(&lc, "scope_view = flat") && lc.game.scope_3d == 0 && vrs_get(&lc, VRS_SCOPE_3D) == 0.0f);
+        CHECK(vr_config_line(&lc, "scope_view = zoom") && lc.game.scope_3d == 1 && !vr_config_line(&lc, "scope_view = big"));
+        CHECK(vr_config_line(&lc, "scope_view = off") && lc.game.scope_3d == 0 && vr_config_line(&lc, "scope_view = on"));
+        CHECK(vr_config_line(&lc, "scope_mono = off") && lc.game.scope_mono == 0 && vrs_get(&lc, VRS_SCOPE_MONO) == 0.0f);
     }
     /* tutorial hints: on by default, live, the ini key the shell reads */
     {

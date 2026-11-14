@@ -132,6 +132,7 @@ typedef struct {
     int    melee_swing;       /* the swing detector fired */
     int    crouch_hold;       /* the crouch sync wants the crouch control down */
     int    scope_up;          /* the scope is engaged (right stick up/down then steps its zoom) */
+    int    scope_view;        /* the 3D scope view is on: walking at a third, no stick turning */
     int      ticks_valid;     /* game_ticks counts the game's input updates (vr_publish_game_input) */
     uint32_t game_ticks;      /* a tap lasts until the game has also run VRI_PULSE_TICKS updates: a slow or
                                * hitching game frame never misses it */
@@ -334,6 +335,7 @@ static inline void vr_map_actions(const VrInputConfig *c, VrInputRuntime *rt, co
 
     /* move */
     if (ctx->move_rotate_deg != 0.0) vr_rotate_stick(&mx, &my, ctx->move_rotate_deg);
+    if (ctx->scope_view) { mx /= 3.0f; my /= 3.0f; }
     out->move_x = vr_axis_to_s16(mx, c->deadzone);
     out->move_y = vr_axis_to_s16(my, c->deadzone);
 
@@ -348,7 +350,7 @@ static inline void vr_map_actions(const VrInputConfig *c, VrInputRuntime *rt, co
                 if (ctx->scope_up) vri_tap(rt, VRA_SCOPE_ZOOM);
                 else vri_tap(rt, gy > 0.0f ? VRA_NEXT_WEAPON : VRA_PREV_WEAPON);
             }
-        } else {
+        } else if (!ctx->scope_view) {
             vr_turn_step(c, rt, gx, dt);
         }
     }

@@ -239,6 +239,25 @@ static void test_weapon_step(void)
     t.rx = 0.9f;
     held_frames(&c, &rt, &t, &x, dt, 5, 0);
     CHECK(rt.turn_accum_deg == -30.0);
+    /* the 3D scope view: no stick turning, the walk at a third */
+    t.rx = 0.0f;
+    held_frames(&c, &rt, &t, &x, dt, 10, 0);
+    x.scope_view = 1;
+    t.rx = 0.9f;
+    held_frames(&c, &rt, &t, &x, dt, 10, 0);
+    CHECK(rt.turn_accum_deg == -30.0);
+    t.rx = 0.0f;
+    t.ly = 0.9f;
+    {
+        VrActionState a;
+        VrPadState p = run(&c, &rt, &t, &x, dt, &a);
+        CHECK(a.move_y > 0 && a.move_y < 32767 / 2);
+        (void)p;
+        x.scope_view = 0;
+        run(&c, &rt, &t, &x, dt, &a);
+        CHECK(a.move_y > 32767 * 3 / 4);
+    }
+    t.ly = 0.0f;
 }
 
 static void test_snap_turn(void)

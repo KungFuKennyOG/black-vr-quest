@@ -222,8 +222,11 @@ static int bvr_hint_stop(void)
     return 0;
 }
 
+/* The 3D scope view's zoom this camera (black_vr_decide_view), 0: off. */
+static float bvr_scope_view_zoom;
+
 /* -2: not the world camera (state untouched); -1: VR presentation inactive. */
-static int black_vr_decide(uint32_t camera)
+static int black_vr_decide_view(uint32_t camera)
 {
     uint32_t renderer;
     int hint;
@@ -243,8 +246,21 @@ static int black_vr_decide(uint32_t camera)
     if (!hint && black_pc_input_gameplay_blocked_query()) return VR_PRESENT_FLAT_MENU;
     if (!bvr.look || (!hint && bvr.look_cams > BVR_LOOK_STALE_CAMS)) return VR_PRESENT_FLAT_MENU;
     if (!hint && bvr_look_stale_s() > 0.0 && black_vr_now() - bvr.look_time > bvr_look_stale_s()) return VR_PRESENT_FLAT_MENU;
-    if (bvr_zoom() >= bvr_scope_zoom_min()) return VR_PRESENT_FLAT_SCOPE;
+    if (bvr_zoom() >= bvr_scope_zoom_min()) {
+        /* scope_view = zoom: the world stays 3D and the renderer zooms the eyes along the gun (vr_scope_view) */
+        if (!vr_game_config()->scope_3d) return VR_PRESENT_FLAT_SCOPE;
+        bvr_scope_view_zoom = bvr_zoom();
+    }
     return VR_PRESENT_STEREO;
+}
+
+static int black_vr_decide(uint32_t camera)
+{
+    int m;
+    bvr_scope_view_zoom = 0.0f;
+    m = black_vr_decide_view(camera);
+    if (m != -2) vr_set_scope_view(m == VR_PRESENT_STEREO ? bvr_scope_view_zoom : 0.0f);   /* one store per camera */
+    return m;
 }
 
 /* ---- harness only: BLACKVR_DECIDE_TRACE=1 ------------------------------------------------------------------------
@@ -513,7 +529,8 @@ static void bvr_publish_laser(void)
     VrVec3 p = vrm_v3(0, 0, 0), a = vrm_v3(0, 0, 0);
     float pm[3] = { 0, 0, 0 }, am[3] = { 0, 0, 0 }, len = 30.0f;
     uint32_t core, weapon;
-    if (!cfg->laser || bvr.mode != VR_PRESENT_STEREO) { vr_set_gun_laser(pm, am, 0.0f, 0); return; }
+    /* also for the 3D scope view: the renderer aims the zoomed eyes along this barrel */
+    if ((!cfg->laser && !cfg->scope_3d) || bvr.mode != VR_PRESENT_STEREO) { vr_set_gun_laser(pm, am, 0.0f, 0); return; }
     bvr_barrel_in_hand(&p, &a);
     if (!(vrm_len(p) < 1.5f) || !(vrm_len(a) > 0.5f)) { vr_set_gun_laser(pm, am, 0.0f, 0); return; }
     core = black_pc_ram_span(0x2D45D4u, 4u) ? GUEST32(0x2D45D4u) : 0u;

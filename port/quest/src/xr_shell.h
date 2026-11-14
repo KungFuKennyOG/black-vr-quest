@@ -187,6 +187,11 @@ void vrsm_info_update(XrShell *s);
 const XrsPanelOps *xrs_panel_attach(XrShell *s);
 /* xr_panel.c: the laser sight's layers (blackvr.ini laser) for display time t: 0 or 2 (beam, dot) */
 uint32_t xrs_gun_laser_layers(XrShell *s, XrTime t, const XrCompositionLayerBaseHeader **out, uint32_t cap);
+/* The 3D scope view (port/notes/scope.md): the HUD quad (the game's own scope picture) centred on the view, XRS_SCOPE_HUD_DIST
+ * out and tan +-XRS_SCOPE_HUD_TAN wide, over xrs_scope_layers' black surround. */
+#define XRS_SCOPE_HUD_DIST 10.0f
+#define XRS_SCOPE_HUD_TAN 0.8f
+uint32_t xrs_scope_layers(XrShell *s, const XrCompositionLayerBaseHeader **out, uint32_t cap);
 typedef struct {
     int open, inited, released;
     XrSwapchain panel, laser;

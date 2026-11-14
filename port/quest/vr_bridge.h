@@ -225,7 +225,10 @@ typedef struct {
     float aim_converge_m;      /* hand-aim convergence distance */
     int   aim_barrel;          /* 1: the shot converges on the drawn gun's barrel line (else on the controller's ray) */
     float vm_offset_m[3];      /* viewmodel natural offset in aim space (x right, y up, z fwd) */
-    float scope_zoom_min;      /* zoom factor at/above which the scope goes flat */
+    float scope_zoom_min;      /* zoom factor at/above which the scope view starts */
+    int   scope_3d;            /* 1: the scope view zooms the 3D view, aimed with the gun (DrBeef's ports); 0: a flat
+                                * head-locked window (blackvr.ini scope_view = zoom | flat) */
+    int   scope_mono;          /* 1: in the 3D scope view both eyes see the same image (blackvr.ini scope_mono) */
     float fov_margin;          /* game FOV enlargement factor over the eye FOV union */
     int   bob_filter;          /* 1: low-pass the camera's vertical position */
     int   hand_weapon;         /* 1: move first-person weapon to the aim hand */
@@ -433,6 +436,10 @@ void vr_set_gun_barrel(const float d[3], int valid);
 /* Game thread: the drawn gun's muzzle and barrel in the gun hand's OpenXR aim space (metres; x right, y up, z back),
  * and how far the shot would go (m, to the game's aim point); valid 0/1. XR thread: the laser sight reads it. */
 void vr_set_gun_laser(const float muzzle[3], const float dir[3], float length_m, int valid);
+/* Game thread: the 3D scope view's zoom (> 1 while it is on: STEREO, a scoped weapon zoomed past scope_zoom), else 0.
+ * Render / XR / input threads read it. */
+void vr_set_scope_view(float zoom);
+float vr_scope_view(void);
 int vr_gun_laser(float muzzle[3], float dir[3], float *length_m);
 int vr_gun_barrel(float d[3]);
 /* Game thread: the player fired (the muzzle flash was drawn). Render thread: the time of the last shot (CLOCK_MONOTONIC
