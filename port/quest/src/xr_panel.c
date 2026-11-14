@@ -339,6 +339,144 @@ static void op_destroy(XrShell *s)
     P.inited = 0;
 }
 
+
+/* ---- the laser sight (blackvr.ini laser; VR SETTINGS > Comfort) ------------------------------------------------------
+ * A thin red beam from the drawn gun's muzzle along its barrel, to where the shot goes (the game thread publishes the
+ * muzzle and barrel in the gun hand's aim space and the length: vr_set_gun_laser), with a dot at its end. Placed from
+ * the gun hand located at this frame's display time, as the drawn gun is. Composition quads: drawn over the scene
+ * (not hidden by walls). Its own 8x8 swapchain, cleared red once. */
+static struct {
+    int inited, failed, filled;
+    XrsSwapchain sc;
+    VkCommandPool pool;
+    VkCommandBuffer cmd;
+    VkFence fence;
+    XrCompositionLayerQuad q[2];
+} G;
+
+static int gun_laser_init(XrShell *s)
+{
+    VkCommandPoolCreateInfo cp = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    VkCommandBufferAllocateInfo ca = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    VkFenceCreateInfo fi = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    int ok;
+    if (G.inited) return 1;
+    if (G.failed || !s->vk_device || !s->session) return 0;
+    G.failed = 1;
+    vr_queue_lock();
+    ok = xrs_swapchain_create(s, &G.sc, 8u, 8u, 1);
+    vr_queue_unlock();
+    if (!ok) { XLOGE("laser sight: swapchain refused"); return 0; }
+    cp.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    cp.queueFamilyIndex = s->vk_queue_family;
+    if (vkCreateCommandPool(s->vk_device, &cp, NULL, &G.pool) != VK_SUCCESS) return 0;
+    ca.commandPool = G.pool;
+    ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ca.commandBufferCount = 1;
+    if (vkAllocateCommandBuffers(s->vk_device, &ca, &G.cmd) != VK_SUCCESS) return 0;
+    fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    if (vkCreateFence(s->vk_device, &fi, NULL, &G.fence) != VK_SUCCESS) return 0;
+    G.inited = 1;
+    G.failed = 0;
+    XLOGI("laser sight ready");
+    return 1;
+}
+
+static void gun_laser_fill(XrShell *s)
+{
+    VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    VkImageMemoryBarrier mb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    VkImageSubresourceRange rr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    VkClearColorValue c;
+    uint32_t im;
+    if (G.filled || !xrs_swapchain_acquire(s, &G.sc, &im)) return;
+    vkWaitForFences(s->vk_device, 1, &G.fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(s->vk_device, 1, &G.fence);
+    vkResetCommandBuffer(G.cmd, 0);
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(G.cmd, &bi);
+    mb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    mb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.srcQueueFamilyIndex = mb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    mb.image = G.sc.images[im];
+    mb.subresourceRange = rr;
+    vkCmdPipelineBarrier(G.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &mb);
+    /* the panel laser's red, premultiplied, 70% opaque */
+    c.float32[0] = 0.66f * 0.82f; c.float32[1] = 0.006f; c.float32[2] = 0.003f; c.float32[3] = 0.70f;
+    vkCmdClearColorImage(G.cmd, G.sc.images[im], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &c, 1, &rr);
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    mb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    mb.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    vkCmdPipelineBarrier(G.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, NULL, 0, NULL, 1, &mb);
+    vkEndCommandBuffer(G.cmd);
+    submit(s, G.cmd, G.fence);
+    xrs_swapchain_release(s, &G.sc);
+    G.filled = 1;
+}
+
+static VrPose from_xr(XrPosef p)
+{
+    VrPose v;
+    v.position = vrm_v3(p.position.x, p.position.y, p.position.z);
+    v.orientation.x = p.orientation.x; v.orientation.y = p.orientation.y;
+    v.orientation.z = p.orientation.z; v.orientation.w = p.orientation.w;
+    return v;
+}
+
+uint32_t xrs_gun_laser_layers(XrShell *s, XrTime t, const XrCompositionLayerBaseHeader **out, uint32_t cap)
+{
+    const VrGameConfig *cfg = vr_game_config();
+    const XrSpaceLocationFlags need = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    XrSpaceLocation hl = { XR_TYPE_SPACE_LOCATION }, vl = { XR_TYPE_SPACE_LOCATION };
+    float pm[3], am[3], len, w, h;
+    VrPose hand, head, aim;
+    VrVec3 muzzle, dir, up, endp;
+    const int gun = cfg->aim_hand & 1;
+    if (!cfg->laser || cap < 2 || !vr_gun_laser(pm, am, &len) || !s->aim_space[gun] || !s->view_space) return 0;
+    if (!gun_laser_init(s)) return 0;
+    gun_laser_fill(s);
+    if (!G.filled) return 0;
+    if (XR_FAILED(xrLocateSpace(s->aim_space[gun], s->world_space, t, &hl)) || (hl.locationFlags & need) != need) return 0;
+    if (XR_FAILED(xrLocateSpace(s->view_space, s->world_space, t, &vl)) || (vl.locationFlags & need) != need) return 0;
+    hand = from_xr(hl.pose);
+    head = from_xr(vl.pose);
+    muzzle = vrm_add(hand.position, vrm_q_rotate(hand.orientation, vrm_v3(pm[0], pm[1], pm[2])));
+    dir = vrm_q_rotate(hand.orientation, vrm_v3(am[0], am[1], am[2]));
+    if (!vrm_normalize(&dir)) return 0;
+    up = vrm_q_rotate(hand.orientation, vrm_v3(0, 1, 0));
+    aim.position = muzzle;
+    aim.orientation = vrg_look_rotation(dir, up);
+    memset(G.q, 0, sizeof(G.q));
+    G.q[0].type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+    G.q[0].layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    G.q[0].space = s->world_space;
+    G.q[0].eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    G.q[0].subImage.swapchain = G.sc.handle;
+    G.q[0].subImage.imageRect.extent.width = (int32_t)G.sc.width;
+    G.q[0].subImage.imageRect.extent.height = (int32_t)G.sc.height;
+    G.q[0].pose = to_xr(vrp_laser_pose(aim, len, head.position, &w, &h));
+    G.q[0].size.width = 0.0025f;
+    G.q[0].size.height = h;
+    out[0] = (const XrCompositionLayerBaseHeader *)&G.q[0];
+    /* the dot: facing the eye, its size growing with distance (about 0.4 deg) */
+    endp = vrm_add(muzzle, vrm_scale(dir, len));
+    G.q[1] = G.q[0];
+    {
+        VrVec3 f = vrm_sub(endp, head.position);
+        const float d = vrm_len(f);
+        VrPose dp;
+        if (!vrm_normalize(&f)) return 1;
+        dp.position = endp;
+        dp.orientation = vrg_look_rotation(f, vrm_q_rotate(head.orientation, vrm_v3(0, 1, 0)));
+        G.q[1].pose = to_xr(dp);
+        G.q[1].size.width = G.q[1].size.height = d * 0.007f < 0.008f ? 0.008f : d * 0.007f;
+    }
+    out[1] = (const XrCompositionLayerBaseHeader *)&G.q[1];
+    return 2;
+}
+
 static const XrsPanelOps k_ops = { op_input, op_draw, op_layers, op_destroy };
 
 const XrsPanelOps *xrs_panel_attach(XrShell *s)

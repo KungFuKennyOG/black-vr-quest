@@ -791,7 +791,7 @@ void xrs_frame(XrShell *s)
     XrCompositionLayerProjectionView pv[VR_EYE_COUNT];
     XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
     XrCompositionLayerQuad hudq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
-    const XrCompositionLayerBaseHeader *layers[6];   /* projection, HUD or flat, settings panel + its laser */
+    const XrCompositionLayerBaseHeader *layers[8];   /* projection, HUD or flat, laser sight + dot, settings panel + its laser */
     uint32_t nl = 0, i;
     static double last_t;
     static double t0;
@@ -928,6 +928,9 @@ void xrs_frame(XrShell *s)
             quad.size.height = quad.size.width / s->flat_aspect;
             layers[nl++] = (const XrCompositionLayerBaseHeader *)&quad;
         }
+        /* the laser sight (blackvr.ini laser), in the 3D game */
+        if (mode == VR_PRESENT_STEREO && !show_quad_too)
+            nl += xrs_gun_laser_layers(s, fs.predictedDisplayTime, layers + nl, (uint32_t)(sizeof(layers) / sizeof(layers[0])) - nl);
         /* the settings panel over everything (world-locked quad + laser beam) */
         if (s->panel) nl += s->panel->layers(s, layers + nl, (uint32_t)(sizeof(layers) / sizeof(layers[0])) - nl);
     }
@@ -937,6 +940,13 @@ void xrs_frame(XrShell *s)
     ei.layers = layers;
     xrEndFrame(s->session, &ei);
     pthread_mutex_unlock(&s->queue_lock);
+}
+
+/* xr_panel.c's laser sight; a build without the panel draws none */
+__attribute__((weak)) uint32_t xrs_gun_laser_layers(XrShell *s, XrTime t, const XrCompositionLayerBaseHeader **out, uint32_t cap)
+{
+    (void)s; (void)t; (void)out; (void)cap;
+    return 0;
 }
 
 void xrs_session_destroy(XrShell *s)

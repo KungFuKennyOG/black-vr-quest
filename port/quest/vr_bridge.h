@@ -230,6 +230,7 @@ typedef struct {
     int   bob_filter;          /* 1: low-pass the camera's vertical position */
     int   hand_weapon;         /* 1: move first-person weapon to the aim hand */
     int   tutorial_hints;      /* 1: mission 1's control hints show also after it was completed (game: until then) */
+    int   laser;               /* 1: a laser sight from the drawn gun's muzzle along its barrel (blackvr.ini laser) */
 } VrGameConfig;
 const VrGameConfig *vr_game_config(void);
 
@@ -428,6 +429,10 @@ void vr_set_gun_two_handed(int two);
 /* Game thread: the drawn gun's barrel as the game holds it (the muzzle record's at, unit, in the gun hand's LH frame,
  * before the arms' lock), valid 0/1. Render thread: read it to point an angled gun along the controller. */
 void vr_set_gun_barrel(const float d[3], int valid);
+/* Game thread: the drawn gun's muzzle and barrel in the gun hand's OpenXR aim space (metres; x right, y up, z back),
+ * and how far the shot would go (m, to the game's aim point); valid 0/1. XR thread: the laser sight reads it. */
+void vr_set_gun_laser(const float muzzle[3], const float dir[3], float length_m, int valid);
+int vr_gun_laser(float muzzle[3], float dir[3], float *length_m);
 int vr_gun_barrel(float d[3]);
 /* Game thread: the player fired (the muzzle flash was drawn). Render thread: the time of the last shot (CLOCK_MONOTONIC
  * ns, 0 = none) and the recoil kick scale (blackvr.ini recoil). */

@@ -504,6 +504,32 @@ static void bvr_publish_flat_barrel(void)
     vr_set_gun_barrel(d, ok);
 }
 
+/* The laser sight (blackvr.ini laser): the drawn muzzle and barrel in the gun hand's aim space (bvr_barrel_in_hand,
+ * any angle), and its length: from the eye to the game's aim point (weapon+10, where the crosshair's ray meets the
+ * world), 0.5..60 m, 30 when unreadable. The XR thread draws it at display time from the latched hand. */
+static void bvr_publish_laser(void)
+{
+    const VrGameConfig *cfg = vr_game_config();
+    VrVec3 p = vrm_v3(0, 0, 0), a = vrm_v3(0, 0, 0);
+    float pm[3] = { 0, 0, 0 }, am[3] = { 0, 0, 0 }, len = 30.0f;
+    uint32_t core, weapon;
+    if (!cfg->laser || bvr.mode != VR_PRESENT_STEREO) { vr_set_gun_laser(pm, am, 0.0f, 0); return; }
+    bvr_barrel_in_hand(&p, &a);
+    if (!(vrm_len(p) < 1.5f) || !(vrm_len(a) > 0.5f)) { vr_set_gun_laser(pm, am, 0.0f, 0); return; }
+    core = black_pc_ram_span(0x2D45D4u, 4u) ? GUEST32(0x2D45D4u) : 0u;
+    weapon = core && black_pc_ram_span(core + 0x30u + 0x29Cu, 4u) ? GUEST32(core + 0x30u + 0x29Cu) : 0u;
+    if (weapon && black_pc_ram_span(weapon + 0x10u, 0x10u) && bvr_f32_ok(weapon + 0x10u) && bvr_f32_ok(weapon + 0x18u) &&
+        black_pc_ram_span(core + 0x130u, 0x10u) && bvr_f32_ok(core + 0x130u) && bvr_f32_ok(core + 0x138u)) {
+        const VrVec3 t = vrm_v3(bvr_f32(weapon + 0x10u), bvr_f32(weapon + 0x14u), bvr_f32(weapon + 0x18u));
+        const VrVec3 e = vrm_v3(bvr_f32(core + 0x130u), bvr_f32(core + 0x134u), bvr_f32(core + 0x138u));
+        const float d = vrm_len(vrm_sub(t, e)) / cfg->units_per_metre;
+        if (d == d) len = d < 0.5f ? 0.5f : d > 60.0f ? 60.0f : d;
+    }
+    pm[0] = p.x; pm[1] = p.y; pm[2] = p.z;
+    am[0] = a.x; am[1] = a.y; am[2] = a.z;
+    vr_set_gun_laser(pm, am, len, 1);
+}
+
 static void black_vr_look(uint32_t look)
 {
     const VrGameConfig *cfg;
@@ -530,6 +556,7 @@ static void black_vr_look(uint32_t look)
         hand_mode = cfg->aim_mode == VR_AIM_HAND && f->hand[cfg->aim_hand & 1].valid;
         d = vgm_aim_dir(hand_mode, head_rel, hand_rel, vrm_v3(0, 0, 0), cfg->aim_converge_m);
         bvr_publish_flat_barrel();
+        bvr_publish_laser();
         if (hand_mode && cfg->aim_barrel) {
             /* shots converge on the drawn gun's barrel line (not the controller's ray), aim_converge metres out */
             VrVec3 bp, ba;

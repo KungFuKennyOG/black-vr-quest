@@ -853,6 +853,32 @@ void vr_grip_lock(float l[16])
 
 void vr_set_gun_two_handed(int two) { __atomic_store_n(&g_gun_two_handed, two < 0 ? 0 : two > 2 ? 2 : two, __ATOMIC_RELAXED); }
 
+static float g_laser_p[3], g_laser_d[3], g_laser_len;
+static int64_t g_laser_ns;
+void vr_set_gun_laser(const float muzzle[3], const float dir[3], float length_m, int valid)
+{
+    pthread_mutex_lock(&g_lock);
+    if (valid) {
+        memcpy(g_laser_p, muzzle, sizeof(g_laser_p));
+        memcpy(g_laser_d, dir, sizeof(g_laser_d));
+        g_laser_len = length_m;
+        g_laser_ns = mono_ns();
+    } else {
+        g_laser_ns = 0;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+int vr_gun_laser(float muzzle[3], float dir[3], float *length_m)
+{
+    int ok;
+    pthread_mutex_lock(&g_lock);
+    memcpy(muzzle, g_laser_p, sizeof(g_laser_p));
+    memcpy(dir, g_laser_d, sizeof(g_laser_d));
+    *length_m = g_laser_len;
+    ok = g_laser_ns && mono_ns() - g_laser_ns < 250000000LL;      /* fresh: the game is in gameplay */
+    pthread_mutex_unlock(&g_lock);
+    return ok;
+}
 static float g_gun_barrel[3];
 static int g_gun_barrel_ok;
 void vr_set_gun_barrel(const float d[3], int valid)

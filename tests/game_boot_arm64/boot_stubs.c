@@ -121,6 +121,7 @@ void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register) { (void)m
 void vr_mark_viewmodel_offhand(const float a[16], const float c[3]) { (void)a; (void)c; }
 void vr_grip_correction(float c[3]) { c[0] = c[1] = c[2] = 0.0f; }
 void vr_set_gun_barrel(const float d[3], int valid) { (void)d; (void)valid; }
+void vr_set_gun_laser(const float m[3], const float d[3], float l, int v) { (void)m; (void)d; (void)l; (void)v; }
 void vr_grip_lock(float d[16]) { int i; for (i = 0; i < 16; i++) d[i] = (i % 5 == 0) ? 1.0f : 0.0f; }
 void vr_note_shot(void) { }
 /* VR controls (port/notes/xr-shell.md "Input") */

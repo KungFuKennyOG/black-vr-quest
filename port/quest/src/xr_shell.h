@@ -185,6 +185,8 @@ void vrsm_sampler(int want);           /* the per-thread CPU sampler, while a se
 void vrsm_info_update(XrShell *s);
 /* xr_panel.c: the panel for this shell; call after blackvr.ini was read (it keeps that config as "as started") */
 const XrsPanelOps *xrs_panel_attach(XrShell *s);
+/* xr_panel.c: the laser sight's layers (blackvr.ini laser) for display time t: 0 or 2 (beam, dot) */
+uint32_t xrs_gun_laser_layers(XrShell *s, XrTime t, const XrCompositionLayerBaseHeader **out, uint32_t cap);
 typedef struct {
     int open, inited, released;
     XrSwapchain panel, laser;

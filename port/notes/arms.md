@@ -181,3 +181,11 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
   measured against the same mid-animation baseline. Now: the rest capture waits for the gun and the game's left
   hand to be still (25 frames, after 45) and not 0.6 s after a shot; the re-take fires when the gun is 6+ deg or the
   left hand 6+ cm off the rest, both still, for 2.5 s with no shot for 1 s.
+
+## Laser sight (Nov 14)
+`laser = on|off` (default off; VR SETTINGS > Comfort > Laser sight, live). The game thread publishes the drawn
+muzzle and barrel in the gun hand's aim space (bvr_barrel_in_hand, L included) and a length (eye to the game's aim
+point weapon+10, 0.5..60 m) each look (vr_set_gun_laser; stale after 250 ms, so it goes in menus and cutscenes). The
+XR thread (xr_panel.c xrs_gun_laser_layers) locates the gun hand at display time and draws a 2.5 mm red beam quad
+(vrp_laser_pose) and a dot facing the eye at its end, in STEREO only. Composition quads: drawn over the scene, not
+hidden by walls. Not tested on the headset or the harness (the harness has no XR compositor).
