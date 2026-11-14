@@ -293,7 +293,7 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
                                        /* held: takes the gun at 50 %, lets go only under 25 % (a relaxed hold on a
                                         * foregrip hovers around one threshold, and dropped the grip every second) */
                                        (g_two.engaged ? off_grip > 0.15f : off_grip > 0.5f) &&
-                                           gun_hands > 0, dt);
+                                           gun_hands == 2, dt);   /* the pistol: the hold below, not this test */
         if (gun_hands == 2) aim[gun] = two_aim;          /* a hold only (the pistol's cupped hand): the look, not the aim */
         if (g_two.engaged != was)
             XLOGI("two-hand %s (hands %.2f m apart)", g_two.engaged ? "on" : "off", g_two.last_dist);
