@@ -402,6 +402,25 @@ fresh path. Only an unreadable aim matrix still uses the old fallback. The check
 an 8 deg kick, a 5 cm step, record 5 animating 3 deg and the hand moving: every component exact, and the old
 fallback over 3 cm off (690 checks; undoing the path, the offset or the body step fails it).
 
+### 6d. The shotgun fireball leaves 4 deg above the barrel (2026-11-13)
+
+**Report (headset):** "the shotgun fireball ... it's a bit high", gun held still; the check line read 0.1-0.7 cm (the
+spawn is right).
+
+**Measured** (`BLACKVR_AIM_TRACE=3`: `FXV` lines, each emitter of the player's muzzle effect and its particles'
+mean velocity as pitch/yaw degrees off the hand-held muzzle's axis, `bvr_fxl.x * record 5`; particles are read from
+the emitter's group, `[em+A8]+4` blocks of 0x30-byte entries, velocity at +10). The shotgun's effect has 4 emitters;
+the fireball is emitter 3 (~34-42 m/s, 7 particles), whose axis is **4.0 deg up** from the record's (its particles
+leave 3.9 deg up, then curve down at ~3 g). The others (smoke, 1-7 m/s) sit on the axis or drift sideways on purpose.
+The particle spawn (160E70) takes the direction from the emitter's rows, the emitter's rows are `local[i] * slot
+matrix` (163FD0 each update, 16FE10 at creation): the 4 deg is in the effect's data, aimed a little up from a gun held
+low beside the flat camera. In the hand it shows as a fireball leaving above the barrel: 3 cm at 40 cm, 7 cm at 1 m.
+
+**Change (`bvr_fx_align`, after the held effects' update, before the records go back):** every emitter of the
+player's weapon effects (where 0..7) whose axis is 0.1-6 deg off its record's axis is turned onto it about its own
+position. Wider ones keep their direction. Trace after: emitter 3 at 0.0 deg, its particles -0.2 deg at spawn.
+`BLACKVR_GUN_FX_ALIGN=0` turns it off.
+
 ## 7. Where the shots go vs where the gun points (2026-11-12, measured, not changed)
 
 - Bullets: 1DBD50 fires from the actor's eye toward `weapon+10` (spread from the magazine), which the game puts on
