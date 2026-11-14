@@ -41,7 +41,7 @@ typedef struct {
     int   scope_raise;           /* on/off */
     float scope_distance;        /* m, 0.15 */
     int   two_hand;              /* on/off */
-    float two_hand_engage_m;     /* 0.20 */
+    float two_hand_engage_m;     /* 0.45 (0.20 caught a hand on a rifle's handguard only now and then) */
 } VrGestureConfig;
 
 static inline void vrg_default_config(VrGestureConfig *c)
@@ -57,7 +57,7 @@ static inline void vrg_default_config(VrGestureConfig *c)
     c->scope_raise = 1;
     c->scope_distance = 0.15f;
     c->two_hand = 1;
-    c->two_hand_engage_m = 0.20f;
+    c->two_hand_engage_m = 0.45f;
 }
 
 /* ---- swing -> melee ---------------------------------------------------------------------------------------- */
@@ -323,7 +323,7 @@ static inline VrPose vrg_two_hand_update(VrTwoHand *s, const VrGestureConfig *c,
     s->last_dist = dist;
     if (!s->engaged) {
         const VrVec3 ahead = vrm_add(gun.position, vrm_scale(fwd, 0.30f));
-        if ((dist <= c->two_hand_engage_m || vrm_len(vrm_sub(off_pos, ahead)) <= c->two_hand_engage_m) && along > 0.03f)
+        if ((dist <= c->two_hand_engage_m || vrm_len(vrm_sub(off_pos, ahead)) <= c->two_hand_engage_m) && along > 0.0f)
             s->engaged = 1;
     } else if (along < 0.02f || dist > 0.9f) {
         s->engaged = 0;

@@ -200,6 +200,7 @@ static int g_hand_vel_ok[2];
 static int g_duck_recal = 1, g_was_in_game;
 static VrInputContext g_last_ctx;
 static int g_gun_two_handed;                     /* the drawn gun takes the off hand (set by the renderer) */
+static int g_hold_on;                            /* the pistol's look-only hold: grip held, hands close */
 static int g_two_hand_on;                       /* the two-handed aim of the last input step (latch_gun) */
 
 void vr_set_action_resolver(int (*resolve)(int slot)) { g_resolver = resolve; }
@@ -291,12 +292,22 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
         const VrPose two_aim = vrg_two_hand_update(&g_two, gc, valid[gun] && in_game, aim[gun], valid[off], aim[off].position,
                                        /* held: takes the gun at 50 %, lets go only under 25 % (a relaxed hold on a
                                         * foregrip hovers around one threshold, and dropped the grip every second) */
-                                       (g_two.engaged ? off_grip > 0.25f : off_grip > 0.5f) &&
+                                       (g_two.engaged ? off_grip > 0.15f : off_grip > 0.5f) &&
                                            gun_hands > 0, dt);
         if (gun_hands == 2) aim[gun] = two_aim;          /* a hold only (the pistol's cupped hand): the look, not the aim */
         if (g_two.engaged != was)
             XLOGI("two-hand %s (hands %.2f m apart)", g_two.engaged ? "on" : "off", g_two.last_dist);
         g_two_hand_on = g_two.engaged && gun_hands == 2;
+        /* the look-only hold (the pistol): the two-hand test wants the off hand ahead on the gun line; the pistol's
+         * hold is under and behind the grip, so it is just the grip held with the hands close (25 cm, kept to 35) */
+        {
+            const int was_hold = g_hold_on;
+            const VrVec3 dv = vrm_sub(aim[off].position, aim[gun].position);
+            const float dist = vrm_len(dv);
+            g_hold_on = gun_hands == 1 && valid[gun] && valid[off] && in_game &&
+                        (g_hold_on ? off_grip > 0.15f && dist < 0.45f : off_grip > 0.5f && dist < 0.35f);
+            if (g_hold_on != was_hold) XLOGI("hold %s (hands %.2f m apart)", g_hold_on ? "on" : "off", dist);
+        }
     }
     for (h = 0; h < 2; h++) {
         g_live.hand[h].aim = aim[h];
@@ -875,7 +886,7 @@ void vr_arms_state(int *cut, int *mode, int *engaged)
 {
     *cut = g_xr.cfg.arms_cut;
     *mode = g_xr.cfg.left_hand;
-    *engaged = __atomic_load_n(&g_two.engaged, __ATOMIC_RELAXED) != 0;
+    *engaged = __atomic_load_n(&g_two.engaged, __ATOMIC_RELAXED) != 0 || __atomic_load_n(&g_hold_on, __ATOMIC_RELAXED) != 0;
 }
 
 const VrGunLatchConfig *vr_gun_latch_config(void)

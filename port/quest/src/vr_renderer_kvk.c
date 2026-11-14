@@ -434,6 +434,8 @@ typedef struct {
     int have_root;              /* root_t captured: the gun (its *_Root bone) is what is locked */
     float root_t[12];           /* the gun root's locked pose in the hand frame (at rest the wrist is on target) */
     float root_turn;            /* how far (deg) the game's animation has turned the gun from its rest pose */
+    float turn_prev;            /* root_turn a frame ago */
+    unsigned drift_n;           /* frames the game has held the gun still, turned off the rest pose, hands idle */
     float root_g0[12];          /* the game's gun root at rest (hand frame), before the lock's move and straightening */
     int have_lw;                /* the game's left wrist at rest: */
     float lw_rel[12];           /*   in the gun root's frame (root^-1 * wrist, hand frame) */
@@ -712,6 +714,29 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
             }
         }
         e->corr_n++;
+        /* a rest pose taken mid-animation (a pickup, a raise) locked the gun at that angle for good (the AK twice on the
+         * headset): when the game has held its gun still, 6+ deg off the rest pose, for 2 s with the left hand at its
+         * rest and no shot for 1 s, the rest pose is taken again */
+        if (e->have_root) {
+            struct timespec ts1;
+            int64_t now1, shot1 = vr_last_shot_ns();
+            clock_gettime(CLOCK_MONOTONIC, &ts1);
+            now1 = (int64_t)ts1.tv_sec * 1000000000LL + ts1.tv_nsec;
+            if (e->root_turn > 6.0f && fabsf(e->root_turn - e->turn_prev) < 0.3f && (!e->have_lw || e->left_dev < 0.03f) &&
+                (shot1 <= 0 || now1 - shot1 > 1000000000LL))
+                e->drift_n++;
+            else
+                e->drift_n = 0;
+            e->turn_prev = e->root_turn;
+            if (e->drift_n > 120u) {
+                GLOG("arms: the game holds the gun %.1f deg off the locked rest pose: taking the rest pose again", e->root_turn);
+                e->have_r0 = 0;
+                e->have_root = 0;
+                e->have_lw = 0;
+                e->drift_n = 0;
+                e->stable_n = 0;
+            }
+        }
         vr_set_grip_correction(e->corr);
         vr_set_grip_lock(lf);
         {   /* once a second: how much the game's animation moved and turned the wrist, all locked out */
@@ -854,7 +879,12 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
         const float loose = e->have_root ? vra_loose_off(&e->rig, constants) : 0.0f;
         /* (until the rest capture, ~1 s after the gun comes up, the hand stays free) */
         /* (not the loose parts: firing throws the AK's 14 cm, every shot) */
-        if (e->have_root && (e->root_turn > 15.0f || (e->have_lw && e->left_dev > 0.08f)))
+        int64_t shot2 = vr_last_shot_ns();
+        /* (the gun's turn not within 0.5 s of a shot: the pistol kicks 20 deg) */
+        const int kick = shot2 > 0 && now - shot2 < 700000000LL;
+        /* a gun just picked up or drawn (its first 3 s, until the rest capture): the game's raise and cock animation */
+        if ((!e->have_root && e->corr_n < 180u) ||
+            (e->have_root && ((!kick && e->root_turn > 15.0f) || (e->have_lw && e->left_dev > 0.08f))))
             busy_until = now + 350000000LL;
         busy = now < busy_until;
         if (busy != last_busy) {

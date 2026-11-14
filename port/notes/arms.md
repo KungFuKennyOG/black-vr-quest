@@ -157,3 +157,16 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
 - Straightening now uses the game's muzzle record (game thread -> `vr_gun_barrel`), not the gun root's z: same
   answer for the RPG (36) and the sniper (33).
 - The left-wrist trigger for the game's animations is 8 cm (the sniper's idle moves it 4.6 cm).
+
+## Headset test of ccdbc54 (Nov 14 00:29, log blackvr_log_20261114_002937.txt) -> fixes
+- Pistol: the game's left hand flashed on every shot: its kick turns the gun 20 deg, over the 15 deg reload test. The
+  gun's turn no longer counts within 0.7 s of a shot (the left wrist test still does).
+- Pistol grip did nothing: the two-hand test wants the off hand ahead on the gun line; the pistol's hold is behind and
+  under the grip. Look-only guns now take a plain hold (`hold on/off` in the log): grip 50 % with the hands within
+  35 cm (kept to 15 % / 45 cm).
+- The rifle grip caught "very rarely": it needed the off hand within 20 cm of the gun hand or of a point 30 cm ahead.
+  Now 45 cm and anywhere ahead of the gun hand; let go at 15 % grip (was 25).
+- Pickups/draws: the game's left hand (its raise and cock animation) for a new gun's first 3 s, until the rest capture.
+- The AK twice kept a wrong angle: a rest pose captured mid-animation (43 frames in) stays locked. Now when the game
+  holds the gun still 6+ deg off the locked rest for 2 s (left hand at rest, no shot for 1 s), the rest pose is taken
+  again (`arms: the game holds the gun ... taking the rest pose again`).
