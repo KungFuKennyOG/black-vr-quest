@@ -304,6 +304,7 @@ typedef struct {
     int   engaged;
     float blend;                 /* 0 one-handed .. 1 two-handed */
     float last_dist;
+    float off_s;                 /* how long the held off hand has been 45..70 deg off the gun's ray */
 } VrTwoHand;
 
 /* Updates the engagement from the off hand's grip; returns the aim pose to use for the gun hand. */
@@ -326,9 +327,16 @@ static inline VrPose vrg_two_hand_update(VrTwoHand *s, const VrGestureConfig *c,
     if (!s->engaged) {
         if (dist <= c->two_hand_engage_m && dist > 0.08f && along > dist * 0.866f)
             s->engaged = 1;
-    } else if (along < 0.02f || dist > 0.9f || along < dist * 0.707f) {
-        s->engaged = 0;
+    } else if (along < 0.02f || dist > 0.9f || along < dist * 0.342f) {
+        s->engaged = 0;                              /* behind, out of reach, or over 70 deg off: at once */
+    } else if (along < dist * 0.707f) {
+        /* 45..70 deg off the controller's ray: a two-handed hold turns the gun wrist that far for a moment, so it
+         * lets go only after 0.3 s there (Kenny 2026-11-14: "ungrips when my left hand strays a bit too far even
+         * though im still gripping") */
+        s->off_s += (float)dt;
+        if (s->off_s > 0.3f) s->engaged = 0;
     }
+    if (!s->engaged || along >= dist * 0.707f) s->off_s = 0.0f;
     if (!s->engaged) { s->blend = 0.0f; return gun; }
     s->blend += (float)(dt / 0.1);
     if (s->blend > 1.0f) s->blend = 1.0f;

@@ -734,6 +734,23 @@ static void test_two_hand(void)
         f2 = vrm_q_rotate(out.orientation, V(0, 0, -1));
         CHECK(vrm_dot(f, f2) > 0.99999f);
     }
+    /* held, the off hand strays 55 deg off the controller's ray: still held for 0.3 s, then let go */
+    {
+        const VrVec3 side = vrm_add(gun.position, vrm_q_rotate(gun.orientation, V(-0.29f, 0.0f, -0.2f)));
+        for (i = 0; i < 18; i++) out = vrg_two_hand_update(&th, &gc, 1, gun, 1, side, 1, 1.0 / 72.0);
+        CHECK(th.engaged);
+        out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 1, 1.0 / 72.0);   /* back on the line: the timer resets */
+        for (i = 0; i < 18; i++) out = vrg_two_hand_update(&th, &gc, 1, gun, 1, side, 1, 1.0 / 72.0);
+        CHECK(th.engaged);
+        for (i = 0; i < 6; i++) out = vrg_two_hand_update(&th, &gc, 1, gun, 1, side, 1, 1.0 / 72.0);
+        CHECK(!th.engaged);
+        for (i = 0; i < 20; i++) out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 1, 1.0 / 72.0);
+        CHECK(th.engaged);
+        /* over 70 deg off: at once */
+        out = vrg_two_hand_update(&th, &gc, 1, gun, 1, vrm_add(gun.position, vrm_q_rotate(gun.orientation, V(-0.3f, 0.0f, -0.05f))), 1, 1.0 / 72.0);
+        CHECK(!th.engaged);
+        for (i = 0; i < 20; i++) out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 1, 1.0 / 72.0);
+    }
     /* released: one-handed again, at once */
     out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 0, 1.0 / 72.0);
     CHECK(!th.engaged && !memcmp(&out, &gun, sizeof(out)));
