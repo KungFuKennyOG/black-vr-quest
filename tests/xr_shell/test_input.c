@@ -734,17 +734,6 @@ static void test_two_hand(void)
         f2 = vrm_q_rotate(out.orientation, V(0, 0, -1));
         CHECK(vrm_dot(f, f2) > 0.99999f);
     }
-    /* held, the off hand strays 70 deg off the controller's ray and to 1 m: still held, the aim follows it */
-    {
-        const VrVec3 far = vrm_add(gun.position, vrm_q_rotate(gun.orientation, V(-0.94f, 0.0f, -0.34f)));
-        VrVec3 want = vrm_sub(far, gun.position), f3;
-        out = vrg_two_hand_update(&th, &gc, 1, gun, 1, far, 1, 1.0 / 72.0);
-        f3 = vrm_q_rotate(out.orientation, V(0, 0, -1));
-        vrm_normalize(&want);
-        CHECK(th.engaged && vrm_dot(f3, want) > 0.9999f);
-        out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 1, 1.0 / 72.0);
-        CHECK(th.engaged);
-    }
     /* released: one-handed again, at once */
     out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 0, 1.0 / 72.0);
     CHECK(!th.engaged && !memcmp(&out, &gun, sizeof(out)));

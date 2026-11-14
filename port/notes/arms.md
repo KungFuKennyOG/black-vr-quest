@@ -173,7 +173,7 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
 - Shotgun: a shell sat under the free left hand (the game keeps one in its left hand at rest; loose parts near that hand used to follow the moved hand). The free hand does no reloading now, so such parts are hidden while the hand is free; the game's own hand shows them in its animations.
 - Video 01:31:59 (16803ea): the shotgun turned sideways across the view while gripped: the loosened two-hand test
   (45 cm anywhere ahead) took a left hand off to the side, and two-handed aim points the gun at the off hand. Now the
-  off hand must be within 30 deg of the controller's ray (out to 60 cm), once held, it stays held until the grip opens (below 15%), the off hand goes behind the gun hand, or the hands are over 1.2 m apart (it let go past 45 deg until 2026-11-14: a two-handed hold turns the gun wrist that far).
+  off hand must be within 30 deg of the controller's ray (out to 60 cm), released past 45 deg.
 - The shotgun's spare shell (the game parks it in its left hand) is hidden except in reloads: at rest, in the raise
   and cock, with the hold and with the free hand (vra_hide_left_loose).
 - The gun stuck at an angle (still on f5413b8/16803ea): the AK straightened 42 deg in a pickup at 01:23:32 (log
