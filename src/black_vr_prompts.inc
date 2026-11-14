@@ -362,6 +362,7 @@ static int bvp_row_text(const char *name, int slot, int hand, char *out, unsigne
     in = vrp_slot_input(slot, hand);
     if (in.kind == VRP_HEAD) return snprintf(out, cap, "%s  with head", name) < (int)cap;
     if (in.kind == VRP_RAISE) return snprintf(out, cap, "%s  raise gun to eye", name) < (int)cap;
+    if (in.kind == VRP_SWING) return snprintf(out, cap, "%s  swing the gun", name) < (int)cap;
     if (slot == 1) in.kind = VRP_STICK_UPDOWN;                 /* run forward/back: the stick's up/down glyph */
     if (slot == 3) in.kind = VRP_STICK_SIDE;                   /* sidestep: left/right */
     {

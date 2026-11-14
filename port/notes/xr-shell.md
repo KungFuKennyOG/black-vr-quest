@@ -135,7 +135,7 @@ the Menu held for Back does not press START in the objectives screen).
 |---|---|---|
 | right trigger | Fire (analog on a trigger) | 9 (RT) |
 | right A | Reload | 11 (A) |
-| right B, or a fast swing of the gun hand | Melee | 32 (B) |
+| a fast swing of the gun hand (right B: nothing, 2026-11-14) | Melee | 32 (B) |
 | right stick left/right | turn (snap 30° with 0.7/0.3 hysteresis, or smooth 120°/s), host-side | - |
 | right stick up / down | next / previous weapon, one step per push (on 0.7, re-arm under 0.3) | 14 / 15 (d-pad right / left) |
 | right stick up/down while the scope is up | the scope's zoom level | 35 (d-pad up) |

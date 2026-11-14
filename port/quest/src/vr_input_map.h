@@ -9,7 +9,7 @@
  *
  *   right trigger       Fire (analog when Fire is on a trigger)       left stick        move (locomotion = head |
  *   right A             Reload                                                          aim | offhand)
- *   right B             Melee (also: a fast swing of the gun hand)    left stick click  Crouch (as the game's
+ *   right B             nothing (melee: swing the gun hand, IRL)     left stick click  Crouch (as the game's
  *   right stick x       turn (snap / smooth)                                            Toggle Crouch says)
  *   right stick up/down next / previous weapon, one per push        left trigger      Grenade
  *                       (while the scope is up: the scope's zoom)     left grip         two-handed aim (vr_gestures.h)
@@ -317,7 +317,7 @@ static inline void vr_map_actions(const VrInputConfig *c, VrInputRuntime *rt, co
     const float gun_trig = lh ? t->lt : t->rt, off_trig = lh ? t->rt : t->lt;
     const float gx = lh ? t->lx : t->rx, gy = lh ? t->ly : t->ry;
     float mx = lh ? t->rx : t->lx, my = lh ? t->ry : t->ly;
-    const int gun_lo = lh ? t->x : t->a, gun_hi = lh ? t->y : t->b;
+    const int gun_lo = lh ? t->x : t->a;   /* the gun hand's upper button (B) does nothing: melee is the swing */
     const int off_lo = lh ? t->a : t->x, off_hi = lh ? t->b : t->y;
     int lclick_on, rclick_on, gun_click, off_click;
     uint32_t held;
@@ -380,7 +380,6 @@ static inline void vr_map_actions(const VrInputConfig *c, VrInputRuntime *rt, co
     gun_click = lh ? lclick_on : rclick_on;
     off_click = lh ? rclick_on : lclick_on;
     if (gun_lo) held |= VRA_BIT(VRA_RELOAD);
-    if (gun_hi) held |= VRA_BIT(VRA_MELEE);
     if (gun_click) held |= VRA_BIT(VRA_USE);
     if (off_click || ctx->crouch_hold) held |= VRA_BIT(VRA_CROUCH);
     if (off_lo) held |= VRA_BIT(VRA_HEALTH_PACK);

@@ -39,7 +39,8 @@ typedef enum {
     VRP_BUTTON_HIGH,       /* B (right) / Y (left) */
     VRP_MENU,              /* the left controller's Menu button */
     VRP_HEAD,              /* look: the head */
-    VRP_RAISE              /* raise the gun to the eye (the scope) */
+    VRP_RAISE,             /* raise the gun to the eye (the scope) */
+    VRP_SWING              /* swing the gun hand (melee) */
 } VrPromptKind;
 
 typedef struct {
@@ -73,7 +74,7 @@ static inline VrPromptInput vrp_slot_input(int slot, int gun_hand)
     case 27: r.kind = VRP_TRIGGER; r.hand = off; break;
     case 30: r.kind = VRP_BUTTON_HIGH; r.hand = off; r.hold = 1; break;
     case 31: r.kind = VRP_BUTTON_HIGH; r.hand = off; break;
-    case 32: r.kind = VRP_BUTTON_HIGH; break;
+    case 32: r.kind = VRP_SWING; break;               /* melee: no button (Kenny: melee IRL) */
     case 33: r.kind = VRP_BUTTON_LOW; r.hand = off; break;
     case 35: r.kind = VRP_STICK_UPDOWN; break;
     case 36: r.kind = VRP_MENU; r.hand = VRP_LEFT; r.hold = 1; break;
@@ -167,6 +168,7 @@ static inline int vrp_prompt(VrPromptInput in, uint16_t *out, unsigned cap)
     switch (in.kind) {
     case VRP_HEAD: vrp_puts(&b, "LOOK WITH YOUR HEAD :"); break;
     case VRP_RAISE: vrp_puts(&b, "RAISE GUN TO EYE :"); break;
+    case VRP_SWING: vrp_puts(&b, "SWING THE GUN :"); break;
     default:
         vrp_puts(&b, in.hold ? "HOLD " : in.kind == VRP_TRIGGER ? "PULL " : in.kind == VRP_STICK_CLICK ? "CLICK " :
                      in.kind == VRP_STICK || in.kind == VRP_STICK_SIDE || dir ? "PUSH " : "PRESS ");
@@ -189,7 +191,7 @@ static inline int vrp_short(VrPromptInput in, uint16_t *out, unsigned cap, int f
     const char *dir = vrp_direction((VrPromptKind)in.kind);
     const uint16_t ch = vrp_input_char(in);
     if (!out || !cap || in.kind == VRP_NONE) return -1;
-    if (!ch) vrp_puts(&b, in.kind == VRP_HEAD ? "HEAD" : "RAISE GUN TO EYE");
+    if (!ch) vrp_puts(&b, in.kind == VRP_HEAD ? "HEAD" : in.kind == VRP_SWING ? "SWING GUN" : "RAISE GUN TO EYE");
     else {
         if (in.hold) vrp_puts(&b, "HOLD ");
         vrp_put(&b, ch);
