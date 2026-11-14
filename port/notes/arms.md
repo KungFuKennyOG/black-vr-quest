@@ -128,3 +128,16 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
   frames late, carrying nothing while the game's hand worked the magazine.
 - The "gun points down in the reload" captures were from before the gun-root lock: a trace (`BLACKVR_ARMS_TRACE=1`)
   shows the game turning the SMG root 60 deg in the reload and the lock holding it.
+
+## The left hand, Kenny's rules (Nov 13 evening)
+- Not gripping: the left hand floats at the controller. (d6cfd4f broke this on straightened guns: the reload test
+  measured the gun's turn against the straightened lock, ~36 deg always, so the game's hand stayed on.)
+- One-handed guns (the game's left wrist off the gun at the rest capture; the UZI/SMG measured -0.26 -0.41 -0.34 m,
+  the pistol): the grip never takes the gun. No two-handed aim either (`vr_set_gun_two_handed`, gates the bridge's
+  two-hand update). The mirrored right hand is gone.
+- Two-handed guns: gripping near the gun shows the game's own two-handed hold ("the original two hands on the gun").
+- The game's own left-hand animations (reloads): shown for the whole animation, then back to the controller. Busy while
+  the game's left wrist is 4+ cm off its rest both on the gun (root frame) and in the view (model), the gun is turned
+  15+ deg from the game's rest, and 0.35 s after (not loose parts: firing throws the AK's 14 cm every shot; their
+  check is against their rest places now, the AK keeps one 22 cm from its bind place). Firing does not trip it (two-handed:
+  the hand moves with the gun; one-handed: the hand stays in the view).

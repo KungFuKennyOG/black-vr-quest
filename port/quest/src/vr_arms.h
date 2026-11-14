@@ -39,6 +39,8 @@ typedef struct {
     /* loose parts the game's left hand carries in reload animations (shell, magazine, clip, bullets, rocket...):
      * they follow the moved left hand while they are off their place on the gun */
     unsigned char loose[VRA_MAX_BONES];
+    int have_loose_rest;                    /* the loose parts' rest places on the gun (vra_loose_rest), else the bind's */
+    float loose_rest[VRA_MAX_BONES][3];
     int   gun_root;                  /* the gun's *_Root bone, -1 if none */
     float bindk[VRA_MAX_BONES][12];  /* every bone's bind frame (3x4) */
     signed char pair[VRA_MAX_BONES]; /* a left-arm bone's right twin (same name, _rt), -1 if none */
@@ -264,6 +266,25 @@ static inline int vra_place_off_hand(const VrArmRig *rig, float *constants, cons
 
 /* How far the furthest loose part (magazine, shell, clip, rocket...) is off its place on the gun (metres in model
  * space; 0 without a gun root or loose parts). Over a few cm: the game is reloading (or loading) with its left hand. */
+/* Each loose part's position on the gun (relative to the gun root) now: its place at rest. Some guns keep a part away
+ * from its bind place at rest (the AK: 0.22 m), which is no animation. */
+static inline void vra_loose_rest(VrArmRig *rig, const float *constants)
+{
+    float root_now[12], root_inv[12];
+    int k;
+    if (rig->gun_root < 0 || VRA_PALETTE_BASE + 3 * rig->n > 192) return;
+    vra_m34_mul(vra_rows((float *)constants, rig->gun_root), rig->bindk[rig->gun_root], root_now);
+    if (!vra_m34_inv(root_now, root_inv)) return;
+    for (k = 0; k < rig->n; k++) {
+        float now[12], rel[12];
+        if (!rig->loose[k]) continue;
+        vra_m34_mul(vra_rows((float *)constants, k), rig->bindk[k], now);
+        vra_m34_mul(root_inv, now, rel);
+        rig->loose_rest[k][0] = rel[3]; rig->loose_rest[k][1] = rel[7]; rig->loose_rest[k][2] = rel[11];
+    }
+    rig->have_loose_rest = 1;
+}
+
 static inline float vra_loose_off(const VrArmRig *rig, const float *constants)
 {
     float root_now[12], root_inv[12], root_bind_inv[12], best = 0.0f;
@@ -277,7 +298,12 @@ static inline float vra_loose_off(const VrArmRig *rig, const float *constants)
         vra_m34_mul(vra_rows((float *)constants, k), rig->bindk[k], now);
         vra_m34_mul(root_inv, now, rel_now);
         vra_m34_mul(root_bind_inv, rig->bindk[k], rel_bind);
-        dx = rel_now[3] - rel_bind[3]; dy = rel_now[7] - rel_bind[7]; dz = rel_now[11] - rel_bind[11];
+        if (rig->have_loose_rest) {
+            dx = rel_now[3] - rig->loose_rest[k][0]; dy = rel_now[7] - rig->loose_rest[k][1];
+            dz = rel_now[11] - rig->loose_rest[k][2];
+        } else {
+            dx = rel_now[3] - rel_bind[3]; dy = rel_now[7] - rel_bind[7]; dz = rel_now[11] - rel_bind[11];
+        }
         off = sqrtf(dx * dx + dy * dy + dz * dz);
         if (off == off && off > best) best = off;
     }

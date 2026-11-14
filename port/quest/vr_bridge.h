@@ -420,6 +420,9 @@ void vr_grip_correction(float c[3]);
  * (LH, game units): the drawn gun is the game's gun moved by L in that frame (identity when none) */
 void vr_set_grip_lock(const float l[16]);
 void vr_grip_lock(float l[16]);
+/* Render thread: whether the gun drawn now is one the game holds with both hands (its left hand on the gun at rest).
+ * A one-handed gun (the pistol) is never taken by the off hand: no two-handed aim, the left hand stays free. */
+void vr_set_gun_two_handed(int two);
 /* Game thread: the player fired (the muzzle flash was drawn). Render thread: the time of the last shot (CLOCK_MONOTONIC
  * ns, 0 = none) and the recoil kick scale (blackvr.ini recoil). */
 void vr_note_shot(void);
