@@ -148,9 +148,9 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
 | gun | hold | straightened |
 |---|---|---|
 | AK (ak1), assault rifle (asr), heavy MG (hvy), shotgun (shg) | two-handed (grip takes it, two-handed aim) | no |
-| pistol (pst) | look only (cupped hand, no two-handed aim) | no |
-| RPG | look only (left hand 18 cm beside the tube) | 36 deg |
-| sniper (snr) | look only (left wrist at rest 15 cm up-left of the hand) | 33 deg |
+| pistol (pst) | look only (cupped hand 10 cm behind the gun hand, no two-handed aim) | no |
+| RPG | two-handed (Kenny: felt good two-handed; left hand 18 cm beside the tube, not behind) | 36 deg |
+| sniper (snr) | two-handed (left wrist at rest 15 cm up-left of the hand) | 33 deg |
 | UZI (smg) | one-handed | no |
 | *5 variants (ak5, as5, hv5, ps5, sh5, sm5, sn5) | not in level 1's gun table: untested (same models as the base guns) | |
 | bns | accepted, but never held still for the rest capture (wrist lock only) | |
