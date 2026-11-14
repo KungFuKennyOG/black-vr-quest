@@ -350,11 +350,14 @@ static const BvmHost bvm_hosts[] = {
     { "OptionsMenuXbox", "TextAnim", "_level4.Main.TextAnim.ControllerSetup_Text", "Playerprofile_Text", 25.0f,
       "controllerButton", "Playerprofile", 25.0f, 170.0f, 0.9f, NULL, 1.0f, 245.0f, 445.0f, -5.0f,
       { "ControllerSetup_Text", "SoundSetup_Text", "PictureSetup_Text", "Playerprofile_Text" } },
-    /* Not on the pause menu's Options page (PauseMenuOptionXbox), by the user's choice (2026-11-12): its volume bars
-     * leave no free row, and placed under MUSIC VOLUME the button covered the bar. The front end's Options is the
-     * one way in. The entry that was here: holder Main, copy of _level4.Main.ToggleCrouch under MusicVolume, ring
-     * toggleCrouchButton..musicVolumeButton, pitch 27, value x 245, hiding $FE_SELECT. In the harness its page and
-     * GRAPHICS rows opened; a drop of about 66.5 (not 27) would put the button in the hidden SELECT prompt's slot. */
+    /* The pause menu's Options page (PauseMenuOptionXbox). Removed 2026-11-12 (placed 27 under MUSIC VOLUME it covered
+     * that row's bar: this page's volume rows are a label plus a bar); back 2026-11-14 at Kenny's request, 66.5 under
+     * MUSIC VOLUME: below the bar, in the slot of the SELECT prompt it hides. */
+    { "PauseMenuOptionXbox", NULL, "_level4.Main.ToggleCrouch", "MusicVolume", 66.5f,
+      "toggleCrouchButton", "musicVolumeButton", 27.0f, 245.0f, 1.0f, "$FE_SELECT", 1.4f, 343.55f, 443.55f, 168.35f,
+      { "ToggleCrouch", "ToggleCrouchOn_Text", "ToggleCrouchOff_Text", "InvertLook", "InvertLookOn_Text",
+        "InvertLookOff_Text", "Vibration", "VibrationOn_Text", "VibrationOff_Text", "SFXVolume", "Sound_Volume",
+        "MusicVolume", "Music_Volume" } },
 };
 
 #define BVM_DEPTH 120           /* our clips' depths in the holder */
