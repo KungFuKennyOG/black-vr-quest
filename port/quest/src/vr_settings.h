@@ -21,7 +21,7 @@ typedef enum {
     VRS_RES_SCALE, VRS_FOVEATION, VRS_REFRESH, VRS_GAME_HZ, VRS_PERF, VRS_SPRITE_DEBUG,
     /* Comfort */
     VRS_TURN, VRS_SNAP_DEG, VRS_SMOOTH_DPS, VRS_LOCOMOTION, VRS_LEFT_HANDED, VRS_WORLD_SCALE, VRS_HUD_DIST, VRS_HUD_WIDTH,
-    VRS_HUD_HEIGHT, VRS_TUTORIALS, VRS_LASER,
+    VRS_HUD_HEIGHT, VRS_TUTORIALS, VRS_LASER, VRS_SKIP_MOVIES,
     /* Gestures */
     VRS_MELEE, VRS_MELEE_SPEED, VRS_DUCK, VRS_DUCK_RATIO, VRS_SCOPE, VRS_SCOPE_DIST, VRS_TWO_HAND,
     VRS_COUNT
@@ -100,6 +100,8 @@ static const VrSettingDesc k_vrs[VRS_COUNT] = {
     { "tutorial_hints", 0, "Tutorial hints", "Mission 1's control hints every time (off: only until you beat it, as the game does)",
       VRS_TAB_COMFORT, VRS_BOOL, 0, 1, 1, NULL, 0, NULL, NULL, VRS_LIVE, NULL },
     { "laser", 0, "Laser sight", "A laser from the gun's muzzle along the barrel, to where your shot goes",
+      VRS_TAB_COMFORT, VRS_BOOL, 0, 1, 1, NULL, 0, NULL, NULL, VRS_LIVE, NULL },
+    { "skip_movies", 0, "Skip cutscenes", "The movie cutscenes end at once (scenes played in the game's own engine still show)",
       VRS_TAB_COMFORT, VRS_BOOL, 0, 1, 1, NULL, 0, NULL, NULL, VRS_LIVE, NULL },
 
     { "melee_swing", 0, "Swing to melee", "A fast swing of the gun hand is a melee attack",
@@ -186,6 +188,7 @@ static inline float vrs_get(const VrShellConfig *c, int id)
     case VRS_HUD_HEIGHT: return c->hud_pitch_deg;
     case VRS_TUTORIALS: return c->game.tutorial_hints ? 1.0f : 0.0f;
     case VRS_LASER: return c->game.laser ? 1.0f : 0.0f;
+    case VRS_SKIP_MOVIES: return c->game.skip_movies ? 1.0f : 0.0f;
     case VRS_MELEE: return c->gest.melee_swing ? 1.0f : 0.0f;
     case VRS_MELEE_SPEED: return c->gest.swing_speed;
     case VRS_DUCK: return c->gest.duck_crouch ? 1.0f : 0.0f;
@@ -250,6 +253,7 @@ static inline void vrs_set(VrShellConfig *c, int id, float v)
     case VRS_HUD_HEIGHT: c->hud_pitch_deg = v; break;
     case VRS_TUTORIALS: c->game.tutorial_hints = v != 0.0f; break;
     case VRS_LASER: c->game.laser = v != 0.0f; break;
+    case VRS_SKIP_MOVIES: c->game.skip_movies = v != 0.0f; break;
     case VRS_MELEE: c->gest.melee_swing = v != 0.0f; break;
     case VRS_MELEE_SPEED: c->gest.swing_speed = v; break;
     case VRS_DUCK: c->gest.duck_crouch = v != 0.0f; break;
@@ -281,6 +285,7 @@ static inline void vrs_copy(VrShellConfig *dst, const VrShellConfig *src, int id
     case VRS_HUD_HEIGHT: dst->hud_pitch_deg = src->hud_pitch_deg; break;
     case VRS_TUTORIALS: dst->game.tutorial_hints = src->game.tutorial_hints; break;
     case VRS_LASER: dst->game.laser = src->game.laser; break;
+    case VRS_SKIP_MOVIES: dst->game.skip_movies = src->game.skip_movies; break;
     case VRS_MELEE: dst->gest.melee_swing = src->gest.melee_swing; break;
     case VRS_MELEE_SPEED: dst->gest.swing_speed = src->gest.swing_speed; break;
     case VRS_DUCK: dst->gest.duck_crouch = src->gest.duck_crouch; break;

@@ -162,6 +162,7 @@ static inline void vr_config_defaults(VrShellConfig *c)
     c->game.hand_weapon = 1;
     c->game.tutorial_hints = 1;
     c->game.laser = 0;
+    c->game.skip_movies = 0;
 }
 
 static inline char *vr_cfg_trim(char *s)
@@ -326,6 +327,7 @@ static inline int vr_config_line(VrShellConfig *c, const char *line_in)
     if (!strcmp(key, "bob_filter")) return vr_cfg_bool(val, &c->game.bob_filter);
     if (!strcmp(key, "tutorial_hints")) return vr_cfg_bool(val, &c->game.tutorial_hints);
     if (!strcmp(key, "laser")) return vr_cfg_bool(val, &c->game.laser);
+    if (!strcmp(key, "skip_movies")) return vr_cfg_bool(val, &c->game.skip_movies);
     if (!strcmp(key, "scope_zoom")) { if (!vr_cfg_float(val, 1.0f, 100, &f)) return 0; c->game.scope_zoom_min = f; return 1; }
     if (!strcmp(key, "fov_margin")) { if (!vr_cfg_float(val, 1.0f, 2.0f, &f)) return 0; c->game.fov_margin = f; return 1; }
     if (!strcmp(key, "weapon_offset")) {

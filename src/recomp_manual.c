@@ -185,6 +185,13 @@ extern void sub_000C4570_gen(void);
 
 static int movie_skip_all = -1;
 static int movie_skip_startup = -1;
+/* every movie skipped: RECOMP_BLACK_SKIP_MOVIES, or in VR the VR SETTINGS option (blackvr.ini skip_movies, live) */
+#ifdef BLACK_VR
+#include "vr_bridge.h"
+#define BLACK_SKIP_ALL() (movie_skip_all > 0 || vr_game_config()->skip_movies)
+#else
+#define BLACK_SKIP_ALL() (movie_skip_all > 0)
+#endif
 static int black_pc_ram_span(uint32_t address, uint32_t bytes);
 static void black_movie_skip_font(void);
 
@@ -333,14 +340,14 @@ void sub_000C4570(void)
     }
     session = black_movie_skip_sync(movie_va);
     by_input = session && pc_movie_skip_take_request(session);
-    by_environment = session && (movie_skip_all ||
+    by_environment = session && (BLACK_SKIP_ALL() ||
         (movie_skip_startup && movie_skip_identity.kind == PC_MOVIE_SKIP_INTRO));
     if (by_input || by_environment) {
         uint8_t *movie = (uint8_t *)((uintptr_t)g_xbox_mem_offset + movie_va);
         movie[0x62] = 1;
         fprintf(stderr, "[MOVIE] skipped (%s): movie 0x%08X decoder 0x%08X "
                 "stem %s caller 0x%08X\n", by_input ? "player" :
-                movie_skip_all ? "RECOMP_BLACK_SKIP_MOVIES" : "RECOMP_BLACK_SKIP_STARTUP_VIDEOS",
+                BLACK_SKIP_ALL() ? "skip movies" : "RECOMP_BLACK_SKIP_STARTUP_VIDEOS",
                 movie_va, *(uint32_t *)(movie + 0x4C), movie_skip_identity.stem,
                 black_pc_ram_span(g_esp, 4u) ? GUEST32(g_esp) : 0u);
         fflush(stderr);
@@ -391,7 +398,7 @@ static int black_movie_skip_env(void)
         const char *env = getenv("RECOMP_BLACK_SKIP_STARTUP_VIDEOS");
         movie_skip_startup = env && *env && *env != '0';
     }
-    return movie_skip_all || movie_skip_startup;
+    return BLACK_SKIP_ALL() || movie_skip_startup;
 }
 
 static int black_movie_missing_skip(void)
@@ -409,7 +416,7 @@ static int black_movie_missing_skip(void)
     if (i == sizeof(path) || !path[0]) return 0;
     for (i = 0; i < sizeof(stem) && (stem[i] = (char)GUEST8(manager + 0x84u + i)) != 0; i++) {}
     if (i == sizeof(stem)) return 0;
-    if (!movie_skip_all && _stricmp(stem, "LO_n_US")) return 0;
+    if (!BLACK_SKIP_ALL() && _stricmp(stem, "LO_n_US")) return 0;
     if (!xbox_translate_path(path, host, MAX_PATH) || access(host, F_OK) == 0) return 0;
     GUEST32(manager + 0x1A8u) = 0x1Fu;
     {
@@ -419,7 +426,7 @@ static int black_movie_missing_skip(void)
         if (!seen) {
             if (k < 8) snprintf(logged[k], sizeof(logged[k]), "%s", stem);
             fprintf(stderr, "[MOVIE] %s (%s) is not on the disc: treated as played (%s)\n", stem, path,
-                    movie_skip_all ? "RECOMP_BLACK_SKIP_MOVIES" : "RECOMP_BLACK_SKIP_STARTUP_VIDEOS");
+                    BLACK_SKIP_ALL() ? "skip movies" : "RECOMP_BLACK_SKIP_STARTUP_VIDEOS");
             fflush(stderr);
         }
     }

@@ -455,9 +455,9 @@ static void test_menu_model(void)
     /* sections */
     n = vrs_section_settings(VRS_SEC_GRAPHICS, ids, 32);
     CHECK(n == 6 && ids[0] == VRS_RES_SCALE && ids[5] == VRS_SPRITE_DEBUG);
-    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 11 && vrs_section_settings(VRS_SEC_GESTURES, ids, 32) == 7);
-    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 11 && ids[6] == VRS_HUD_DIST && ids[7] == VRS_HUD_WIDTH &&
-          ids[8] == VRS_HUD_HEIGHT && ids[9] == VRS_TUTORIALS && ids[10] == VRS_LASER);
+    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 12 && vrs_section_settings(VRS_SEC_GESTURES, ids, 32) == 7);
+    CHECK(vrs_section_settings(VRS_SEC_COMFORT, ids, 32) == 12 && ids[6] == VRS_HUD_DIST && ids[7] == VRS_HUD_WIDTH &&
+          ids[8] == VRS_HUD_HEIGHT && ids[9] == VRS_TUTORIALS && ids[10] == VRS_LASER && ids[11] == VRS_SKIP_MOVIES);
     /* the laser sight: off by default, live, blackvr.ini laser */
     {
         VrShellConfig lc;
@@ -469,6 +469,7 @@ static void test_menu_model(void)
         vrs_format(&lc, VRS_LASER, lv, sizeof(lv));
         CHECK(!strcmp(lv, "on"));
         CHECK(vr_config_line(&lc, "laser = off") && lc.game.laser == 0);
+        CHECK(lc.game.skip_movies == 0 && vr_config_line(&lc, "skip_movies = on") && vrs_get(&lc, VRS_SKIP_MOVIES) == 1.0f);
     }
     /* tutorial hints: on by default, live, the ini key the shell reads */
     {

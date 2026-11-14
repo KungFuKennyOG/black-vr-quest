@@ -231,6 +231,7 @@ typedef struct {
     int   hand_weapon;         /* 1: move first-person weapon to the aim hand */
     int   tutorial_hints;      /* 1: mission 1's control hints show also after it was completed (game: until then) */
     int   laser;               /* 1: a laser sight from the drawn gun's muzzle along its barrel (blackvr.ini laser) */
+    int   skip_movies;         /* 1: every movie (FMV cutscene) ends at its first frame (blackvr.ini skip_movies) */
 } VrGameConfig;
 const VrGameConfig *vr_game_config(void);
 

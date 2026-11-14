@@ -95,6 +95,7 @@ static const char k_default_ini[] =
     "hud_height = -12         ; degrees: the in-game HUD below (-) or above eye level\n"
     "tutorial_hints = on      ; on: mission 1's control hints every time (off: only until you beat it, as the game does)\n"
     "laser = off              ; on: a laser sight from the gun's muzzle along its barrel, to where the shot goes\n"
+    "skip_movies = off        ; on: the movie cutscenes end at once (the in-engine scenes still play)\n"
     "gun_latch = on           ; on | off: the weapon follows the controller at display time\n"
     "# env RECOMP_BLACK_HZ=60\n"
     "# In the headset: Options -> VR SETTINGS (settings_menu = panel: the floating panel instead)\n";
