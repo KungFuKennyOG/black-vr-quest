@@ -199,6 +199,7 @@ static VrVec3 g_hand_vel[2];
 static int g_hand_vel_ok[2];
 static int g_duck_recal = 1, g_was_in_game;
 static VrInputContext g_last_ctx;
+static unsigned g_button_presses;                /* fresh button presses (vr_button_presses) */
 static int g_scope_one_hand;                     /* frames the 3D scope has been held one-handed */
 static int g_gun_two_handed;                     /* the drawn gun takes the off hand (set by the renderer) */
 static int g_hold_on;                            /* the pistol's look-only hold: grip held, hands close */
@@ -399,6 +400,14 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
     else if (gc->scope_raise) g_aim_request = scope;
     else g_aim_request = (gun ? touch->rgrip : touch->lgrip) > 0.6f;
 
+    {
+        /* any button pressed (a fresh press), for the movie skip (vr_button_presses) */
+        static unsigned prev;
+        const unsigned now = (touch->a ? 1u : 0u) | (touch->b ? 2u : 0u) | (touch->x ? 4u : 0u) | (touch->y ? 8u : 0u) |
+                             (touch->menu ? 16u : 0u) | (touch->rt > 0.5f ? 32u : 0u) | (touch->lt > 0.5f ? 64u : 0u);
+        if (now & ~prev) __atomic_add_fetch(&g_button_presses, 1u, __ATOMIC_RELAXED);
+        prev = now;
+    }
     memset(&ctx, 0, sizeof(ctx));
     ctx.in_game = in_game;
     ctx.move_rotate_deg = move_rot;
@@ -865,6 +874,7 @@ void vr_grip_lock(float l[16])
 
 void vr_set_gun_two_handed(int two) { __atomic_store_n(&g_gun_two_handed, two < 0 ? 0 : two > 2 ? 2 : two, __ATOMIC_RELAXED); }
 
+unsigned vr_button_presses(void) { return __atomic_load_n(&g_button_presses, __ATOMIC_RELAXED); }
 static uint32_t g_scope_view_bits;
 void vr_set_scope_view(float zoom)
 {

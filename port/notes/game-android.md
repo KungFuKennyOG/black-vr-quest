@@ -167,6 +167,12 @@ cmake --build build-boot-a64 && ctest --test-dir build-boot-a64 --output-on-fail
    game thread cannot keep up.
 6. **Movies are skipped by default.** If the title waits on an XMV that is missing (the dump has no `videos/`), set
    `RECOMP_BLACK_SKIP_MOVIES=0` in `blackvr.ini` to compare.
+   **Skipping in VR (2026-11-14).** Two ways, both in `sub_000C4570` (`src/recomp_manual.c`, `BLACK_VR`):
+   - VR SETTINGS > Comfort "Skip cutscenes" (`skip_movies`): every movie ends at its first frame.
+   - Any controller button (A/B/X/Y/Menu/either trigger) pressed while a movie plays ends it, whether the game lets
+     you skip that one or not. One press, no confirmation. `vr_button_presses()` counts fresh presses on the input
+     thread; the count is taken when the movie's session starts, so a press before the movie doesn't count. Log:
+     `[MOVIE] skipped (player)`. The in-engine scenes (FLAT_CINEMA) are not movies and still play.
 7. **The `level_06` files in the dump are truncated.** That level will fail to load; this is not a port bug.
 8. **The game's own aiming dot.** The D3D11 backend suppresses it in `kelvin_gpu_draw.inc:492`
    (`pc_crosshair_replaces_dot`). The Vulkan backend does not, so in hand-aim stereo the dot sits at the centre of

@@ -340,6 +340,17 @@ void sub_000C4570(void)
     }
     session = black_movie_skip_sync(movie_va);
     by_input = session && pc_movie_skip_take_request(session);
+#ifdef BLACK_VR
+    {
+        /* VR: any controller button pressed during a movie ends it, skippable in the game or not (Kenny 2026-11-14).
+         * Presses before the movie don't count: the count is taken when its session starts. */
+        static uint64_t vr_session;
+        static unsigned vr_presses;
+        const unsigned presses = vr_button_presses();
+        if (session != vr_session) { vr_session = session; vr_presses = presses; }
+        else if (session && presses != vr_presses) by_input = 1;
+    }
+#endif
     by_environment = session && (BLACK_SKIP_ALL() ||
         (movie_skip_startup && movie_skip_identity.kind == PC_MOVIE_SKIP_INTRO));
     if (by_input || by_environment) {
