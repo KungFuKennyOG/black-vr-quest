@@ -262,6 +262,28 @@ static inline int vra_place_off_hand(const VrArmRig *rig, float *constants, cons
     return 1;
 }
 
+/* How far the furthest loose part (magazine, shell, clip, rocket...) is off its place on the gun (metres in model
+ * space; 0 without a gun root or loose parts). Over a few cm: the game is reloading (or loading) with its left hand. */
+static inline float vra_loose_off(const VrArmRig *rig, const float *constants)
+{
+    float root_now[12], root_inv[12], root_bind_inv[12], best = 0.0f;
+    int k;
+    if (rig->gun_root < 0 || VRA_PALETTE_BASE + 3 * rig->n > 192) return 0.0f;
+    vra_m34_mul(vra_rows((float *)constants, rig->gun_root), rig->bindk[rig->gun_root], root_now);
+    if (!vra_m34_inv(root_now, root_inv) || !vra_m34_inv(rig->bindk[rig->gun_root], root_bind_inv)) return 0.0f;
+    for (k = 0; k < rig->n; k++) {
+        float now[12], rel_now[12], rel_bind[12], dx, dy, dz, off;
+        if (!rig->loose[k]) continue;
+        vra_m34_mul(vra_rows((float *)constants, k), rig->bindk[k], now);
+        vra_m34_mul(root_inv, now, rel_now);
+        vra_m34_mul(root_bind_inv, rig->bindk[k], rel_bind);
+        dx = rel_now[3] - rel_bind[3]; dy = rel_now[7] - rel_bind[7]; dz = rel_now[11] - rel_bind[11];
+        off = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (off == off && off > best) best = off;
+    }
+    return best;
+}
+
 /* Gripping two-handed: the left hand becomes the exact mirror of the game's right hand (its fingers closed around the
  * grip), carried by a (as vra_place_off_hand) onto the gun. The stock arms' bind pose is mirror-symmetric across model
  * x = 0 (S), so a left vertex S v skins to a * P_rt * v: P_lft = a * P_rt * S. A left bone without a twin (the twist)

@@ -2113,6 +2113,55 @@ static void black_p2_enter(void) { if (!black_p2_in) black_p2_swap(); }
 static void black_p2_leave(void) { if (black_p2_in) black_p2_swap(); }
 
 
+/* The shot (1DBD50, arg 0 the shot) and its aim (1CEF40(&origin), edi = the direction): in VR the player's shots leave
+ * the drawn barrel (black_vr.inc, "the player's shots leave the drawn barrel"). Flat: the game's own. */
+extern void sub_001DBD50_gen(void);
+void sub_001DBD50(void)
+{
+#ifdef BLACK_VR
+    const uint32_t shot = black_pc_ram_span(g_esp + 4u, 4u) ? GUEST32(g_esp + 4u) : 0u;
+    black_vr_shot_begin(shot);
+    sub_001DBD50_gen();
+    black_vr_shot_end();
+#else
+    sub_001DBD50_gen();
+#endif
+}
+extern void sub_001CEF40_gen(void);
+void sub_001CEF40(void)
+{
+#ifdef BLACK_VR
+    const uint32_t org = black_pc_ram_span(g_esp + 4u, 4u) ? GUEST32(g_esp + 4u) : 0u, dir = g_edi;
+    sub_001CEF40_gen();
+    black_vr_shot_aimed(org, dir);
+#else
+    sub_001CEF40_gen();
+#endif
+}
+
+/* A launched projectile's fire (1E8540, ebx = the shot: the RPG's rocket) and its launch (1E35F0(ecx = the projectiles;
+ * a0 the launch position, a1 the velocity, a2/a3 the muzzle effect's owner and record)): in VR the player's rocket
+ * leaves the drawn tube along it (black_vr.inc). Flat: the game's own. */
+extern void sub_001E8540_gen(void);
+void sub_001E8540(void)
+{
+#ifdef BLACK_VR
+    black_vr_shot_begin(g_ebx);
+    sub_001E8540_gen();
+    black_vr_shot_end();
+#else
+    sub_001E8540_gen();
+#endif
+}
+extern void sub_001E35F0_gen(void);
+void sub_001E35F0(void)
+{
+#ifdef BLACK_VR
+    if (black_pc_ram_span(g_esp + 4u, 8u)) black_vr_shot_launch(GUEST32(g_esp + 4u), GUEST32(g_esp + 8u));
+#endif
+    sub_001E35F0_gen();
+}
+
 /* The held effects' update (176BD0, esi = them: the ones asked for start, each follows its owner and runs) once for
  * each player, while that player is the actor in the core, so player two's follow its own first-person model. */
 extern void sub_00176BD0_gen(void);

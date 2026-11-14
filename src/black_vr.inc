@@ -68,6 +68,7 @@ typedef struct BlackVr {
     VrMat4 w_entity, w_head, w_hand, yv, w_body;
     int yv_ok;
     VrVec3 grip;                      /* the weapon's grip offset (game units) */
+    unsigned barrel_ok;               /* frames aimed along the drawn barrel (log) */
     VrMat4 yv_fx;                     /* yv for the muzzle flash draw: with the arms' wrist lock */
     int yv_fx_ok;
     float grip_corr[3];               /* the auto-grip correction inside grip (game units) */
@@ -289,6 +290,43 @@ static void black_vr_camera_restore(uint32_t camera)
 
 /* ---- the look integrator: the game's aim follows the VR aim ------------------------------- */
 
+/* The drawn gun's barrel in the gun hand's OpenXR aim space (metres; x right, y up, z back): the muzzle locator's
+ * record ([[core+358]+44]+40, RenderWare rows right, up, at, pos, posed on the game's aim matrix at the last update),
+ * through the last camera entity, the grip and the first-person arms' lock L, as the weapon is drawn. p: the muzzle,
+ * a: the barrel's direction (unit, forward). 0 when unreadable or implausible. */
+static int bvr_barrel_in_hand(VrVec3 *p, VrVec3 *a)
+{
+    uint32_t core, m, t;
+    VrMat4 ei, l, back = vrm_m4_identity(), x;
+    float lf[16], r[4][4], q[4][4];
+    int j, c;
+    const float upm = vr_game_config()->units_per_metre;
+    if (!bvr.yv_ok || !black_pc_ram_span(0x2D45D4u, 4u)) return 0;
+    core = GUEST32(0x2D45D4u);
+    m = black_pc_ram_span(core, 0x35Cu) ? GUEST32(core + 0x358u) : 0u;
+    t = black_pc_ram_span(m, 0x48u) ? GUEST32(m + 0x44u) : 0u;
+    if (!black_pc_ram_span(t + 0x40u, 0x40u) || !vrm_m4_inverse(bvr.w_entity, &ei)) return 0;
+    vr_grip_lock(lf);
+    for (j = 0; j < 4; j++) for (c = 0; c < 4; c++) VRM_AT(l, j, c) = lf[j * 4 + c];
+    VRM_AT(back, 0, 3) = -bvr.grip.x; VRM_AT(back, 1, 3) = -bvr.grip.y; VRM_AT(back, 2, 3) = -bvr.grip.z;
+    x = vrm_m4_mul(l, vrm_m4_mul(back, ei));
+    for (j = 0; j < 4; j++) {
+        for (c = 0; c < 3; c++) {
+            r[j][c] = bvr_f32(t + 0x40u + (uint32_t)j * 0x10u + (uint32_t)c * 4u);
+            if (!(r[j][c] == r[j][c]) || r[j][c] > 1e6f || r[j][c] < -1e6f) return 0;
+        }
+        r[j][3] = j == 3 ? 1.0f : 0.0f;
+        vrm_m4_apply(x, r[j], q[j]);
+    }
+    *p = vrm_v3(q[3][0] / upm, q[3][1] / upm, -q[3][2] / upm);       /* LH game units -> OpenXR metres */
+    *a = vrm_v3(q[2][0], q[2][1], -q[2][2]);
+    if (!vrm_normalize(a)) return 0;
+    if (a->z > 0.0f) *a = vrm_scale(*a, -1.0f);                      /* forward is -z */
+    /* near the hand and within 10 deg of the controller's ray: the gun is held (in raise and switch animations it
+     * points elsewhere, and the controller's ray is the better aim) */
+    return vrm_len(*p) < 1.5f && a->z < -0.985f;
+}
+
 static void black_vr_look(uint32_t look)
 {
     const VrGameConfig *cfg;
@@ -314,6 +352,20 @@ static void black_vr_look(uint32_t look)
         hand_rel = vgm_relative(origin, f->hand[cfg->aim_hand & 1].aim);
         hand_mode = cfg->aim_mode == VR_AIM_HAND && f->hand[cfg->aim_hand & 1].valid;
         d = vgm_aim_dir(hand_mode, head_rel, hand_rel, vrm_v3(0, 0, 0), cfg->aim_converge_m);
+        if (hand_mode && cfg->aim_barrel) {
+            /* shots converge on the drawn gun's barrel line (not the controller's ray), aim_converge metres out */
+            VrVec3 bp, ba;
+            if (bvr_barrel_in_hand(&bp, &ba)) {
+                const VrVec3 mp = vrm_add(hand_rel.position, vrm_q_rotate(hand_rel.orientation, bp));
+                const VrVec3 md = vrm_q_rotate(hand_rel.orientation, ba);
+                VrVec3 dd = vrm_sub(vrm_add(mp, vrm_scale(md, cfg->aim_converge_m)), head_rel.position);
+                if (vrm_normalize(&dd)) d = dd;
+                if (!(bvr.barrel_ok++ % (getenv("BLACKVR_AIM_LOG") ? 30u : 600u)))
+                    fprintf(stderr, "[BLACK_VR] aim: along the drawn barrel: muzzle %.3f %.3f %.3f m from the controller "
+                            "(right, up, back), barrel %.1f deg off the controller's ray\n", (double)bp.x, (double)bp.y,
+                            (double)bp.z, acos(ba.z < -1.0f ? 1.0 : -(double)ba.z) / VRM_DEG);
+            }
+        }
         bvr.aim_d = d;
         vgm_dir_angles(d, &ay, &ap);
         g = bvr_f32(look + 0x18u);
@@ -930,6 +982,60 @@ turned:
     bvr_fxd.ok = 0;
 }
 
+/* The transform the next render will give the weapon (world X = w_hand * grip^-1 * w_entity^-1), built now, in the
+ * game's update: the camera entity it will have is the player's aim matrix now (the records are posed on it; the camera
+ * entity itself still has the last frame's), the hand is this game frame's latch, on the last render's body moved as
+ * the aim matrix moved. Without the aim matrix: the last render's X, carried by the hand's move. fresh: 1 with the aim
+ * matrix, 2 with the camera off it, 0 without; dp: the body's step. Needs bvr_fxl.ok. */
+static VrMat4 bvr_fx_x_now(int *fresh_out, VrVec3 *dp_out, VrMat4 *h_out)
+{
+    const VrGameConfig *cfg = vr_game_config();
+    const VrFrameState *f = vr_frame_state();
+    VrMat4 h_now = bvr_fxl.w_hand, x = bvr_fxl.x, hinv, m_now, minv;
+    VrVec3 dp = vrm_v3(0, 0, 0);
+    int fresh = 0;
+    if (f && f->hand[cfg->aim_hand & 1].valid) {
+        VrPose origin;
+        VrMat4 h;
+        vr_get_recentre(&origin);
+        h = vrm_m4_mul(bvr_fxl.w_body, bvr_lh(vgm_relative(origin, f->hand[cfg->aim_hand & 1].aim)));
+        if (vrm_len(vrm_sub(vgm_col(h, 3), vgm_col(bvr_fxl.w_hand, 3))) <= 0.30f * cfg->units_per_metre)
+            h_now = h;                                                   /* a recentre or a glitch: none */
+    }
+    if (bvr_fxl.aim && bvr_aim_va() == bvr_fxl.aim && bvr_aim_view(bvr_fxl.aim, &m_now) && vrm_m4_inverse(m_now, &minv)) {
+        dp = vrm_sub(vgm_col(m_now, 3), vgm_col(bvr_fxl.w_entity, 3));
+        if (vrm_len(dp) <= 1.0f * cfg->units_per_metre) {                /* a teleport: as without it */
+            VRM_AT(h_now, 0, 3) += dp.x; VRM_AT(h_now, 1, 3) += dp.y; VRM_AT(h_now, 2, 3) += dp.z;
+            x = vrm_m4_mul(h_now, vrm_m4_mul(bvr_fxl.back, minv));
+            fresh = 1;
+        } else {
+            dp = vrm_v3(0, 0, 0);
+        }
+    } else if (bvr_fxl.aim_off && bvr_aim_va() == bvr_fxl.aim_off && bvr_aim_view(bvr_fxl.aim_off, &m_now) &&
+               bvr_m4_rigid(m_now) && vrm_m4_inverse(bvr_fxl.a_last, &minv)) {
+        /* The last render's camera entity was off the aim matrix (O = A_last^-1 * E_last: a melee lunge, a menu's
+         * camera). The records are still posed on the aim matrix, now with this frame's recoil: the next render's
+         * camera entity is taken as A_now * O, so X = h_now * grip^-1 * (A_now * O)^-1 keeps the recoil out of the
+         * spawn as above. (The last render's X alone kept it in: the shotgun's 8 deg kick put its fireball ~10 cm
+         * above the muzzle.) */
+        const VrMat4 e_next = vrm_m4_mul(m_now, vrm_m4_mul(minv, bvr_fxl.w_entity));
+        VrMat4 einv;
+        dp = vrm_sub(vgm_col(e_next, 3), vgm_col(bvr_fxl.w_entity, 3));
+        if (vrm_len(dp) <= 1.0f * cfg->units_per_metre && vrm_m4_inverse(e_next, &einv)) {
+            VRM_AT(h_now, 0, 3) += dp.x; VRM_AT(h_now, 1, 3) += dp.y; VRM_AT(h_now, 2, 3) += dp.z;
+            x = vrm_m4_mul(h_now, vrm_m4_mul(bvr_fxl.back, einv));
+            fresh = 2;
+        } else {
+            dp = vrm_v3(0, 0, 0);
+        }
+    }
+    if (!fresh && vrm_m4_inverse(bvr_fxl.w_hand, &hinv)) x = vrm_m4_mul(h_now, vrm_m4_mul(hinv, bvr_fxl.x));
+    *fresh_out = fresh;
+    *dp_out = dp;
+    *h_out = h_now;
+    return x;
+}
+
 /* Before the held effects' update (176BD0; VR STEREO, the weapon in the hand at the last render): the player's
  * first-person records to the hand, by the transform the next render will give the weapon (X = w_hand * grip^-1 *
  * w_entity^-1), built now: the camera entity it will have is the player's aim matrix now (the records are posed on it;
@@ -947,47 +1053,10 @@ static void black_vr_fx_update_begin(void)
     }
     {
         BVR_FP_BEGIN;
-        const VrGameConfig *cfg = vr_game_config();
-        const VrFrameState *f = vr_frame_state();
-        VrMat4 h_now = bvr_fxl.w_hand, x = bvr_fxl.x, hinv, m_now, minv;
-        VrVec3 dp = vrm_v3(0, 0, 0);
-        int fresh = 0;
-        if (f && f->hand[cfg->aim_hand & 1].valid) {
-            VrPose origin;
-            VrMat4 h;
-            vr_get_recentre(&origin);
-            h = vrm_m4_mul(bvr_fxl.w_body, bvr_lh(vgm_relative(origin, f->hand[cfg->aim_hand & 1].aim)));
-            if (vrm_len(vrm_sub(vgm_col(h, 3), vgm_col(bvr_fxl.w_hand, 3))) <= 0.30f * cfg->units_per_metre)
-                h_now = h;                                                   /* a recentre or a glitch: none */
-        }
-        if (bvr_fxl.aim && bvr_aim_va() == bvr_fxl.aim && bvr_aim_view(bvr_fxl.aim, &m_now) && vrm_m4_inverse(m_now, &minv)) {
-            dp = vrm_sub(vgm_col(m_now, 3), vgm_col(bvr_fxl.w_entity, 3));
-            if (vrm_len(dp) <= 1.0f * cfg->units_per_metre) {                /* a teleport: as without it */
-                VRM_AT(h_now, 0, 3) += dp.x; VRM_AT(h_now, 1, 3) += dp.y; VRM_AT(h_now, 2, 3) += dp.z;
-                x = vrm_m4_mul(h_now, vrm_m4_mul(bvr_fxl.back, minv));
-                fresh = 1;
-            } else {
-                dp = vrm_v3(0, 0, 0);
-            }
-        } else if (bvr_fxl.aim_off && bvr_aim_va() == bvr_fxl.aim_off && bvr_aim_view(bvr_fxl.aim_off, &m_now) &&
-                   bvr_m4_rigid(m_now) && vrm_m4_inverse(bvr_fxl.a_last, &minv)) {
-            /* The last render's camera entity was off the aim matrix (O = A_last^-1 * E_last: a melee lunge, a menu's
-             * camera). The records are still posed on the aim matrix, now with this frame's recoil: the next render's
-             * camera entity is taken as A_now * O, so X = h_now * grip^-1 * (A_now * O)^-1 keeps the recoil out of the
-             * spawn as above. (The last render's X alone kept it in: the shotgun's 8 deg kick put its fireball ~10 cm
-             * above the muzzle.) */
-            const VrMat4 e_next = vrm_m4_mul(m_now, vrm_m4_mul(minv, bvr_fxl.w_entity));
-            VrMat4 einv;
-            dp = vrm_sub(vgm_col(e_next, 3), vgm_col(bvr_fxl.w_entity, 3));
-            if (vrm_len(dp) <= 1.0f * cfg->units_per_metre && vrm_m4_inverse(e_next, &einv)) {
-                VRM_AT(h_now, 0, 3) += dp.x; VRM_AT(h_now, 1, 3) += dp.y; VRM_AT(h_now, 2, 3) += dp.z;
-                x = vrm_m4_mul(h_now, vrm_m4_mul(bvr_fxl.back, einv));
-                fresh = 2;
-            } else {
-                dp = vrm_v3(0, 0, 0);
-            }
-        }
-        if (!fresh && vrm_m4_inverse(bvr_fxl.w_hand, &hinv)) x = vrm_m4_mul(h_now, vrm_m4_mul(hinv, bvr_fxl.x));
+        VrMat4 h_now, x;
+        VrVec3 dp;
+        int fresh;
+        x = bvr_fx_x_now(&fresh, &dp, &h_now);
         for (r = 0; r < 8u; r++) {
             const uint32_t at = bvr_fp_record(r);
             VrMat4 now, m;
@@ -1035,6 +1104,196 @@ static void black_vr_fx_update_end(void)
     for (k = 0; k < bvr_fxu_n; k++)
         memcpy((uint8_t *)(uintptr_t)g_xbox_mem_offset + bvr_fxu_at[k], bvr_fxu_kept[k], 0x40u);
     bvr_fxu_n = 0;
+}
+
+/* ---- the player's shots leave the drawn barrel ----------------------------------------------------------------------
+ * Bullets: the shot (1DBD50, arg 0 the shot: +4 the shooter's controller, whose +F0 is the actor) takes its origin from
+ * the actor's eye (its vtable +4C matrix's position, or the actor's +100 with the controller's +107 set) and has 1CEF40
+ * work out the direction (toward the weapon's aim point, weapon+10, with spread, or exactly toward weapon+20) and the
+ * range: 1CEF40(&origin) with edi = the direction; the hit test (CA170) and a projectile spawn (1DAFF0) both start at
+ * that origin. Rockets: the launcher's shot (1E8540, ebx = the shot) launches through 1E35F0(a0 = the launch matrix,
+ * RenderWare rows right, up, at, pos: the flat muzzle record's position, at along the aim; a1 = the velocity).
+ * Flat, the gun is drawn on the camera: a bullet from the eye or a rocket from the flat muzzle leaves along the gun. In
+ * VR the gun is in the hand, so bullets left from between the eyes and rockets from where the flat gun would be, beside
+ * the drawn tube (seen in the RPG on the headset).
+ * With aim_barrel on (VR STEREO, hand aim, the gun drawn in the hand), the player's own shot is moved with the gun: by
+ * the transform the next render gives the weapon (X = w_hand * grip^-1 * aim^-1, bvr_fx_x_now: the flat gun onto the
+ * drawn one). A bullet starts at the drawn muzzle (X * the muzzle record's position) along X's turn of the game's
+ * direction (spread kept); a rocket's launch matrix becomes X * it and its velocity X's turn of it. So both leave the
+ * drawn muzzle along the drawn barrel, wherever the hand is. Only when the muzzle moves under 1.5 m (a recentre or a
+ * teleport otherwise: the game's shot is kept). */
+static struct { int on; uint32_t actor; } bvr_shot;
+static struct { unsigned n, moved; double off_sum, turn_sum; } bvr_shots;
+
+static void black_vr_shot_begin(uint32_t shot)
+{
+    const VrGameConfig *cfg = vr_game_config();
+    uint32_t ctl, actor, core;
+    bvr_shot.on = 0;
+    if (!vr_active() || !cfg->aim_barrel || cfg->aim_mode != VR_AIM_HAND || bvr.mode != VR_PRESENT_STEREO ||
+        !bvr_gun_fx() || !bvr_fxl.ok || !bvr.yv_ok || !black_pc_ram_span(0x2D45D4u, 4u) || !black_pc_ram_span(shot, 8u))
+        return;
+    core = GUEST32(0x2D45D4u);
+    ctl = GUEST32(shot + 4u);
+    actor = black_pc_ram_span(ctl + 0xF0u, 4u) ? GUEST32(ctl + 0xF0u) : 0u;
+    if (!actor || actor != core + 0x30u) return;              /* the player's own (an AI's shot is left alone) */
+    bvr_shot.on = 1;
+    bvr_shot.actor = actor;
+}
+static void black_vr_shot_end(void) { bvr_shot.on = 0; }
+
+/* X's turn of a direction (w = 0) */
+static VrVec3 bvr_turn(VrMat4 x, VrVec3 d)
+{
+    return vrm_v3(VRM_AT(x, 0, 0) * d.x + VRM_AT(x, 0, 1) * d.y + VRM_AT(x, 0, 2) * d.z,
+                  VRM_AT(x, 1, 0) * d.x + VRM_AT(x, 1, 1) * d.y + VRM_AT(x, 1, 2) * d.z,
+                  VRM_AT(x, 2, 0) * d.x + VRM_AT(x, 2, 1) * d.y + VRM_AT(x, 2, 2) * d.z);
+}
+/* The drawn barrel's direction for a shot whose game direction is d (from the game's start o toward its target, so
+ * converging on the flat crosshair at an angle to the gun): the flat barrel (the muzzle record's at, else the aim
+ * matrix's forward) turned by X is the drawn barrel; d's deviation from the unspread direction u (the spread) turned onto it.
+ * Its length is d's. 0 when the aim matrix is unreadable. */
+static int bvr_barrel_dir(VrMat4 x, VrVec3 d, VrVec3 u, VrVec3 *out)
+{
+    VrMat4 a;
+    VrVec3 f, dn, axis, r;
+    const uint32_t va = bvr_aim_va();
+    float c, sn, len = vrm_len(d);
+    if (!va || !bvr_aim_view(va, &a) || !(len > 1e-6f)) return 0;
+    f = vgm_col(a, 2);
+    if (!vrm_normalize(&f) || !vrm_normalize(&u)) return 0;
+    if (vrm_dot(f, u) < 0.0f) f = vrm_scale(f, -1.0f);
+    {   /* the muzzle record's at is the barrel (the UZI's within 2 deg of the aim; the RPG's tube is drawn ~35 deg
+         * off it, toward the flat crosshair): taken when within 50 deg of the aim */
+        const uint32_t rec = bvr_fp_record(5u);
+        VrMat4 m;
+        VrVec3 bz;
+        if (rec && bvr_rw_read(rec, &m)) {
+            bz = vgm_col(m, 2);
+            if (vrm_normalize(&bz)) {
+                if (vrm_dot(bz, f) < 0.0f) bz = vrm_scale(bz, -1.0f);
+                if (vrm_dot(bz, f) > cosf(50.0f * (float)VRM_DEG)) f = bz;
+            }
+        }
+    }
+    /* the spread: d turned by the turn taking u onto f (Rodrigues) */
+    dn = vrm_scale(d, 1.0f / len);
+    axis = vrm_cross(u, f);
+    sn = vrm_len(axis);
+    c = vrm_dot(u, f);
+    if (sn > 1e-6f) {
+        axis = vrm_scale(axis, 1.0f / sn);
+        r = vrm_add(vrm_add(vrm_scale(dn, c), vrm_scale(vrm_cross(axis, dn), sn)), vrm_scale(axis, vrm_dot(axis, dn) * (1.0f - c)));
+    } else {
+        r = dn;
+    }
+    r = bvr_turn(x, r);
+    if (!vrm_normalize(&r)) return 0;
+    *out = vrm_scale(r, len);
+    return 1;
+}
+static void bvr_shot_log(int ok, const char *what, VrVec3 o, VrVec3 o2, VrVec3 d, VrVec3 d2)
+{
+    const float upm = vr_game_config()->units_per_metre;
+    if (ok) {
+        float c = vrm_dot(d, d2) / (vrm_len(d) * vrm_len(d2) + 1e-12f);
+        if (c > 1.0f) c = 1.0f;
+        if (c < -1.0f) c = -1.0f;
+        bvr_shots.moved++;
+        bvr_shots.off_sum += (double)(vrm_len(vrm_sub(o2, o)) / upm);
+        bvr_shots.turn_sum += acos((double)c) / VRM_DEG;
+    }
+    bvr_shots.n++;
+    if (bvr_shots.n == 1u || !(bvr_shots.n % 100u) || getenv("BLACKVR_AIM_LOG"))
+        fprintf(stderr, "[BLACK_VR] shot: %s %s (%u of %u shots moved to the hand; on average %.2f m from the game's start "
+                "and turned %.1f deg)\n", what, ok ? "from the drawn muzzle along the drawn barrel" : "kept as the game's",
+                bvr_shots.moved, bvr_shots.n, bvr_shots.moved ? bvr_shots.off_sum / bvr_shots.moved : 0.0,
+                bvr_shots.moved ? bvr_shots.turn_sum / bvr_shots.moved : 0.0);
+}
+
+/* After 1CEF40 in the player's bullet shot: origin and direction to the drawn gun */
+static void black_vr_shot_aimed(uint32_t org, uint32_t dir)
+{
+    if (!bvr_shot.on) return;
+    bvr_shot.on = 0;                                            /* once per shot */
+    if (!bvr_f32_ok(org) || !bvr_f32_ok(org + 8u) || !bvr_f32_ok(dir) || !bvr_f32_ok(dir + 8u)) return;
+    {
+        BVR_FP_BEGIN;
+        const float upm = vr_game_config()->units_per_metre;
+        const uint32_t rec = bvr_fp_record(5u);
+        VrMat4 x, h, now;
+        VrVec3 o, d, mz = vrm_v3(0, 0, 0), r = vrm_v3(0, 0, 0), dp;
+        int fresh, ok = 0;
+        o = vrm_v3(bvr_f32(org), bvr_f32(org + 4u), bvr_f32(org + 8u));
+        d = vrm_v3(bvr_f32(dir), bvr_f32(dir + 4u), bvr_f32(dir + 8u));
+        if (rec && bvr_rw_read(rec, &now) && vrm_len(d) > 1e-6f) {
+            float p4[4] = { VRM_AT(now, 0, 3), VRM_AT(now, 1, 3), VRM_AT(now, 2, 3), 1.0f }, q[4];
+            x = bvr_fx_x_now(&fresh, &dp, &h);
+            vrm_m4_apply(x, p4, q);
+            mz = vrm_v3(q[0], q[1], q[2]);
+            {   /* the unspread direction: toward the weapon's aim point (weapon+10), else the game's own */
+                const uint32_t weapon = black_pc_ram_span(bvr_shot.actor + 0x29Cu, 4u) ? GUEST32(bvr_shot.actor + 0x29Cu) : 0u;
+                VrVec3 u = d;
+                if (black_pc_ram_span(weapon + 0x10u, 0x10u) && bvr_f32_ok(weapon + 0x10u) && bvr_f32_ok(weapon + 0x18u)) {
+                    u = vrm_sub(vrm_v3(bvr_f32(weapon + 0x10u), bvr_f32(weapon + 0x14u), bvr_f32(weapon + 0x18u)), o);
+                    if (vrm_len(u) < 0.05f * upm || vrm_dot(u, d) <= 0.0f) u = d;
+                }
+                ok = vrm_len(vrm_sub(mz, o)) < 1.5f * upm && bvr_barrel_dir(x, d, u, &r);
+            }
+            if (ok) {
+                bvr_put(org, mz.x); bvr_put(org + 4u, mz.y); bvr_put(org + 8u, mz.z);
+                bvr_put(dir, r.x); bvr_put(dir + 4u, r.y); bvr_put(dir + 8u, r.z);
+            }
+        }
+        bvr_shot_log(ok, "bullet", o, mz, d, r);
+        BVR_FP_END;
+    }
+}
+
+/* In the player's launcher shot, at the launch (1E35F0): the launch matrix and velocity to the drawn gun */
+static void black_vr_shot_launch(uint32_t pos, uint32_t vel)
+{
+    if (!bvr_shot.on) return;
+    bvr_shot.on = 0;
+    if (!black_pc_ram_span(pos, 0x40u) || !bvr_f32_ok(vel) || !bvr_f32_ok(vel + 8u)) return;
+    {
+        BVR_FP_BEGIN;
+        const float upm = vr_game_config()->units_per_metre;
+        VrMat4 x, h, m, m2;
+        VrVec3 v, v2 = vrm_v3(0, 0, 0), dp;
+        int fresh, ok = 0;
+        v = vrm_v3(bvr_f32(vel), bvr_f32(vel + 4u), bvr_f32(vel + 8u));
+        if (bvr_rw_read(pos, &m)) {
+            x = bvr_fx_x_now(&fresh, &dp, &h);
+            m2 = vrm_m4_mul(x, m);
+            ok = vrm_len(vrm_sub(vgm_col(m2, 3), vgm_col(m, 3))) < 1.5f * upm && bvr_barrel_dir(x, v, v, &v2);
+            if (ok) {
+                /* the launch matrix turned with the velocity (X's turn of the game's onto the drawn barrel), so the
+                 * rocket faces its flight */
+                VrVec3 f0 = bvr_turn(x, v), f1 = v2, axis;
+                if (vrm_normalize(&f0) && vrm_normalize(&f1)) {
+                    const float c = vrm_dot(f0, f1);
+                    float sn;
+                    int col;
+                    axis = vrm_cross(f0, f1);
+                    sn = vrm_len(axis);
+                    if (sn > 1e-6f) {
+                        axis = vrm_scale(axis, 1.0f / sn);
+                        for (col = 0; col < 3; col++) {
+                            const VrVec3 e = vgm_col(m2, col);
+                            const VrVec3 t = vrm_add(vrm_add(vrm_scale(e, c), vrm_scale(vrm_cross(axis, e), sn)),
+                                                     vrm_scale(axis, vrm_dot(axis, e) * (1.0f - c)));
+                            VRM_AT(m2, 0, col) = t.x; VRM_AT(m2, 1, col) = t.y; VRM_AT(m2, 2, col) = t.z;
+                        }
+                    }
+                }
+                bvr_rw_write(pos, &m2);
+                bvr_put(vel, v2.x); bvr_put(vel + 4u, v2.y); bvr_put(vel + 8u, v2.z);
+            }
+            bvr_shot_log(ok, "rocket", vgm_col(m, 3), vgm_col(m2, 3), v, v2);
+        }
+        BVR_FP_END;
+    }
 }
 
 /* ---- harness only: RECOMP_BLACK_TEST_LOADOUT=<gun> (smg, shg, pst, asr, ...) ------------------------------------------

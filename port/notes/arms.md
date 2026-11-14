@@ -109,3 +109,22 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
 - `RECOMP_KVK_VMATTR=<n>`: the first n weapon draws' vertex attributes, constants and bone-index histograms.
 - `RECOMP_BLACK_FPSCAN=<n>`: on the n-th first-person submission, bone-matrix arrays reachable from the actor and the
   inventory table.
+
+## Shots from the drawn gun, straight guns, the reload hand (Nov 13, after the headset video)
+- **Shots left the flat gun, not the drawn one.** Bullets: 1DBD50 takes its origin from the actor's eye matrix
+  (vtable +4C; for the player this sits at the flat muzzle, ~10-16 cm from the drawn one in the harness) and 1CEF40
+  aims it at the flat crosshair. Rockets: 1E8540 launches through 1E35F0(a0 = launch matrix at the flat muzzle record,
+  at = toward the crosshair; a1 = velocity). Wrapped in recomp_manual.c: for the player's own shot (shot+4 -> +F0 ==
+  [2D45D4]+30), with `aim_barrel` on, the origin / launch matrix go through X (bvr_fx_x_now, the flat gun onto the
+  drawn one) and the direction becomes X's turn of the flat barrel (the muzzle record's at, else the aim forward) with
+  the game's spread kept. Log: `[BLACK_VR] shot: bullet|rocket from the drawn muzzle along the drawn barrel (...)`.
+- **Angled guns are straightened.** The RPG's tube (gun root z = muzzle record at) is drawn 36 deg off straight ahead
+  (toward the flat crosshair); held as drawn it pointed 36 deg off the controller, and the game's rocket flew across it.
+  At the rest capture, a gun root 8..50 deg off the hand's forward is turned about the wrist target onto it
+  (`arms: the gun is drawn N deg off straight ahead: turned to point along the controller`). RPG after: barrel 0.1 deg
+  off the controller ray, rocket turned 0.8 deg. The UZI (1.6 deg) is untouched.
+- **Reload hand.** The game tilts the gun 15+ deg in a reload (firing stays under 10); the left hand switches to the
+  game's animation on that tilt or a loose part >3 cm off, until 0.3 s after both settle. Before, it switched ~22
+  frames late, carrying nothing while the game's hand worked the magazine.
+- The "gun points down in the reload" captures were from before the gun-root lock: a trace (`BLACKVR_ARMS_TRACE=1`)
+  shows the game turning the SMG root 60 deg in the reload and the lock holding it.

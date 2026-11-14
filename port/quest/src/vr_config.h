@@ -35,6 +35,7 @@
  *   world_scale       = 1.0       ; game units per metre
  *   max_head_offset   = 0.5       ; metres the view may lean from the body
  *   aim_converge      = 10.0      ; metres: where the hand's ray crosses the game's shot
+ *   aim_barrel        = on        ; on: the shot converges on the drawn gun's barrel line, not the controller's ray
  *   hand_weapon       = 1         ; first-person weapon follows the hand (aim = hand only)
  *   weapon_offset     = 0.12 -0.18 0.30   ; weapon grip in camera space (x right, y up, z fwd), metres
  *   scope_zoom        = 2.5       ; zoom factor at which the scope view goes flat
@@ -151,6 +152,7 @@ static inline void vr_config_defaults(VrShellConfig *c)
     c->game.units_per_metre = 1.0f;
     c->game.max_head_offset_m = 0.5f;
     c->game.aim_converge_m = 10.0f;
+    c->game.aim_barrel = 1;
     c->game.vm_offset_m[0] = 0.12f;
     c->game.vm_offset_m[1] = -0.18f;
     c->game.vm_offset_m[2] = 0.30f;
@@ -316,6 +318,7 @@ static inline int vr_config_line(VrShellConfig *c, const char *line_in)
     if (!strcmp(key, "two_hand")) return vr_cfg_bool(val, &c->gest.two_hand);
     if (!strcmp(key, "world_scale")) { if (!vr_cfg_float(val, 0.001f, 1000, &f)) return 0; c->game.units_per_metre = f; return 1; }
     if (!strcmp(key, "max_head_offset")) { if (!vr_cfg_float(val, 0, 3, &f)) return 0; c->game.max_head_offset_m = f; return 1; }
+    if (!strcmp(key, "aim_barrel")) return vr_cfg_bool(val, &c->game.aim_barrel);
     if (!strcmp(key, "aim_converge")) { if (!vr_cfg_float(val, 0.5f, 1000, &f)) return 0; c->game.aim_converge_m = f; return 1; }
     if (!strcmp(key, "hand_weapon")) return vr_cfg_bool(val, &c->game.hand_weapon);
     if (!strcmp(key, "bob_filter")) return vr_cfg_bool(val, &c->game.bob_filter);

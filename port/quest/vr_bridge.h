@@ -223,6 +223,7 @@ typedef struct {
     float units_per_metre;     /* == VrFrameState.world_scale */
     float max_head_offset_m;   /* clamp for positional head offset */
     float aim_converge_m;      /* hand-aim convergence distance */
+    int   aim_barrel;          /* 1: the shot converges on the drawn gun's barrel line (else on the controller's ray) */
     float vm_offset_m[3];      /* viewmodel natural offset in aim space (x right, y up, z fwd) */
     float scope_zoom_min;      /* zoom factor at/above which the scope goes flat */
     float fov_margin;          /* game FOV enlargement factor over the eye FOV union */

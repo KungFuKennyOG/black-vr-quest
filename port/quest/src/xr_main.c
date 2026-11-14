@@ -78,6 +78,7 @@ static const char k_default_ini[] =
     "world_scale = 1.0        ; game units per metre (tune if the world feels too big/small)\n"
     "max_head_offset = 0.5\n"
     "aim_converge = 10.0\n"
+    "aim_barrel = on          ; on: shots converge on the gun's barrel line (off: on the controller's ray)\n"
     "hand_weapon = 1\n"
     "weapon_offset = 0.12 -0.18 0.30\n"
     "scope_zoom = 2.5\n"

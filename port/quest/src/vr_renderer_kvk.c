@@ -433,6 +433,7 @@ typedef struct {
     float lock_move_max, lock_turn_max;   /* the largest correction since the last log line (m, degrees) */
     int have_root;              /* root_t captured: the gun (its *_Root bone) is what is locked */
     float root_t[12];           /* the gun root's locked pose in the hand frame (at rest the wrist is on target) */
+    float root_turn;            /* how far (deg) the game's animation has turned the gun from its locked pose */
     VrArmRig rig;
 } ArmsEntry;
 
@@ -508,6 +509,42 @@ static void arms_m34_from_m4(VrMat4 m, float o[12])
     for (r = 0; r < 3; r++) for (c = 0; c < 4; c++) o[r * 4 + c] = VRM_AT(m, r, c);
 }
 
+/* Guns the game draws angled across the screen toward the flat crosshair (the RPG's tube ~35 deg off straight ahead;
+ * the UZI's within 2) would sit in the hand pointing that far off the controller. At the rest capture, a gun root
+ * whose z (the barrel, as the muzzle record's at) is 8..50 deg off the hand's forward is turned about the wrist's
+ * target so it points along the controller, hand and all. */
+static void arms_straighten(ArmsEntry *e, const float target[3])
+{
+    float z[3], n, c, sn, ax[3], q[12], t1[12], out[12];
+    int i;
+    for (i = 0; i < 3; i++) z[i] = e->root_t[i * 4 + 2];
+    n = sqrtf(z[0] * z[0] + z[1] * z[1] + z[2] * z[2]);
+    if (!(n > 1e-9f)) return;
+    for (i = 0; i < 3; i++) z[i] /= n;
+    c = z[2];                                                   /* cos of the angle to (0, 0, 1) */
+    if (c > cosf(8.0f * 0.0174533f) || c < cosf(50.0f * 0.0174533f)) return;
+    /* the turn taking z onto (0, 0, 1): axis z x (0,0,1) = (z1, -z0, 0) */
+    ax[0] = z[1]; ax[1] = -z[0]; ax[2] = 0.0f;
+    sn = sqrtf(ax[0] * ax[0] + ax[1] * ax[1]);
+    if (!(sn > 1e-9f)) return;
+    ax[0] /= sn; ax[1] /= sn;
+    {
+        const float oc = 1.0f - c, x = ax[0], y = ax[1], zz = ax[2];
+        const float r[9] = { c + x * x * oc, x * y * oc - zz * sn, x * zz * oc + y * sn,
+                             y * x * oc + zz * sn, c + y * y * oc, y * zz * oc - x * sn,
+                             zz * x * oc - y * sn, zz * y * oc + x * sn, c + zz * zz * oc };
+        /* q = T(target) * R * T(-target) */
+        for (i = 0; i < 3; i++) {
+            q[i * 4 + 0] = r[i * 3 + 0]; q[i * 4 + 1] = r[i * 3 + 1]; q[i * 4 + 2] = r[i * 3 + 2];
+            q[i * 4 + 3] = target[i] - (r[i * 3 + 0] * target[0] + r[i * 3 + 1] * target[1] + r[i * 3 + 2] * target[2]);
+        }
+    }
+    memcpy(t1, e->root_t, sizeof(t1));
+    vra_m34_mul(q, t1, out);
+    memcpy(e->root_t, out, sizeof(out));
+    GLOG("arms: the gun is drawn %.1f deg off straight ahead: turned to point along the controller", acosf(c) * 57.29578f);
+}
+
 static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float used[3], uint64_t frame)
 {
     int hand_auto, i, kk, new_frame;
@@ -552,6 +589,7 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
                 vra_m34_mul(k34, gr, e->root_t);
                 e->root_t[3] += d_hand[0]; e->root_t[7] += d_hand[1]; e->root_t[11] += d_hand[2];
                 e->have_root = 1;
+                arms_straighten(e, target);
             }
             GLOG("arms: rest pose captured after %u frames: locking the %s", e->corr_n, e->have_root ? "gun" : "wrist");
         }
@@ -594,6 +632,25 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
             vra_m34_mul(kick, e->root_t, kt);
         }
         vra_m34_mul(kt, gh_inv, l);
+        {   /* BLACKVR_ARMS_TRACE=1 (debug): the gun root's pose in the hand frame each frame, and the locked pose */
+            static int tr = -1;
+            if (tr < 0) { const char *ev = getenv("BLACKVR_ARMS_TRACE"); tr = ev && *ev == '1'; }
+            if (tr && new_frame)
+                GLOG("arms: trace f %llu root %d now pos %.3f %.3f %.3f fwd %.2f %.2f %.2f | locked pos %.3f %.3f %.3f fwd %.2f %.2f %.2f",
+                     (unsigned long long)frame, e->rig.gun_root, gh[3] / upm, gh[7] / upm, gh[11] / upm, gh[2] / s, gh[6] / s, gh[10] / s,
+                     e->root_t[3] / upm, e->root_t[7] / upm, e->root_t[11] / upm, e->root_t[2] / s, e->root_t[6] / s, e->root_t[10] / s);
+        }
+        {   /* the angle between the game's gun root and the locked one: a reload tilts the gun 15+ deg, firing < 10 */
+            float dot = 0.0f, na = 0.0f, nb = 0.0f, c;
+            for (i = 0; i < 9; i++) {
+                const float a = gh[(i / 3) * 4 + i % 3], b = e->root_t[(i / 3) * 4 + i % 3];
+                dot += a * b; na += a * a; nb += b * b;
+            }
+            c = (na > 1e-12f && nb > 1e-12f) ? (3.0f * dot / sqrtf(na * nb) - 1.0f) * 0.5f : 1.0f;
+            if (c > 1.0f) c = 1.0f;
+            if (c < -1.0f) c = -1.0f;
+            e->root_turn = acosf(c) * 57.29578f;
+        }
         /* for the log: how far the game moved the gun from its locked pose */
         d_hand[0] = e->root_t[3] - gh[3]; d_hand[1] = e->root_t[7] - gh[7]; d_hand[2] = e->root_t[11] - gh[11];
     } else {
@@ -723,6 +780,25 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
                  game_hold ? "the game's own two-handed hold" : "the mirrored right hand", hl[0], hl[1], hl[2]);
         }
         if (game_hold) show_off = 1;
+    }
+    /* reloading: the game tilts the gun (more than 15 deg from its locked pose; firing stays under 10) or a loose part
+     * (magazine, shell, rocket...) is off its place on the gun. The game's own left hand is doing it on the gun (now
+     * locked in your hand), so it is shown as the game animates it, with the part, until 0.3 s after both settle */
+    if (mode == VR_LEFT_HAND_TRACKED && !game_hold && e->rig.wrist[VRA_LEFT] >= 0) {
+        static int64_t busy_until;
+        static int last_busy = -1;
+        struct timespec ts;
+        int64_t now;
+        int busy;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+        if ((e->have_root && e->root_turn > 15.0f) || vra_loose_off(&e->rig, constants) > 0.03f) busy_until = now + 300000000LL;
+        busy = now < busy_until;
+        if (busy != last_busy) {
+            last_busy = busy;
+            GLOG("arms: left hand %s", busy ? "on the gun: the game's reload animation" : "back to the controller");
+        }
+        if (busy) { game_hold = 1; show_off = 1; }
     }
     if (mode == VR_LEFT_HAND_TRACKED && have_k && !game_hold) {
         const VrRenderGun *g = vr_render_gun();
