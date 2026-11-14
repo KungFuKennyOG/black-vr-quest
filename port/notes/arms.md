@@ -189,3 +189,7 @@ point weapon+10, 0.5..60 m) each look (vr_set_gun_laser; stale after 250 ms, so 
 XR thread (xr_panel.c xrs_gun_laser_layers) locates the gun hand at display time and draws a 2.5 mm red beam quad
 (vrp_laser_pose) and a dot facing the eye at its end, in STEREO only. Composition quads: drawn over the scene, not
 hidden by walls. Not tested on the headset or the harness (the harness has no XR compositor).
+- Headset (d9214c4): with two hands the laser followed the right hand alone: it located the raw aim space; now it is
+  placed from VrRenderGun.hand (the drawn gun's latched hand, two-handed aim included). Made to look like a real
+  laser sight: a ~1.5 mm soft beam, faint (22% at the muzzle) and fading out along its length, and a small dot with a
+  bright core and a soft glow (~0.35 deg), painted once into a 64x128 texture (beam x 0..15, dot x 32..63).
