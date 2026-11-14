@@ -5372,7 +5372,7 @@ void sub_001BD3F0(void)
 #include "black_hud_input.inc"
 
 #ifdef BLACK_VR
-void sub_001314E0(void) { black_vr_prompts_fonts(); black_hint_tick(); }
+void sub_001314E0(void) { black_vr_prompts_fonts(); black_vr_msg_watch(); black_hint_tick(); }
 #else
 void sub_001314E0(void) { black_hint_tick(); }
 #endif

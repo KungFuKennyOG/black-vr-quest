@@ -213,6 +213,49 @@ static int black_vr_decide(uint32_t camera)
 /* ---- harness only: BLACKVR_DECIDE_TRACE=1 ------------------------------------------------------------------------
  * Logs why the presentation leaves STEREO (each STEREO -> other change and the change back): the inputs of
  * black_vr_decide. Diagnostics for the sweep (build-vrmenu-x86/sweep/REPORT.md); without the variable, nothing. */
+/* Every line the game puts on its HUD message list goes to the log, once. The list is an 8-slot ring of a title and
+ * a body (+10E4 + slot * 100 and +80 from it, 7F bytes each, written by 12B790: "SECONDARY OBJECTIVES TARGET UPDATE"
+ * / "0/3 SECONDARY OBJECTIVES COMPLETED", the recon and intel objectives' "recon objective complete" / "you found
+ * ...") in the HUD element of vtable 290F58 (its update 1337C0 posts through 12FE30), found in the HUD's element
+ * lists ([2D12E4] +A0 + layer * A8, next at +8). Called each frame from the messages element's update (1314E0).
+ * Kenny 2026-11-13: no message seen on picking up a recon map; this tells a message the game never posted from one
+ * that was posted but not seen. */
+static void black_vr_msg_watch(void)
+{
+    static uint32_t seen_el, said;
+    static uint8_t seen[8][2][0x80];
+    const uint8_t *const m = (const uint8_t *)(uintptr_t)g_xbox_mem_offset;
+    const uint32_t hud = black_pc_ram_span(0x002D12E4u, 4u) ? GUEST32(0x002D12E4u) : 0u;
+    uint32_t el = 0, e, layer;
+    unsigned s, f, i, n = 0;
+    if (!hud || !black_pc_ram_span(hud, 0x240u)) return;
+    for (layer = 0; layer < GUEST8(hud + 0x23Cu) && layer < 3u && !el; layer++)
+        for (e = GUEST32(hud + 0xA0u + layer * 0xA8u); e && n < 64u && black_pc_ram_span(e, 0x10u); e = GUEST32(e + 8u), n++)
+            if (GUEST32(e) == 0x00290F58u && black_pc_ram_span(e, 0x1970u)) { el = e; break; }
+    if (!el) {
+        if (!said) { said = 1; fprintf(stderr, "[BLACK_VR] HUD messages: no element of vtable 290F58 in the HUD (%u seen)\n", n); }
+        return;
+    }
+    if (el != seen_el) fprintf(stderr, "[BLACK_VR] HUD messages: watching the message list of the element at %08X\n", el);
+    for (s = 0; s < 8u; s++) {
+        int changed = 0;
+        for (f = 0; f < 2u; f++) {
+            const uint8_t *t = m + el + 0x10E4u + s * 0x100u + f * 0x80u;
+            if (memcmp(t, seen[s][f], 0x7Fu)) { memcpy(seen[s][f], t, 0x7Fu); changed = 1; }
+        }
+        if (changed && el == seen_el && (seen[s][0][0] || seen[s][1][0])) {
+            char line[2][0x80];
+            for (f = 0; f < 2u; f++) {
+                for (i = 0; i < 0x7Fu && seen[s][f][i]; i++)
+                    line[f][i] = seen[s][f][i] >= 0x20u && seen[s][f][i] < 0x7Fu ? (char)seen[s][f][i] : '?';
+                line[f][i] = 0;
+            }
+            fprintf(stderr, "[BLACK_VR] HUD message (slot %u): \"%s\" / \"%s\"\n", s, line[0], line[1]);
+        }
+    }
+    seen_el = el;                     /* the first look at an element only takes what is already there */
+}
+
 static void bvr_decide_trace(int prev, int m)
 {
     static int on = -1;
