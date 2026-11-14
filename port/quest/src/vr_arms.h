@@ -218,7 +218,7 @@ static inline int vra_apply(const VrArmRig *rig, float *constants, int cut, int 
 /* The loose parts the game's left hand holds (off their place on the gun by 3+ cm, nearer the left wrist than the
  * right: the shotgun's spare shell, parked there even at rest and through the raise and cock) are hidden: their rows
  * zeroed, their triangles collapse to a point. Returns how many. */
-static inline int vra_hide_left_loose(const VrArmRig *rig, float *constants)
+static inline int vra_hide_left_loose(const VrArmRig *rig, float *constants, float off_m)
 {
     const int wl = rig->wrist[VRA_LEFT], wr = rig->wrist[VRA_RIGHT];
     float fr[12], fl[12], root_now[12], root_inv[12], root_bind_inv[12];
@@ -238,7 +238,7 @@ static inline int vra_hide_left_loose(const VrArmRig *rig, float *constants)
         dx = rel_now[3] - rel_bind[3]; dy = rel_now[7] - rel_bind[7]; dz = rel_now[11] - rel_bind[11];
         dl = (now[3] - fl[3]) * (now[3] - fl[3]) + (now[7] - fl[7]) * (now[7] - fl[7]) + (now[11] - fl[11]) * (now[11] - fl[11]);
         dr = (now[3] - fr[3]) * (now[3] - fr[3]) + (now[7] - fr[7]) * (now[7] - fr[7]) + (now[11] - fr[11]) * (now[11] - fr[11]);
-        if (!(sqrtf(dx * dx + dy * dy + dz * dz) > 0.03f) || !(dl < dr)) continue;
+        if (!(sqrtf(dx * dx + dy * dy + dz * dz) > off_m) || !(dl < dr)) continue;
         for (j = 0; j < 12; j++) rows[j] = 0.0f;
         n++;
     }

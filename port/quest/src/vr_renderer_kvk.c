@@ -905,9 +905,10 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
             place = 1;
         }
     }
-    /* the parts the game's left hand holds (the shotgun's spare shell) show only in its reloads: hidden at rest, in the
-     * raise and cock, with the hold and with the free hand */
-    if (mode == VR_LEFT_HAND_TRACKED && !reloading && !place) hid = vra_hide_left_loose(&e->rig, constants) > 0;
+    /* the parts the game's left hand holds (the shotgun's spare shell, parked in it even at rest): hidden at rest, in
+     * the raise and cock, with the hold and with the free hand; in a reload too until the hand brings it within 8 cm of
+     * its place on the gun (it shows going in, not carried around) */
+    if (mode == VR_LEFT_HAND_TRACKED && !place) hid = vra_hide_left_loose(&e->rig, constants, reloading ? 0.08f : 0.03f) > 0;
     if (!cut && show_off && !place && !moved && !hid) return false;   /* the game's arms, unchanged */
     {
         static unsigned logged, changes;
