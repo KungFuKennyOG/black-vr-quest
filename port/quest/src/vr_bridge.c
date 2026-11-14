@@ -406,6 +406,15 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
         const unsigned now = (touch->a ? 1u : 0u) | (touch->b ? 2u : 0u) | (touch->x ? 4u : 0u) | (touch->y ? 8u : 0u) |
                              (touch->menu ? 16u : 0u) | (touch->rt > 0.5f ? 32u : 0u) | (touch->lt > 0.5f ? 64u : 0u);
         if (now & ~prev) __atomic_add_fetch(&g_button_presses, 1u, __ATOMIC_RELAXED);
+        if ((now ^ prev) & 15u) {
+            /* the face buttons as the headset reports them (rare: one line per press and release) */
+            static const char *const k_face[4] = { "A", "B", "X", "Y" };
+            int k;
+            for (k = 0; k < 4; k++)
+                if ((now ^ prev) & (1u << k))
+                    XLOGI("button %s %s (in game %d, two-hand %d, left grip %.2f)", k_face[k], now & (1u << k) ? "down" : "up",
+                          in_game, g_two.engaged, touch->lgrip);
+        }
         prev = now;
     }
     memset(&ctx, 0, sizeof(ctx));
