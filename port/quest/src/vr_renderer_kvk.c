@@ -407,9 +407,10 @@ static void scope_eyes(VrFrameState *f, const VrPose *hand)
 /* ---- the laser sight, drawn in the world (blackvr.ini laser; port/notes/arms.md) -----------------------------------
  * Kenny 2026-11-15: the composition-layer laser was drawn over everything and its dot floated. The backend now draws a
  * beam and a dot into the finished world against its depth (kvk_vr_layers.inc vrl_laser); this places them per eye.
- * The beam: from the drawn muzzle along the drawn barrel (vr_gun_laser, in the gun hand's aim space) to the game's hit
- * (its length), a ribbon 12 mm wide at the muzzle, widening 4 mm per metre, turned to face the eye. The dot: at the hit, 15 mm toward the eye (out of the
- * surface), facing the eye, 3 cm + 0.4% of its distance across. hand: where the gun is drawn this phase. */
+ * The dot is the sight: at the game's hit (the length along the drawn barrel, vr_gun_laser in the gun hand's aim
+ * space), 15 mm toward the eye (out of the surface), facing it, 3 cm + 0.4% of its distance across: a hot pinpoint
+ * in a tight glow, shimmering a little. The beam is only a faint trace off the muzzle (a 12 mm ribbon facing the eye,
+ * 1.5 m long at most, fading out), as a real laser shows in the air close to it. hand: where the gun is drawn. */
 #define LS_M(m, row, col) ((m)[(col) * 4 + (row)])
 static void laser_fill(KvkStereoFrame *out, const KvkStereoConfig *cfg, const VrFrameState *f, const VrPose *hand)
 {
@@ -453,7 +454,7 @@ static void laser_fill(KvkStereoFrame *out, const KvkStereoConfig *cfg, const Vr
                 side = vrm_cross(dir, vrm_sub(eye, vrm_scale(vrm_add(p0, p1), 0.5f)));
                 if (!vrm_normalize(&side)) side = vrm_q_rotate(hand->orientation, vrm_v3(1, 0, 0));
                 ax = vrm_scale(side, 0.012f);
-                ay = vrm_scale(dir, len);
+                ay = vrm_scale(dir, len < 1.5f ? len : 1.5f);   /* the trace: 1.5 m at most */
                 o = p0;
             } else {
                 v = vrm_sub(eye, p1);
@@ -475,12 +476,16 @@ static void laser_fill(KvkStereoFrame *out, const KvkStereoConfig *cfg, const Vr
             kvk_mat4_mul(out->laser_mvp[k * 2 + e], g, basis);
         }
     }
+    {
+        /* the dot shimmers a little, as a real one on a rough surface (Kenny 2026-11-15: make it read as a real laser
+         * sight in BLACK: the dot first, barely a beam) */
+        static uint32_t seed = 0x9E3779B9u;
+        seed = seed * 1664525u + 1013904223u;
+        out->laser_misc[2] = 0.88f + 0.12f * (float)(seed >> 8) / 16777216.0f;
+    }
     out->laser_misc[0] = 1.0f;
-    out->laser_misc[1] = 0.45f;     /* the beam: faint */
-    out->laser_misc[2] = 1.0f;      /* the dot */
-    /* the beam: 12 mm at the muzzle, 4 mm per metre of its length further on, so its far end stays wider than a
-     * pixel (a fixed 12 mm broke into dots past ~5 m in the harness) */
-    out->laser_misc[3] = (0.012f + 0.004f * len) / 0.012f;
+    out->laser_misc[1] = 0.3f;      /* the trace off the muzzle: faint */
+    out->laser_misc[3] = 1.0f;      /* the trace keeps its 12 mm */
 }
 
 bool kvk_vr_stereo_hook(KvkStereoFrame *out, const KvkStereoConfig *cfg, int phase)

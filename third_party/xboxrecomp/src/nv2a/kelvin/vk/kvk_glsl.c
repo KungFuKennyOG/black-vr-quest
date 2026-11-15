@@ -974,14 +974,15 @@ char *kvk_glsl_fixed(int which)
             "    vec3 red = vec3(1.0, 0.10, 0.06);\n"
             "    float a;\n"
             "    if (pc.p1.y < 0.5) {\n"
-            /* a thin hot core in a faint glow, fading in off the muzzle and away down the beam */
-            "        float x = (v_uv.x - 0.5) * 2.0;\n"
+            /* a faint trace off the muzzle (the light in the air close to it), gone by the end of its quad */
+            "        float x = (v_uv.x - 0.5) * 2.0, f = 1.0 - v_uv.y;\n"
             "        a = exp(-x * x * 40.0) * 0.8 + exp(-x * x * 5.0) * 0.2;\n"
-            "        a *= smoothstep(0.0, 0.02, v_uv.y) * mix(1.0, 0.25, v_uv.y);\n"
+            "        a *= smoothstep(0.0, 0.03, v_uv.y) * f * f;\n"
             "    } else {\n"
             "        vec2 d = (v_uv - 0.5) * 2.0;\n"
             "        float r2 = dot(d, d);\n"
-            "        a = exp(-r2 * 25.0) + exp(-r2 * 5.0) * 0.35;\n"
+            /* a hot pinpoint in a tight glow */
+            "        a = exp(-r2 * 28.0) * 1.8 + exp(-r2 * 6.0) * 0.45;\n"
             "    }\n"
             "    a = clamp(a * pc.p0.x, 0.0, 1.0);\n"
             "    o_color = vec4(mix(red, vec3(1.0, 0.85, 0.8), a * a * 0.5) * a, a);\n"
