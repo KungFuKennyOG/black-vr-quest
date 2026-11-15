@@ -758,7 +758,18 @@ static void test_two_hand(void)
         out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 1, 1.0 / 72.0);
         CHECK(th.engaged);
     }
-    /* released: one-handed again, at once */
+    /* a one-update drop (a tracking blip, the AK's flick on the headset): still held, on the off hand's last place */
+    {
+        const VrPose before = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 1, 1.0 / 72.0);
+        out = vrg_two_hand_update(&th, &gc, 1, gun, 0, V(0, 0, 0), 1, 1.0 / 72.0);
+        CHECK(th.engaged && vrm_dot(vrm_q_rotate(out.orientation, V(0, 0, -1)),
+                                    vrm_q_rotate(before.orientation, V(0, 0, -1))) > 0.99999f);
+        out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 1, 1.0 / 72.0);
+        CHECK(th.engaged && th.miss == 0 && th.blend == 1.0f);
+    }
+    /* released: one-handed again after 3 updates (25 ms at 120 Hz) */
+    for (i = 0; i < 3; i++) out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 0, 1.0 / 72.0);
+    CHECK(th.engaged);
     out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 0, 1.0 / 72.0);
     CHECK(!th.engaged && !memcmp(&out, &gun, sizeof(out)));
     /* grip held far away (60 cm to the side): no */

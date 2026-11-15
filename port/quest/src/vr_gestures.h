@@ -305,6 +305,8 @@ typedef struct {
     int   engaged;
     float blend;                 /* 0 one-handed .. 1 two-handed */
     float last_dist;
+    int   miss;                  /* updates in a row the hold's inputs dropped while engaged (held through 3) */
+    VrVec3 last_off;             /* the off hand's last position while engaged */
 } VrTwoHand;
 
 /* Updates the engagement from the off hand's grip; returns the aim pose to use for the gun hand. */
@@ -314,6 +316,13 @@ static inline VrPose vrg_two_hand_update(VrTwoHand *s, const VrGestureConfig *c,
     VrVec3 fwd = vrm_q_rotate(gun.orientation, vrm_v3(0, 0, -1)), d;
     float along, dist;
     if (!c->two_hand || !gun_ok || !off_ok || !off_grip) {
+        /* a dropped input for a tick or two (a tracking blip, a grip reading) keeps the hold on the off hand's last
+         * place: let go for one update, the aim snapped to the one-hand ray and back (the gun flicked) */
+        if (s->engaged && c->two_hand && gun_ok && s->miss < 3) {
+            s->miss++;
+            return vrg_two_hand_pose(gun, s->last_off);
+        }
+        s->miss = 0;
         s->engaged = 0;
         s->blend = 0.0f;
         return gun;
@@ -335,6 +344,8 @@ static inline VrPose vrg_two_hand_update(VrTwoHand *s, const VrGestureConfig *c,
         s->engaged = 0;
     }
     if (!s->engaged) { s->blend = 0.0f; return gun; }
+    s->miss = 0;
+    s->last_off = off_pos;
     s->blend += (float)(dt / 0.1);
     if (s->blend > 1.0f) s->blend = 1.0f;
     {

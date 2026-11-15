@@ -217,3 +217,9 @@ hidden by walls. Not tested on the headset or the harness (the harness has no XR
   draws on it) flicked each frame. Now the look converges no nearer than 3 m (a few degrees off the barrel at most)
   and eases toward the hit (8% of the ratio a look, ~0.2 s), `bvr.conv_s`. A hit nearer the eye than the muzzle (no
   point on the barrel line that far out) is 0.5 m, not the eye's distance. The laser's own length is unchanged.
+- **Still flicking (headset, 9996cc3).** The log: after the AK's reload (A), "two-hand off / on" for one input update
+  (8 ms) a few times a second, with the grip at 1.00 and the hands 0.24 m apart; each drop snapped the aim to the
+  one-hand ray and back. The gun's two-handedness (vr_set_gun_two_handed) was published per weapon draw, so a second
+  weapon entry drawn in the frame could set it back between draws and the 120 Hz input thread now and then read that.
+  Now the renderer takes the most two-handed of the frame's weapon draws and publishes it at the flip, and the hold
+  (vrg_two_hand_update) rides out up to 3 updates of any dropped input on the off hand's last place.

@@ -341,6 +341,8 @@ static double sv_now(void)
  * loading screen and intro card (flat) straight to a level still streaming in (Kenny 2026-11-15: "i could see the
  * world loading in at the start of a mission"). After a long gap (a load, > 5 s) black is held 0.6 s and lifts over
  * 0.8 s; after a short one (the pause menu, a scripted scene) it lifts over 0.25 s. Called at the flip only. */
+static int g_two_frame;                          /* the most two-handed of this frame's weapon draws (0..2) */
+
 static float world_fade(void)
 {
     static double last, t0, hold, lift;
@@ -522,6 +524,10 @@ bool kvk_vr_stereo_hook(KvkStereoFrame *out, const KvkStereoConfig *cfg, int pha
     if (!g_on) return false;
     if (!F.registered) { vr_register_render_thread(); F.registered = 1; }
     choose_frame();
+    if (phase == KVK_VR_PHASE_FLIP) {
+        vr_set_gun_two_handed(g_two_frame);
+        g_two_frame = 0;
+    }
     if (phase == KVK_VR_PHASE_FLIP) {
         /* the poses vr_acquire_eye_targets() just latched for this frame; submitted unchanged */
         const VrRenderPose *rp = vr_render_pose();
@@ -1110,7 +1116,10 @@ bool kvk_vr_viewmodel_bones(float *constants, const void *vertex_data)
              e->two_handed == 2 ? "two-handed" : e->two_handed ? "one-handed, left hand held on it (grip: the look only)"
                                                               : "one-handed", hl[0], hl[1], hl[2]);
     }
-    if (e->two_checked) vr_set_gun_two_handed(e->two_handed);
+    /* the frame's weapon draws are gathered and published once, at the flip: published per draw, a second weapon
+     * entry (one-handed) after the AK's reload set it back between draws, and the input thread (120 Hz) read that
+     * now and then: two-hand dropped for a tick, a few times a second, and the AK flicked (Kenny, 2026-11-15) */
+    if (e->two_checked && e->two_handed > g_two_frame) g_two_frame = e->two_handed;
     engaged = engaged && e->two_checked && e->two_handed;
     if (engaged && !last_engaged) {   /* the off hand takes the gun: a short tick on it */
         const VrRenderGun *g = vr_render_gun();
