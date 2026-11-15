@@ -9,7 +9,7 @@
  *
  *   right trigger       Fire (analog when Fire is on a trigger)       left stick        move (locomotion = head |
  *   right A             Reload                                                          aim | offhand)
- *   right B             nothing (melee: swing the gun hand, IRL)     left stick click  Crouch (as the game's
+ *   right B             laser sight on/off (melee: swing the gun hand) left stick click  Crouch (as the game's
  *   right stick x       turn (snap / smooth)                                            Toggle Crouch says)
  *   right stick up/down next / previous weapon, one per push        left trigger      Grenade
  *                       (while the scope is up: the scope's zoom)     left grip         two-handed aim (vr_gestures.h)
@@ -91,6 +91,7 @@ typedef struct {
     int    click_on[2];       /* the click acted last step */
     int    step_armed;
     int    y_down, y_fired, menu_down, menu_fired;
+    int    gun_hi_down;       /* the gun hand's upper button (B) was down last step */
     double y_s, menu_s;
     double pulse_s[VRA_COUNT], gap_s[VRA_COUNT];
     uint32_t pulse_tick[VRA_COUNT], gap_tick[VRA_COUNT];   /* the game's input-update count when they began */
@@ -147,6 +148,7 @@ typedef struct {
     float    fire, grenade;   /* analog 0..1 (pressed: > 0.5 when on a button) */
     int16_t  move_x, move_y;  /* the move stick, dead zone applied */
     VrPadState menu;          /* !in_game: the pad as-is */
+    int      laser_toggle;    /* the gun hand's upper button (B) was pressed: turn the laser sight on / off */
 } VrActionState;
 
 static inline void vr_input_default_config(VrInputConfig *c)
@@ -317,7 +319,7 @@ static inline void vr_map_actions(const VrInputConfig *c, VrInputRuntime *rt, co
     const float gun_trig = lh ? t->lt : t->rt, off_trig = lh ? t->rt : t->lt;
     const float gx = lh ? t->lx : t->rx, gy = lh ? t->ly : t->ry;
     float mx = lh ? t->rx : t->lx, my = lh ? t->ry : t->ly;
-    const int gun_lo = lh ? t->x : t->a;   /* the gun hand's upper button (B) does nothing: melee is the swing */
+    const int gun_lo = lh ? t->x : t->a, gun_hi = lh ? t->y : t->b;   /* B: the laser sight on / off (melee: swing) */
     const int off_lo = lh ? t->a : t->x, off_hi = lh ? t->b : t->y;
     int lclick_on, rclick_on, gun_click, off_click;
     uint32_t held;
@@ -379,6 +381,8 @@ static inline void vr_map_actions(const VrInputConfig *c, VrInputRuntime *rt, co
     vri_clicks(rt, t->lclick, t->rclick, dt, &lclick_on, &rclick_on);
     gun_click = lh ? lclick_on : rclick_on;
     off_click = lh ? rclick_on : lclick_on;
+    if (gun_hi && !rt->gun_hi_down) out->laser_toggle = 1;
+    rt->gun_hi_down = gun_hi;
     if (gun_lo) held |= VRA_BIT(VRA_RELOAD);
     if (gun_click) held |= VRA_BIT(VRA_USE);
     if (off_click || ctx->crouch_hold) held |= VRA_BIT(VRA_CROUCH);

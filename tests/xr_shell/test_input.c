@@ -89,6 +89,18 @@ static void test_buttons(void)
     vr_pad_to_xbox(&p, &digital, analog);
     CHECK(digital == VR_PAD_DPAD_DOWN && analog[0] == 255 && analog[1] == 0 && analog[2] == 0 && analog[4] == 0);
     CHECK(analog[6] == 64 && analog[7] == 255);
+    /* B (held since the run above) toggled the laser sight once, on its press only */
+    {
+        VrActionState a2;
+        run(&c, &rt, &t, &x, 1.0 / 72.0, &a2);
+        CHECK(!a2.laser_toggle);
+        t.b = 0;
+        run(&c, &rt, &t, &x, 1.0 / 72.0, &a2);
+        CHECK(!a2.laser_toggle);
+        t.b = 1;
+        run(&c, &rt, &t, &x, 1.0 / 72.0, &a2);
+        CHECK(a2.laser_toggle);
+    }
     /* head-relative locomotion: the stick turned 90 degrees left becomes strafe-left */
     x.move_rotate_deg = 90.0;
     p = run(&c, &rt, &t, &x, 1.0 / 72.0, NULL);

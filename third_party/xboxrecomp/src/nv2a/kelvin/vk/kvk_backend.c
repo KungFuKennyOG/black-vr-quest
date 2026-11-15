@@ -87,7 +87,7 @@
 #define KVK_TSET_CACHE (KVK_TSET_BUCKETS * KVK_TSET_WAYS)
 #define KVK_TSET_POOL_SETS (KVK_TSET_CACHE + 4096)     /* the cache, plus evicted sets waiting for their frame */
 #define KVK_EYEVIEW_MAX 16
-#define KVK_STEREO_BYTES 272u
+#define KVK_STEREO_BYTES 544u   /* eye_clip, quad_mvp, misc, laser_mvp, laser_misc (the GLSL KvkStereo block) */
 
 #if defined(_MSC_VER)
 #define KVK_RESTRICT __restrict
@@ -319,6 +319,8 @@ static struct {
     int region;
     bool hud, hud_used;
     uint64_t world_draws, stereo_draws;
+    KvkSurf *main_zs;           /* VR laser sight: the main target's depth this frame, and the world's depth test */
+    int main_zfunc;
 } V;
 
 /* last uploads (per chunk), so unchanged constants are not copied again */
@@ -2076,6 +2078,8 @@ static VkDeviceSize stereo_block(void)
         memcpy(p, V.st.eye_clip, 128);
         memcpy(p + 128, V.st.quad_mvp, 128);
         memcpy(p + 256, V.st.misc, 16);
+        memcpy(p + 272, V.st.laser_mvp, 256);
+        memcpy(p + 528, V.st.laser_misc, 16);
         c->stereo = true;
         c->stereo_off = off;
     }
@@ -2093,6 +2097,8 @@ static VkDeviceSize stereo_block_vm(void)
         memcpy(p, V.st_vm.eye_clip, 128);
         memcpy(p + 128, V.st_vm.quad_mvp, 128);
         memcpy(p + 256, V.st_vm.misc, 16);
+        memcpy(p + 272, V.st_vm.laser_mvp, 256);
+        memcpy(p + 528, V.st_vm.laser_misc, 16);
         c->stereo_vm = true;
         c->stereo_vm_off = off;
     }
@@ -3069,7 +3075,10 @@ static void draw_now(const KGpuDraw *d)
         LOG("SPRITE f %llu hud vs %08X ic %u z t%d w%d f%d blend %d %d %d", (unsigned long long)G.st.frames,
             d->gvs ? d->gvs->hash : 0u, d->icount, ps->depth_test, ps->depth_write, ps->depth_func, ps->blend,
             ps->blend_sfactor, ps->blend_dfactor);
-    if (cs && is_main(cs->gw, cs->gh) && !hud && ps->depth_write && zs) V.world_draws++;
+    if (cs && is_main(cs->gw, cs->gh) && !hud && ps->depth_write && zs) {
+        V.world_draws++;
+        if (stereo && ps->depth_test) { V.main_zs = zs; V.main_zfunc = (int)(ps->depth_func & 7); }
+    }
     if (stereo) { V.stereo_draws++; G.st.stereo_draws++; }
     if (sprite) G.st.sprite_draws++;
     if (vm) G.st.viewmodel_draws++;
@@ -3633,6 +3642,7 @@ static bool compose_eyes(KvkSurf *main_cs)
     if (!vr_active() || !vr_acquire_eye_targets(eyes)) return false;
     stereo_prepare();
     vrl_relatch();                                      /* the transforms for the poses just latched */
+    vrl_laser(main_cs);                                 /* the VR laser sight, into the world (depth-tested) */
     if (V.hud_used) {
         for (i = 0; i < KVK_MAX_SURF; i++)
             if (G.surf[i].used && G.surf[i].hud && !G.surf[i].depth && G.surf[i].va == main_cs->va) hud_cs = &G.surf[i];
@@ -3696,6 +3706,8 @@ static void flip_now(const KelvinTarget *t, unsigned int color_format)
     V.region = REGION_AUTO;
     V.hud = V.hud_used = false;
     V.world_draws = V.stereo_draws = 0;
+    V.main_zs = NULL;
+    V.main_zfunc = 0;
     /* the driver's pipeline cache: every 1800 frames, and 300 frames after the last new pipeline (a level's set is
      * then in it even if the app is killed soon after: the process ends without a shutdown on the headset) */
     {
@@ -3712,7 +3724,8 @@ static VkShaderModule fixed_module(int which)
     char *src = kvk_glsl_fixed(which);
     VkShaderModule m;
     if (!src) return VK_NULL_HANDLE;
-    m = module_from_glsl(which == KVK_FIX_FULLSCREEN_VS || which == KVK_FIX_QUAD_VS ? KVK_STAGE_VERTEX : KVK_STAGE_FRAGMENT,
+    m = module_from_glsl(which == KVK_FIX_FULLSCREEN_VS || which == KVK_FIX_QUAD_VS || which == KVK_FIX_LASER_VS ?
+                         KVK_STAGE_VERTEX : KVK_STAGE_FRAGMENT,
                          src, true);
     free(src);
     return m;

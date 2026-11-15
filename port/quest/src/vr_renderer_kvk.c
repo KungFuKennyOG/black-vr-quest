@@ -404,6 +404,85 @@ static void scope_eyes(VrFrameState *f, const VrPose *hand)
     }
 }
 
+/* ---- the laser sight, drawn in the world (blackvr.ini laser; port/notes/arms.md) -----------------------------------
+ * Kenny 2026-11-15: the composition-layer laser was drawn over everything and its dot floated. The backend now draws a
+ * beam and a dot into the finished world against its depth (kvk_vr_layers.inc vrl_laser); this places them per eye.
+ * The beam: from the drawn muzzle along the drawn barrel (vr_gun_laser, in the gun hand's aim space) to the game's hit
+ * (its length), a ribbon 12 mm wide at the muzzle, widening 4 mm per metre, turned to face the eye. The dot: at the hit, 15 mm toward the eye (out of the
+ * surface), facing the eye, 3 cm + 0.4% of its distance across. hand: where the gun is drawn this phase. */
+#define LS_M(m, row, col) ((m)[(col) * 4 + (row)])
+static void laser_fill(KvkStereoFrame *out, const KvkStereoConfig *cfg, const VrFrameState *f, const VrPose *hand)
+{
+    float pm[3], am[3], len, pg[16];
+    VrVec3 p0, dir, p1;
+    int e;
+    static unsigned n_why;
+    out->laser_misc[0] = 0.0f;
+    if (!hand || !vr_game_config()->laser || SV.ease > 0.0f || !out->valid || !vr_gun_laser(pm, am, &len) ||
+        !kvk_game_projection(pg, &F.cur.cam, cfg->default_near, cfg->default_far)) {
+        if (vr_game_config()->laser && out->valid && hand && SV.ease <= 0.0f && !(n_why++ % 600u))
+            GLOG("laser: not drawn (hand %d, scope %.2f, stereo %d, fresh %d)", hand != NULL, (double)SV.ease, out->valid,
+                 vr_gun_laser(pm, am, &len));
+        return;
+    }
+    p0 = vrm_add(hand->position, vrm_q_rotate(hand->orientation, vrm_v3(pm[0], pm[1], pm[2])));
+    dir = vrm_q_rotate(hand->orientation, vrm_v3(am[0], am[1], am[2]));
+    if (!vrm_normalize(&dir) || !(len > 0.0f)) return;
+    p1 = vrm_add(p0, vrm_scale(dir, len));
+    for (e = 0; e < VR_EYE_COUNT; e++) {
+        const float ws = f->world_scale > 0.0f ? f->world_scale : 1.0f;
+        const float sgn[3] = { LS_M(pg, 0, 0) < 0.0f ? -1.0f : 1.0f, LS_M(pg, 1, 1) < 0.0f ? -1.0f : 1.0f,
+                               LS_M(pg, 3, 2) < 0.0f ? 1.0f : -1.0f };
+        const VrVec3 eye = f->eye[e].pose.position;
+        float pe[16], ef[16], hinv[16], g[16], t[16], basis[16];
+        VrVec3 side, v, right, up, c;
+        float dd, size;
+        int i, j, k;
+        /* stage (metres) -> clip: P_eye * E * axes * inverse(game head) * scale, as the world's eye correction */
+        kvk_eye_projection(pe, &f->eye[e].fov, pg);
+        kvk_eye_from_head(ef, &f->head, &f->eye[e].pose, ws, pg);
+        kvk_pose_inverse_matrix(hinv, &f->head, ws);
+        for (i = 0; i < 3; i++) for (j = 0; j < 4; j++) LS_M(hinv, i, j) *= sgn[i];
+        for (i = 0; i < 4; i++) for (j = 0; j < 3; j++) LS_M(hinv, i, j) *= ws;
+        kvk_mat4_mul(t, ef, hinv);
+        kvk_mat4_mul(g, pe, t);
+        for (k = 0; k < 2; k++) {
+            VrVec3 ax, ay, o;
+            if (k == 0) {
+                /* the beam, turned about its axis to face this eye */
+                side = vrm_cross(dir, vrm_sub(eye, vrm_scale(vrm_add(p0, p1), 0.5f)));
+                if (!vrm_normalize(&side)) side = vrm_q_rotate(hand->orientation, vrm_v3(1, 0, 0));
+                ax = vrm_scale(side, 0.012f);
+                ay = vrm_scale(dir, len);
+                o = p0;
+            } else {
+                v = vrm_sub(eye, p1);
+                dd = vrm_len(v);
+                if (!vrm_normalize(&v)) return;
+                c = vrm_add(p1, vrm_scale(v, dd > 0.03f ? 0.015f : dd * 0.5f));
+                right = vrm_cross(vrm_v3(0, 1, 0), v);
+                if (!vrm_normalize(&right)) right = vrm_v3(1, 0, 0);
+                up = vrm_cross(v, right);
+                size = 0.03f + 0.004f * dd;
+                ax = vrm_scale(right, size);
+                ay = vrm_scale(up, size);
+                o = c;
+            }
+            kvk_mat4_identity(basis);
+            LS_M(basis, 0, 0) = ax.x; LS_M(basis, 1, 0) = ax.y; LS_M(basis, 2, 0) = ax.z;
+            LS_M(basis, 0, 1) = ay.x; LS_M(basis, 1, 1) = ay.y; LS_M(basis, 2, 1) = ay.z;
+            LS_M(basis, 0, 3) = o.x; LS_M(basis, 1, 3) = o.y; LS_M(basis, 2, 3) = o.z;
+            kvk_mat4_mul(out->laser_mvp[k * 2 + e], g, basis);
+        }
+    }
+    out->laser_misc[0] = 1.0f;
+    out->laser_misc[1] = 0.45f;     /* the beam: faint */
+    out->laser_misc[2] = 1.0f;      /* the dot */
+    /* the beam: 12 mm at the muzzle, 4 mm per metre of its length further on, so its far end stays wider than a
+     * pixel (a fixed 12 mm broke into dots past ~5 m in the harness) */
+    out->laser_misc[3] = (0.012f + 0.004f * len) / 0.012f;
+}
+
 bool kvk_vr_stereo_hook(KvkStereoFrame *out, const KvkStereoConfig *cfg, int phase)
 {
     VrFrameState f;
@@ -425,8 +504,9 @@ bool kvk_vr_stereo_hook(KvkStereoFrame *out, const KvkStereoConfig *cfg, int pha
             /* the scope view: drawn along the gun with narrowed fields of view; the shell still submits rp's */
             const VrRenderGun *g = vr_render_gun();
             scope_eyes(&f, g->valid ? &g->hand : NULL);
+            stereo_for(out, cfg, &f, &rp->head);
+            laser_fill(out, cfg, &f, g->valid ? &g->hand : NULL);
         }
-        stereo_for(out, cfg, &f, &rp->head);
         return true;
     }
     /* first draw (preliminary, replaced at the flip): the game latch's eye offsets around the camera's head */
@@ -441,6 +521,7 @@ bool kvk_vr_stereo_hook(KvkStereoFrame *out, const KvkStereoConfig *cfg, int pha
         f.head = head_g;
         scope_eyes(&f, F.marked && F.cur.gun.valid ? &F.cur.gun.hand : NULL);
         stereo_for(out, cfg, &f, &head_g);
+        laser_fill(out, cfg, &f, F.marked && F.cur.gun.valid ? &F.cur.gun.hand : NULL);
         return true;
     }
 }

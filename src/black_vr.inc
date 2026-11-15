@@ -69,6 +69,7 @@ typedef struct BlackVr {
     int yv_ok;
     VrVec3 grip;                      /* the weapon's grip offset (game units) */
     unsigned barrel_ok;               /* frames aimed along the drawn barrel (log) */
+    float laser_d;                    /* the laser's hit: metres from the drawn muzzle along the barrel (0: none) */
     VrMat4 yv_fx;                     /* yv for the muzzle flash draw: with the arms' wrist lock */
     int yv_fx_ok;
     float grip_corr[3];               /* the auto-grip correction inside grip (game units) */
@@ -521,15 +522,23 @@ static void bvr_publish_flat_barrel(void)
 }
 
 /* The laser sight (blackvr.ini laser): the drawn muzzle and barrel in the gun hand's aim space (bvr_barrel_in_hand,
- * any angle), and its length: from the eye to the game's aim point (weapon+10, where the crosshair's ray meets the
- * world), 0.5..60 m, 30 when unreadable. The XR thread draws it at display time from the latched hand. */
-static void bvr_publish_laser(void)
+ * any angle), and its length to the game's aim point (weapon+10: where the look's ray from the eye first meets the
+ * world), 0.5..60 m, 30 when unreadable. The XR thread draws it at display time from the latched hand.
+ *
+ * The length is measured along the barrel from the muzzle, not from the eye (Kenny 2026-11-15: "not that accurate and
+ * changes the position wrongly"): the hit is taken to lie on the barrel line, and the look converges on that line at
+ * the hit's distance (bvr.laser_d, black_vr_look), so next frame's ray from the eye meets the world where the barrel
+ * does. It used to be the eye's distance (the dot 10-40 cm past the wall) on a ray converging 10 m out (on a near
+ * surface the eye's ray met it off the barrel line, or met another surface: the dot jumped). eye_h: the eye in the
+ * gun hand's aim space. */
+static void bvr_publish_laser(VrVec3 eye_h)
 {
     const VrGameConfig *cfg = vr_game_config();
     VrVec3 p = vrm_v3(0, 0, 0), a = vrm_v3(0, 0, 0);
     float pm[3] = { 0, 0, 0 }, am[3] = { 0, 0, 0 }, len = 30.0f;
     uint32_t core, weapon;
     /* also for the 3D scope view: the renderer aims the zoomed eyes along this barrel */
+    bvr.laser_d = 0.0f;
     if ((!cfg->laser && !cfg->scope_3d) || bvr.mode != VR_PRESENT_STEREO) { vr_set_gun_laser(pm, am, 0.0f, 0); return; }
     bvr_barrel_in_hand(&p, &a);
     if (!(vrm_len(p) < 1.5f) || !(vrm_len(a) > 0.5f)) { vr_set_gun_laser(pm, am, 0.0f, 0); return; }
@@ -539,9 +548,14 @@ static void bvr_publish_laser(void)
         black_pc_ram_span(core + 0x130u, 0x10u) && bvr_f32_ok(core + 0x130u) && bvr_f32_ok(core + 0x138u)) {
         const VrVec3 t = vrm_v3(bvr_f32(weapon + 0x10u), bvr_f32(weapon + 0x14u), bvr_f32(weapon + 0x18u));
         const VrVec3 e = vrm_v3(bvr_f32(core + 0x130u), bvr_f32(core + 0x134u), bvr_f32(core + 0x138u));
-        const float d = vrm_len(vrm_sub(t, e)) / cfg->units_per_metre;
+        const float l = vrm_len(vrm_sub(t, e)) / cfg->units_per_metre;   /* eye -> hit */
+        /* the point on the barrel line l from the eye: |m + D a| = l, m = muzzle - eye */
+        const VrVec3 m = vrm_sub(p, eye_h);
+        const float b = vrm_dot(m, a), q = b * b - vrm_dot(m, m) + l * l;
+        const float d = q > 0.0f ? -b + sqrtf(q) : l;
         if (d == d) len = d < 0.5f ? 0.5f : d > 60.0f ? 60.0f : d;
     }
+    bvr.laser_d = len;
     /* a suppressor fitted (weapon+108): the beam starts at its end, ~18 cm on, not inside it */
     if (weapon && black_pc_ram_span(weapon, 0x109u) && GUEST8(weapon + 0x108u)) {
         p = vrm_add(p, vrm_scale(a, 0.18f));
@@ -578,19 +592,26 @@ static void black_vr_look(uint32_t look)
         hand_mode = cfg->aim_mode == VR_AIM_HAND && f->hand[cfg->aim_hand & 1].valid;
         d = vgm_aim_dir(hand_mode, head_rel, hand_rel, vrm_v3(0, 0, 0), cfg->aim_converge_m);
         bvr_publish_flat_barrel();
-        bvr_publish_laser();
+        {
+            /* the eye in the gun hand's aim space */
+            const VrVec3 eh = vrm_q_rotate(vrm_q_conj(hand_rel.orientation), vrm_sub(head_rel.position, hand_rel.position));
+            bvr_publish_laser(eh);
+        }
         if (hand_mode && cfg->aim_barrel) {
-            /* shots converge on the drawn gun's barrel line (not the controller's ray), aim_converge metres out */
+            /* shots converge on the drawn gun's barrel line (not the controller's ray), aim_converge metres out; with
+             * the laser on, at its hit (bvr_publish_laser) */
             VrVec3 bp, ba;
             if (bvr_barrel_in_hand(&bp, &ba)) {
                 const VrVec3 mp = vrm_add(hand_rel.position, vrm_q_rotate(hand_rel.orientation, bp));
                 const VrVec3 md = vrm_q_rotate(hand_rel.orientation, ba);
-                VrVec3 dd = vrm_sub(vrm_add(mp, vrm_scale(md, cfg->aim_converge_m)), head_rel.position);
+                const float conv = cfg->laser && bvr.laser_d > 0.0f ? bvr.laser_d : cfg->aim_converge_m;
+                VrVec3 dd = vrm_sub(vrm_add(mp, vrm_scale(md, conv)), head_rel.position);
                 if (vrm_normalize(&dd)) d = dd;
                 if (!(bvr.barrel_ok++ % (getenv("BLACKVR_AIM_LOG") ? 30u : 600u)))
                     fprintf(stderr, "[BLACK_VR] aim: along the drawn barrel: muzzle %.3f %.3f %.3f m from the controller "
-                            "(right, up, back), barrel %.1f deg off the controller's ray\n", (double)bp.x, (double)bp.y,
-                            (double)bp.z, acos(ba.z < -1.0f ? 1.0 : -(double)ba.z) / VRM_DEG);
+                            "(right, up, back), barrel %.1f deg off the controller's ray, converging %.2f m out%s\n",
+                            (double)bp.x, (double)bp.y, (double)bp.z, acos(ba.z < -1.0f ? 1.0 : -(double)ba.z) / VRM_DEG,
+                            (double)conv, conv == cfg->aim_converge_m ? "" : " (the laser's hit)");
             }
         }
         bvr.aim_d = d;

@@ -67,6 +67,8 @@ enum {
     KVK_FIX_QUAD_VS,            /* VR virtual screen: a quad through quad_mvp[gl_ViewIndex] */
     KVK_FIX_QUAD_PS,            /* ... textured from Tex0 layer p0.x: opaque, or premultiplied scaled by p0.y */
     KVK_FIX_COPY_PS,            /* eye picture from the main target (sampled, so it scales and stays UNORM) */
+    KVK_FIX_LASER_VS,           /* VR laser sight: beam (p1.y 0) or dot (1) through laser_mvp[kind * 2 + view] */
+    KVK_FIX_LASER_PS,           /* ... its glow, premultiplied, strength p0.x */
     KVK_FIX_COUNT
 };
 char *kvk_glsl_fixed(int which);

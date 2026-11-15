@@ -60,6 +60,64 @@ static void vrl_write_block(uint8_t *p, const KvkStereoFrame *st)
     memcpy(p, st->eye_clip, 128);
     memcpy(p + 128, st->quad_mvp, 128);
     memcpy(p + 256, st->misc, 16);
+    memcpy(p + 272, st->laser_mvp, 256);
+    memcpy(p + 528, st->laser_misc, 16);
+}
+
+/* The VR laser sight (the glue's laser_mvp, laser_misc): a beam and a dot drawn into the finished world of the main
+ * target, against its depth (so walls and bodies in front hide it, and the beam ends in the surface it meets), blended
+ * over, no depth write. After the flip's re-latch, so it is where the latched gun is. */
+static void vrl_laser(KvkSurf *main_cs)
+{
+    KvkSurf *zs = V.main_zs;
+    KvkPipeDesc d;
+    KvkPush pc;
+    VkPipeline pipe;
+    VkViewport vp;
+    VkRect2D sc;
+    static const float bc[4] = { 0, 0, 0, 0 };
+    uint32_t offs[6] = { 0, 0, 0, 0, 0, 0 };
+    int k, zf = V.main_zfunc;
+    if (!(V.st.laser_misc[0] > 0.5f) || !main_cs || !zs || !zs->used || !zs->depth || zs->hw != main_cs->hw ||
+        zs->hh != main_cs->hh || zs->im.layers != main_cs->im.layers || V.stereo_draws == 0) {
+        static unsigned n_why;
+        if (V.st.laser_misc[0] > 0.5f && !(n_why++ % 600u))
+            LOG("laser: no world depth to draw it against (depth %d, stereo draws %llu)", zs != NULL,
+                (unsigned long long)V.stereo_draws);
+        return;
+    }
+    if (zf == 1) zf = 3;                                /* LESS -> LEQUAL */
+    else if (zf == 4) zf = 6;                           /* GREATER -> GEQUAL */
+    else if (zf != 3 && zf != 6) zf = 3;
+    if (!ring_reserve(KVK_STEREO_BYTES + 256) || !pass_begin(main_cs, zs)) return;
+    memset(&d, 0, sizeof(d));
+    d.vs = G.fix[KVK_FIX_LASER_VS]; d.fs = G.fix[KVK_FIX_LASER_PS]; d.rp = pass_compat();
+    d.has_color = true;
+    d.blend = pack_blend(true, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_OP_ADD,
+                         VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, 7);   /* colour only */
+    d.ztest = true; d.zwrite = false; d.zfunc = zf;
+    d.topo = RS_QUADSTRIP;
+    d.cull = VK_CULL_MODE_NONE;
+    if (!(pipe = pipe_get(&d))) return;
+    offs[5] = (uint32_t)stereo_block();
+    vp.x = 0.0f; vp.y = 0.0f; vp.width = (float)main_cs->hw; vp.height = (float)main_cs->hh;
+    vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
+    sc.offset.x = sc.offset.y = 0; sc.extent.width = main_cs->hw; sc.extent.height = main_cs->hh;
+    bind_pipe(pipe);
+    bind_set0(offs);
+    set_dynamic(&vp, &sc, bc, 0, 0xFF, 0xFF, 0.0f, 0.0f);
+    {
+        static unsigned n_drawn;
+        if (!(n_drawn++ % 3600u)) LOG("laser: drawn in the world (depth test %d)", zf);
+    }
+    for (k = 0; k < 2; k++) {
+        memset(&pc, 0, sizeof(pc));
+        pc.p0[0] = k ? V.st.laser_misc[2] : V.st.laser_misc[1];
+        pc.p1[0] = -1.0f;                               /* multiview: each view its own eye */
+        pc.p1[1] = (float)k;
+        push(&pc);
+        vkCmdDraw(cmd(), 4, 1, 0, 0);
+    }
 }
 
 /* Phase FLIP: the glue's final transforms (for the poses vr_acquire_eye_targets just latched) into every stereo block

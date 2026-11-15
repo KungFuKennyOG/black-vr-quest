@@ -185,7 +185,8 @@ static void test_pixel_shaders(void)
         free(u); free(f); free(vc);
         for (i = 0; i < KVK_FIX_COUNT; i++) {
             char *s = kvk_glsl_fixed(i), name[32];
-            int st = i == KVK_FIX_FULLSCREEN_VS || i == KVK_FIX_QUAD_VS ? KVK_STAGE_VERTEX : KVK_STAGE_FRAGMENT;
+            int st = i == KVK_FIX_FULLSCREEN_VS || i == KVK_FIX_QUAD_VS || i == KVK_FIX_LASER_VS ? KVK_STAGE_VERTEX
+                                                                                         : KVK_STAGE_FRAGMENT;
             snprintf(name, sizeof(name), "fixed %d", i);
             CHECK(s && compile(st, s, name), "%s", name);
             free(s);

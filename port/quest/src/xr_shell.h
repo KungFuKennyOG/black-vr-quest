@@ -180,13 +180,12 @@ void vrsm_begin_edit(XrShell *s);      /* edit = the running config, restart set
 unsigned vrsm_apply_live(XrShell *s);  /* edit -> the running config; OpenXR side effects queued for the XR thread */
 void vrsm_xr_frame(XrShell *s);        /* XR thread, every frame: runs what was queued */
 int  vrsm_save(XrShell *s);
+void vrsm_toggle(int id, const char *what);   /* a bool setting flipped by a button in the game: applied, saved */
 void vrsm_ini_path(XrShell *s, char *p, size_t cap);
 void vrsm_sampler(int want);           /* the per-thread CPU sampler, while a settings page is shown */
 void vrsm_info_update(XrShell *s);
 /* xr_panel.c: the panel for this shell; call after blackvr.ini was read (it keeps that config as "as started") */
 const XrsPanelOps *xrs_panel_attach(XrShell *s);
-/* xr_panel.c: the laser sight's layers (blackvr.ini laser) for display time t: 0 or 2 (beam, dot) */
-uint32_t xrs_gun_laser_layers(XrShell *s, XrTime t, const XrCompositionLayerBaseHeader **out, uint32_t cap);
 /* The 3D scope view (port/notes/scope.md): the HUD quad (the game's own scope picture) centred on the view, XRS_SCOPE_HUD_DIST
  * out and tan +-XRS_SCOPE_HUD_TAN wide, over xrs_scope_layers' black surround. */
 #define XRS_SCOPE_HUD_DIST 10.0f

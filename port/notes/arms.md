@@ -197,3 +197,17 @@ hidden by walls. Not tested on the headset or the harness (the harness has no XR
   is not skinned (1D25D0 draws it after the gun through its own c10 MVP), so the palette lock never reached it. Now a
   weapon draw with no arms rig gets the gun's lock as MVP * K^-1 * L * K (L: this frame's vr_grip_lock). The laser
   starts 18 cm on when a suppressor is fitted (weapon+108), not inside it.
+- **In the world (Nov 15).** Kenny: "not that accurate and changes the position wrongly sometimes", asked for it
+  "inside the game". Two causes, both fixed:
+  1. The length was the eye's distance to weapon+10, but the beam starts at the muzzle: the dot sat 10-40 cm past the
+     surface. And the game's look ray converged on the barrel line 10 m out (`aim_converge`), so on a near surface it
+     met the world off the barrel line, or met another surface (a door edge): the dot jumped. Now (black_vr.inc
+     bvr_publish_laser) the length is along the barrel from the muzzle (the point on the barrel line at the eye's
+     distance to the hit), and with the laser on the look converges on the barrel line at that distance
+     (`bvr.laser_d`), so the game's ray meets the world where the barrel does. Harness: steady at 25.05 m.
+  2. The composition quads were drawn over everything. Now the renderer draws them into the world: the glue
+     (vr_renderer_kvk.c laser_fill) places a 12 mm ribbon facing each eye, from the muzzle to the hit, and a dot
+     15 mm out of the surface, 3 cm + 0.4% of its distance across, as per-eye matrices in the stereo block
+     (laser_mvp, laser_misc). The backend (kvk_vr_layers.inc vrl_laser) draws them at the flip, after the re-latch,
+     into the main target against the world's depth (LEQUAL, no depth write, premultiplied over), so walls and bodies
+     in front hide it and the beam ends in the surface. The XR layers (xrs_gun_laser_layers) are gone.

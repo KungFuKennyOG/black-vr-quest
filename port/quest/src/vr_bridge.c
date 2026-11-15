@@ -23,6 +23,7 @@
 #include <math.h>
 #include <pthread.h>
 #include "xr_shell.h"
+#include "vr_settings.h"
 #include "vr_game_math.h"
 #include "vr_gestures.h"
 
@@ -437,6 +438,7 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
                   game_known ? gin.crouched : -1, g_csync.tries);
     }
     vr_map_actions(&s->cfg.input, &g_in_rt, touch, &ctx, dt, &act);
+    if (act.laser_toggle) vrsm_toggle(VRS_LASER, "laser sight");
     if (g_in_rt.fired_mask) {
         char line[160];
         int i, n = 0;
@@ -921,7 +923,15 @@ int vr_gun_laser(float muzzle[3], float dir[3], float *length_m)
     memcpy(muzzle, g_laser_p, sizeof(g_laser_p));
     memcpy(dir, g_laser_d, sizeof(g_laser_d));
     *length_m = g_laser_len;
-    ok = g_laser_ns && mono_ns() - g_laser_ns < 250000000LL;      /* fresh: the game is in gameplay */
+    {
+        /* fresh: the game is in gameplay (BLACKVR_LASER_FRESH_MS: the x86 harness runs at ~1 frame/s) */
+        static long long fresh_ns = -1;
+        if (fresh_ns < 0) {
+            const char *e = getenv("BLACKVR_LASER_FRESH_MS");
+            fresh_ns = (e && atoll(e) > 0 ? atoll(e) : 250LL) * 1000000LL;
+        }
+        ok = g_laser_ns && mono_ns() - g_laser_ns < fresh_ns;
+    }
     pthread_mutex_unlock(&g_lock);
     return ok;
 }
