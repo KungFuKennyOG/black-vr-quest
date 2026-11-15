@@ -961,8 +961,10 @@ char *kvk_glsl_fixed(int which)
             /* the beam: x across (-0.5..0.5), y from the muzzle (0) to the hit (1); the dot: centred */
             /* the beam widens toward its end (laser_misc.w: the width there over the width at the muzzle) */
             "    float wx = (c.x - 0.5) * (k == 0 ? mix(1.0, max(laser_misc.w, 1.0), c.y) : 1.0);\n"
-            "    gl_Position = laser_mvp[k * 2 + e] * vec4(wx, k == 0 ? c.y : c.y - 0.5, 0.0, 1.0);\n"
+            "    gl_Position = laser_mvp[min(k, 1) * 2 + e] * vec4(wx, k == 0 ? c.y : c.y - 0.5, 0.0, 1.0);\n"
             "    gl_Position.y = -gl_Position.y;\n"
+            /* kind 2: the fade, the whole picture */
+            "    if (k == 2) gl_Position = vec4(c * 2.0 - 1.0, 0.5, 1.0);\n"
             "    v_uv = c;\n"
             "}\n");
         break;
@@ -973,6 +975,7 @@ char *kvk_glsl_fixed(int which)
             "void main() {\n"
             "    vec3 red = vec3(1.0, 0.10, 0.06);\n"
             "    float a;\n"
+            "    if (pc.p1.y > 1.5) { o_color = vec4(0.0, 0.0, 0.0, pc.p0.x); return; }\n"
             "    if (pc.p1.y < 0.5) {\n"
             /* a faint trace off the muzzle (the light in the air close to it), gone by the end of its quad */
             "        float x = (v_uv.x - 0.5) * 2.0, f = 1.0 - v_uv.y;\n"

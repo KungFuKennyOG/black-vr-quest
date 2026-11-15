@@ -70,6 +70,7 @@ typedef struct BlackVr {
     VrVec3 grip;                      /* the weapon's grip offset (game units) */
     unsigned barrel_ok;               /* frames aimed along the drawn barrel (log) */
     float laser_d;                    /* the laser's hit: metres from the drawn muzzle along the barrel (0: none) */
+    float conv_s;                     /* the look's convergence with the laser on: laser_d eased, 3..60 m (0: unset) */
     VrMat4 yv_fx;                     /* yv for the muzzle flash draw: with the arms' wrist lock */
     int yv_fx_ok;
     float grip_corr[3];               /* the auto-grip correction inside grip (game units) */
@@ -553,7 +554,8 @@ static void bvr_publish_laser(VrVec3 eye_h)
         const VrVec3 m = vrm_sub(p, eye_h);
         const float b = vrm_dot(m, a), q = b * b - vrm_dot(m, m) + l * l;
         const float d = q > 0.0f ? -b + sqrtf(q) : l;
-        if (d == d) len = d < 0.5f ? 0.5f : d > 60.0f ? 60.0f : d;
+        if (q > 0.0f && d == d) len = d < 0.5f ? 0.5f : d > 60.0f ? 60.0f : d;
+        else len = 0.5f;                                  /* the hit nearer the eye than the muzzle: inside a wall */
     }
     bvr.laser_d = len;
     /* a suppressor fitted (weapon+108): the beam starts at its end, ~18 cm on, not inside it */
@@ -604,7 +606,16 @@ static void black_vr_look(uint32_t look)
             if (bvr_barrel_in_hand(&bp, &ba)) {
                 const VrVec3 mp = vrm_add(hand_rel.position, vrm_q_rotate(hand_rel.orientation, bp));
                 const VrVec3 md = vrm_q_rotate(hand_rel.orientation, ba);
-                const float conv = cfg->laser && bvr.laser_d > 0.0f ? bvr.laser_d : cfg->aim_converge_m;
+                /* The laser's hit feeds back into the look (the look's ray finds the next hit), so it is eased and kept
+                 * 3 m out or more (Kenny 2026-11-15, the AK-47 "started to flick up and down"): the AK's muzzle is 0.7 m
+                 * out, and a convergence of 0.5 m turned the look ~15 deg down, its ray met the floor or the sky, the
+                 * hit jumped between 0.5 and 59 m and the look (and the gun the game draws on it) flicked each frame. */
+                float conv = cfg->aim_converge_m;
+                if (cfg->laser && bvr.laser_d > 0.0f) {
+                    const float tgt = bvr.laser_d < 3.0f ? 3.0f : bvr.laser_d;
+                    bvr.conv_s = bvr.conv_s > 0.0f ? bvr.conv_s * powf(tgt / bvr.conv_s, 0.08f) : tgt;
+                    conv = bvr.conv_s;
+                } else bvr.conv_s = 0.0f;
                 VrVec3 dd = vrm_sub(vrm_add(mp, vrm_scale(md, conv)), head_rel.position);
                 if (vrm_normalize(&dd)) d = dd;
                 if (!(bvr.barrel_ok++ % (getenv("BLACKVR_AIM_LOG") ? 30u : 600u)))

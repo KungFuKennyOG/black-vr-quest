@@ -3643,6 +3643,7 @@ static bool compose_eyes(KvkSurf *main_cs)
     stereo_prepare();
     vrl_relatch();                                      /* the transforms for the poses just latched */
     vrl_laser(main_cs);                                 /* the VR laser sight, into the world (depth-tested) */
+    vrl_fade(main_cs);                                  /* the world fading in after a load */
     if (V.hud_used) {
         for (i = 0; i < KVK_MAX_SURF; i++)
             if (G.surf[i].used && G.surf[i].hud && !G.surf[i].depth && G.surf[i].va == main_cs->va) hud_cs = &G.surf[i];

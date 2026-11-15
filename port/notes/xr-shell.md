@@ -432,6 +432,15 @@ recomp_manual.c hook calls (all `#ifdef BLACK_VR`):
    it needs the same sse2neon (or equivalent) shim you use there, `struct timespec`/
    `clock_gettime`, and `xbox_PhysicalAddressOf`.
 
+## World fade-in (Nov 15)
+Kenny: "i could see the world loading in at the start of a mission". The game cuts from its loading screen and intro
+card (FLAT_MENU) straight to a level still streaming in. The glue (vr_renderer_kvk.c world_fade, at the flip) sets
+KvkStereoFrame.fade when the stereo view comes back after more than 0.75 s without it: after a load (> 5 s) black is
+held 0.6 s and lifts over 0.8 s (smoothstep), after the pause menu or a scripted scene it lifts over 0.25 s. The
+backend (kvk_vr_layers.inc vrl_fade, after the laser) blends black over the main target (the LASER shaders' kind 2,
+no depth test); the HUD layer stays on top. `BLACKVR_FADE_S=<seconds>` sets the whole length (45% held); 0 turns it
+off, which the x86 harness and the glue test do by default (a frame there takes about a second).
+
 ## Open issues / risks
 - **No headset run yet.** First run: `adb logcat -s BlackVR` and check the items at the end of the README.
 - `world_scale` (units per metre) is a guess (1.0). Photo mode treats game units as metres, so it

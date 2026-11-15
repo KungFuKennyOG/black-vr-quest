@@ -211,3 +211,9 @@ hidden by walls. Not tested on the headset or the harness (the harness has no XR
      (laser_mvp, laser_misc). The backend (kvk_vr_layers.inc vrl_laser) draws them at the flip, after the re-latch,
      into the main target against the world's depth (LEQUAL, no depth write, premultiplied over), so walls and bodies
      in front hide it and the beam ends in the surface. The XR layers (xrs_gun_laser_layers) are gone.
+- **The AK flicked up and down (headset, 7d32750).** The convergence of 1. is a feedback loop: the look's ray finds
+  the next hit. With the AK (muzzle 0.71 m out) the log showed it jumping 0.50 m <-> 59 m: a 0.5 m convergence turns
+  the look ~15 deg off the barrel, its ray then meets the floor or the far wall, and the look (and the gun the game
+  draws on it) flicked each frame. Now the look converges no nearer than 3 m (a few degrees off the barrel at most)
+  and eases toward the hit (8% of the ratio a look, ~0.2 s), `bvr.conv_s`. A hit nearer the eye than the muzzle (no
+  point on the barrel line that far out) is 0.5 m, not the eye's distance. The laser's own length is unchanged.

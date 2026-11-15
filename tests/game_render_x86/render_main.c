@@ -963,6 +963,9 @@ int main(int argc, char **argv)
     s_gun_yaw = envf("GRX_GUN_YAW", 5.0) * M_PI / 180.0;
     s_hand_yaw = envf("GRX_HAND_YAW", 0.0) * M_PI / 180.0;
     s_hand_pitch = envf("GRX_HAND_PITCH", 0.0) * M_PI / 180.0;
+    /* a frame takes ~1 s here: every flip would read as the stereo view coming back (the world fade-in), so it is off
+     * unless asked for */
+    if (!getenv("BLACKVR_FADE_S")) setenv("BLACKVR_FADE_S", "0", 0);
     if (getenv("GRX_HAND_POS")) sscanf(getenv("GRX_HAND_POS"), "%lf,%lf,%lf", &s_hand_pos[0], &s_hand_pos[1], &s_hand_pos[2]);
     if (s_gun_test) { s_sway = 0; if (!getenv("GRX_ROT_AT")) s_rot_at = 1e9; }   /* the head holds still */
     s_sway = (int)envf("GRX_SWAY", s_sway);

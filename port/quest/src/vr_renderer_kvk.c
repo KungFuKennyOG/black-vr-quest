@@ -337,6 +337,33 @@ static double sv_now(void)
     return (double)ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
+/* The world fading in (KvkStereoFrame.fade) where the stereo view comes back after a gap: the game cuts from its
+ * loading screen and intro card (flat) straight to a level still streaming in (Kenny 2026-11-15: "i could see the
+ * world loading in at the start of a mission"). After a long gap (a load, > 5 s) black is held 0.6 s and lifts over
+ * 0.8 s; after a short one (the pause menu, a scripted scene) it lifts over 0.25 s. Called at the flip only. */
+static float world_fade(void)
+{
+    static double last, t0, hold, lift;
+    const double now = sv_now(), gap = last > 0.0 ? now - last : 1e9;
+    double t, x;
+    const char *e;
+    if (gap > 0.75) {                                 /* not a hitch: the view was gone */
+        const int load = gap > 5.0;
+        t0 = now;
+        hold = load ? 0.6 : 0.0;
+        lift = load ? 0.8 : 0.25;
+        if ((e = getenv("BLACKVR_FADE_S")) && atof(e) >= 0.0) { hold = atof(e) * 0.45; lift = atof(e) * 0.55; }
+        fprintf(stderr, "[KVK] world: fading in (stereo back after %.1f s: black %.2f s, then %.2f s)\n",
+                gap > 1e8 ? 0.0 : gap, hold, lift);
+    }
+    last = now;
+    t = now - t0;
+    if (t < hold) return 1.0f;
+    if (lift <= 0.0 || t >= hold + lift) return 0.0f;
+    x = 1.0 - (t - hold) / lift;
+    return (float)(x * x * (3.0 - 2.0 * x));
+}
+
 /* Steps the ease (by wall time: called twice a frame, it moves once in all). Returns the shown zoom, 1: out. */
 static float scope_step(float *ease_out)
 {
@@ -512,6 +539,7 @@ bool kvk_vr_stereo_hook(KvkStereoFrame *out, const KvkStereoConfig *cfg, int pha
             stereo_for(out, cfg, &f, &rp->head);
             laser_fill(out, cfg, &f, g->valid ? &g->hand : NULL);
         }
+        out->fade = world_fade();
         return true;
     }
     /* first draw (preliminary, replaced at the flip): the game latch's eye offsets around the camera's head */

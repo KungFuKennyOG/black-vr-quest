@@ -120,6 +120,46 @@ static void vrl_laser(KvkSurf *main_cs)
     }
 }
 
+/* The glue's fade (V.st.fade, 0..1): black blended over the finished eye picture, after the laser, before the HUD --
+ * the world fading in where the game cuts from its loading screen straight to a level still streaming in. */
+static void vrl_fade(KvkSurf *main_cs)
+{
+    KvkSurf *zs = V.main_zs;
+    KvkPipeDesc d;
+    KvkPush pc;
+    VkPipeline pipe;
+    VkViewport vp;
+    VkRect2D sc;
+    static const float bc[4] = { 0, 0, 0, 0 };
+    uint32_t offs[6] = { 0, 0, 0, 0, 0, 0 };
+    if (!(V.st.fade > 0.002f) || !main_cs) return;
+    if (zs && (!zs->used || !zs->depth || zs->hw != main_cs->hw || zs->hh != main_cs->hh ||
+               zs->im.layers != main_cs->im.layers)) zs = NULL;
+    if (!ring_reserve(KVK_STEREO_BYTES + 256) || !pass_begin(main_cs, zs)) return;
+    memset(&d, 0, sizeof(d));
+    d.vs = G.fix[KVK_FIX_LASER_VS]; d.fs = G.fix[KVK_FIX_LASER_PS]; d.rp = pass_compat();
+    d.has_color = true;
+    d.blend = pack_blend(true, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_OP_ADD,
+                         VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, 7);
+    d.ztest = false; d.zwrite = false;
+    d.topo = RS_QUADSTRIP;
+    d.cull = VK_CULL_MODE_NONE;
+    if (!(pipe = pipe_get(&d))) return;
+    offs[5] = (uint32_t)stereo_block();
+    vp.x = 0.0f; vp.y = 0.0f; vp.width = (float)main_cs->hw; vp.height = (float)main_cs->hh;
+    vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
+    sc.offset.x = sc.offset.y = 0; sc.extent.width = main_cs->hw; sc.extent.height = main_cs->hh;
+    bind_pipe(pipe);
+    bind_set0(offs);
+    set_dynamic(&vp, &sc, bc, 0, 0xFF, 0xFF, 0.0f, 0.0f);
+    memset(&pc, 0, sizeof(pc));
+    pc.p0[0] = V.st.fade > 1.0f ? 1.0f : V.st.fade;
+    pc.p1[0] = -1.0f;
+    pc.p1[1] = 2.0f;                                    /* kind 2: the whole picture */
+    push(&pc);
+    vkCmdDraw(cmd(), 4, 1, 0, 0);
+}
+
 /* Phase FLIP: the glue's final transforms (for the poses vr_acquire_eye_targets just latched) into every stereo block
  * this frame's recorded draws use. The memory is host-coherent and the frame is not submitted yet. */
 static void vrl_relatch(void)

@@ -2030,6 +2030,8 @@ int main(int argc, char **argv)
 {
     const char *mode = argc > 1 ? argv[1] : "multiview";
     int r;
+    /* the world fade-in (black after the stereo view comes back) is off: these frames check the picture itself */
+    setenv("BLACKVR_FADE_S", "0", 0);
     /* the two-swapchain run also checks the gun latch's debug tint (cyan, half transparent) */
     if (!strcmp(mode, "two")) setenv("BLACKVR_GUN_LATCH_DEBUG", "0x80FFFF00", 1);
     else unsetenv("BLACKVR_GUN_LATCH_DEBUG");
