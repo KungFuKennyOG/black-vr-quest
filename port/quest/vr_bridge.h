@@ -226,6 +226,8 @@ typedef struct {
     int   aim_barrel;          /* 1: the shot converges on the drawn gun's barrel line (else on the controller's ray) */
     float vm_offset_m[3];      /* viewmodel natural offset in aim space (x right, y up, z fwd) */
     float scope_zoom_min;      /* zoom factor at/above which the scope view starts */
+    float scope_height_deg;    /* the scope picture's centre above the head's forward, degrees; > 90: auto (the middle
+                                * of the headset's own field of view, which reaches further down than up) */
     int   scope_3d;            /* 1: the scope view zooms the 3D view, aimed with the gun (DrBeef's ports); 0: a flat
                                 * head-locked window (blackvr.ini scope_view = zoom | flat) */
     int   scope_mono;          /* 1: in the 3D scope view both eyes see the same image (blackvr.ini scope_mono) */

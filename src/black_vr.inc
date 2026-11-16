@@ -1462,7 +1462,7 @@ static void black_vr_fx_update_end(void)
  * direction (spread kept); a rocket's launch matrix becomes X * it and its velocity X's turn of it. So both leave the
  * drawn muzzle along the drawn barrel, wherever the hand is. Only when the muzzle moves under 1.5 m (a recentre or a
  * teleport otherwise: the game's shot is kept). */
-static struct { int on; uint32_t actor; } bvr_shot;
+static struct { int on, scoped; uint32_t actor; } bvr_shot;
 static struct { unsigned n, moved; double off_sum, turn_sum; } bvr_shots;
 
 static void black_vr_shot_begin(uint32_t shot)
@@ -1470,7 +1470,15 @@ static void black_vr_shot_begin(uint32_t shot)
     const VrGameConfig *cfg = vr_game_config();
     uint32_t ctl, actor, core;
     bvr_shot.on = 0;
-    if (vr_scope_aim(NULL)) return;                               /* scoped: the game's shot, along the look */
+    bvr_shot.scoped = 0;
+    if (vr_scope_aim(NULL)) {                                     /* scoped: the game's shot, along the look */
+        if (vr_active() && black_pc_ram_span(0x2D45D4u, 4u) && black_pc_ram_span(shot, 8u)) {
+            ctl = GUEST32(shot + 4u);
+            actor = black_pc_ram_span(ctl + 0xF0u, 4u) ? GUEST32(ctl + 0xF0u) : 0u;
+            if (actor && actor == GUEST32(0x2D45D4u) + 0x30u) { bvr_shot.scoped = 1; bvr_shot.actor = actor; }
+        }
+        return;
+    }
     if (!vr_active() || !cfg->aim_barrel || cfg->aim_mode != VR_AIM_HAND || bvr.mode != VR_PRESENT_STEREO ||
         !bvr_gun_fx() || !bvr_fxl.ok || !bvr.yv_ok || !black_pc_ram_span(0x2D45D4u, 4u) || !black_pc_ram_span(shot, 8u))
         return;
@@ -1481,7 +1489,7 @@ static void black_vr_shot_begin(uint32_t shot)
     bvr_shot.on = 1;
     bvr_shot.actor = actor;
 }
-static void black_vr_shot_end(void) { bvr_shot.on = 0; }
+static void black_vr_shot_end(void) { bvr_shot.on = 0; bvr_shot.scoped = 0; }
 
 /* X's turn of a direction (w = 0) */
 static VrVec3 bvr_turn(VrMat4 x, VrVec3 d)
@@ -1555,6 +1563,63 @@ static void bvr_shot_log(int ok, const char *what, VrVec3 o, VrVec3 o2, VrVec3 d
 /* After 1CEF40 in the player's bullet shot: origin and direction to the drawn gun */
 static void black_vr_shot_aimed(uint32_t org, uint32_t dir)
 {
+    if (bvr_shot.scoped) {
+        /* A scoped shot: from the scope picture's centre, along it. The picture is the camera's view (w_head: the
+         * scope's aim from the eye, black_vr_camera_after_world) and the game's reticle sits on its axis, but the
+         * game starts its shot at the actor's own eye point and aims it at the weapon's aim point: measured in the
+         * harness (2026-11-16) it left 0.7-0.95 m ahead of the camera and up to half a metre beside it, 4-7 deg off the
+         * reticle (Kenny: "it's not aligned with the cross air when I aim and shoot at enemies"). Now it starts at
+         * the camera and goes along its axis; the game's spread (its turn away from the unspread direction, toward
+         * weapon+10) is kept. */
+        const uint32_t actor = bvr_shot.actor;
+        bvr_shot.scoped = 0;
+        if (bvr_f32_ok(org) && bvr_f32_ok(org + 8u) && bvr_f32_ok(dir) && bvr_f32_ok(dir + 8u)) {
+            BVR_FP_BEGIN;
+            const float upm = vr_game_config()->units_per_metre;
+            const VrVec3 S = vgm_col(bvr.w_head, 0), U = vgm_col(bvr.w_head, 1), C = vgm_col(bvr.w_head, 3);
+            const VrVec3 o = vrm_v3(bvr_f32(org), bvr_f32(org + 4u), bvr_f32(org + 8u));
+            const VrVec3 d0 = vrm_v3(bvr_f32(dir), bvr_f32(dir + 4u), bvr_f32(dir + 8u)), po = vrm_sub(o, C);
+            const uint32_t weapon = black_pc_ram_span(actor + 0x29Cu, 4u) ? GUEST32(actor + 0x29Cu) : 0u;
+            const float len = vrm_len(d0);
+            VrVec3 A = vgm_col(bvr.w_head, 2), d = d0, u = d0, r;
+            static unsigned n;
+            int ok = 0;
+            if (vrm_normalize(&A) && vrm_normalize(&d) && len > 1e-6f && vrm_len(po) < 3.0f * upm) {
+                if (vrm_dot(A, d) < 0.0f) A = vrm_scale(A, -1.0f);            /* the axis the game shoots along */
+                if (black_pc_ram_span(weapon + 0x10u, 0x10u) && bvr_f32_ok(weapon + 0x10u) && bvr_f32_ok(weapon + 0x18u)) {
+                    u = vrm_sub(vrm_v3(bvr_f32(weapon + 0x10u), bvr_f32(weapon + 0x14u), bvr_f32(weapon + 0x18u)), o);
+                    if (vrm_len(u) < 0.05f * upm || vrm_dot(u, d) <= 0.0f) u = d;
+                }
+                r = A;
+                if (vrm_normalize(&u) && vrm_dot(u, d) > 0.9f) {
+                    /* the spread: d turned by the turn taking u onto the axis (Rodrigues) */
+                    VrVec3 axis = vrm_cross(u, A);
+                    const float sn = vrm_len(axis), c = vrm_dot(u, A);
+                    if (sn > 1e-6f) {
+                        axis = vrm_scale(axis, 1.0f / sn);
+                        r = vrm_add(vrm_add(vrm_scale(d, c), vrm_scale(vrm_cross(axis, d), sn)),
+                                    vrm_scale(axis, vrm_dot(axis, d) * (1.0f - c)));
+                    } else r = d;
+                }
+                if (vrm_normalize(&r)) {
+                    bvr_put(org, C.x); bvr_put(org + 4u, C.y); bvr_put(org + 8u, C.z);
+                    bvr_put(dir, r.x * len); bvr_put(dir + 4u, r.y * len); bvr_put(dir + 8u, r.z * len);
+                    ok = 1;
+                }
+            }
+            if (n++ < 8u || !(n % 50u) || getenv("BLACKVR_AIM_LOG"))
+                fprintf(stderr, "[BLACK_VR] scoped shot %u: %s; the game's left %.2f deg right, %.2f deg up of it, from %.2f m "
+                        "right, %.2f m up, %.2f m ahead of the camera; now %.2f deg right, %.2f deg up (the spread)\n",
+                        n, ok ? "from the scope's centre along it" : "kept as the game's",
+                        atan2((double)vrm_dot(d, S), (double)vrm_dot(d, A)) / VRM_DEG,
+                        atan2((double)vrm_dot(d, U), (double)vrm_dot(d, A)) / VRM_DEG,
+                        (double)(vrm_dot(po, S) / upm), (double)(vrm_dot(po, U) / upm), (double)(vrm_dot(po, A) / upm),
+                        ok ? atan2((double)vrm_dot(r, S), (double)vrm_dot(r, A)) / VRM_DEG : 0.0,
+                        ok ? atan2((double)vrm_dot(r, U), (double)vrm_dot(r, A)) / VRM_DEG : 0.0);
+            BVR_FP_END;
+        }
+        return;
+    }
     if (!bvr_shot.on) return;
     bvr_shot.on = 0;                                            /* once per shot */
     if (!bvr_f32_ok(org) || !bvr_f32_ok(org + 8u) || !bvr_f32_ok(dir) || !bvr_f32_ok(dir + 8u)) return;

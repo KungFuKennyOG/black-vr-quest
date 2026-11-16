@@ -429,6 +429,17 @@ static inline float vrg_head_roll(VrQuat head)
     return atan2f(vrm_dot(r, lu), vrm_dot(r, lr));
 }
 
+/* Where the scope picture's centre is shown, as a pitch above the head's forward (rad; negative: below). cfg_deg > 90:
+ * the middle of the eyes' vertical field of view (up / down: each eye's angles, down negative). A Quest's view
+ * reaches further down than up, so a picture centred on the head's forward sits high in what the wearer sees
+ * (Kenny 2026-11-16: "it doesn't feel like it's at the center of the screen (like the whole thing)"). */
+static inline float vrg_scope_centre_pitch(float cfg_deg, float up0, float down0, float up1, float down1)
+{
+    float a = cfg_deg > 90.0f ? 0.25f * (up0 + down0 + up1 + down1) : cfg_deg * 0.017453292f;
+    if (!(a == a)) a = 0.0f;
+    return a > 0.35f ? 0.35f : a < -0.35f ? -0.35f : a;
+}
+
 /* `aim` (level) with the head's roll: what the scoped picture is drawn with. Shown head-locked, its horizon then
  * lies level in the world whichever way the head leans over the stock. */
 static inline VrQuat vrg_scope_view_rotation(VrQuat aim, VrQuat head)

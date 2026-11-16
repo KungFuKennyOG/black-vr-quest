@@ -84,6 +84,7 @@ static const char k_default_ini[] =
     "scope_zoom = 2.5\n"
     "scope_view = zoom        ; zoom: the scope zooms the 3D view, aimed with the gun | flat: a flat window\n"
     "scope_mono = on          ; on: in the scope both eyes see the same image (easier at high zoom)\n"
+    "scope_height = auto      ; auto: the scope sits in the middle of the headset's view | degrees above straight ahead\n"
     "fov_margin = 1.10\n"
     "bob_filter = 1\n"
     "hud_distance = 2.0       ; metres: the head-locked HUD\n"

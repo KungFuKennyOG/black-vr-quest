@@ -73,3 +73,27 @@ two-handed: the two-hand hold dropped, the stock read as gone and the aim held i
   of the gun hand (`scope_stock_held`), not the two-hand aim's own test.
 - Losing the off hand for more than 3 updates hands the aim to the gun hand's ray from where it is (no jump); the
   stock takes over again when the hand comes back (`vrg_scope_rebase`). Tests: `test_scope_aim`.
+
+## Headset, 2026-11-16: "not aligned with the cross air when I aim and shoot", "doesn't feel like it's at the center of the screen (like the whole thing)"
+
+**Shots.** Scoped, the game's own shot was kept ("it goes where the scope's centre looks"). It does not: the game
+starts the shot at the actor's eye point and aims it at the weapon's aim point. Harness (level 5, the SVD, raise +
+twohand, `[BLACK_VR] scoped shot` lines): the shot left 0.7-0.95 m ahead of the camera and up to 0.4 m beside it,
+4.4 and 7.1 degrees off the camera's axis, the reticle's line.
+- Now (`black_vr_shot_aimed`, scoped branch): the player's scoped shot starts at the camera (`w_head`) and goes along
+  its axis; the game's spread (the shot's turn away from the direction toward weapon+10) is kept. The camera is the
+  scope's view (`black_vr_camera_after_world`), so the hit is what the reticle's centre shows.
+- Log: `scoped shot N: from the scope's centre along it; the game's left ...` (first 8, then every 50th;
+  `BLACKVR_AIM_LOG=1`: all).
+
+**Centre.** The picture, the game's scope (HUD quad) and the surround were centred on the head's forward. A Quest's
+field of view reaches further down than up, so that point is above the middle of what the wearer sees.
+- Now all three sit `drop` above the head's forward: `vrg_scope_centre_pitch`, the mean of the eyes' up and down
+  angles (negative on a Quest), or `scope_height = <degrees>` in blackvr.ini (`auto` by default, -20..20).
+- Eyes (`scope_eyes`): turned so the aim lies at `drop` in the eye, and the field of view narrowed about that point
+  (`c + (t - c) / zoom`), not about the eye's axis: the aim is shown exactly at `drop`.
+- Shell: `xrs_scope_drop` (xr_shell.h) places the HUD quad (xr_session.c) and the surround (xr_panel.c).
+- Log, once: `scope view: centred N deg below straight ahead (...; the eyes see ...)`: the headset's real angles.
+
+**Harness notes.** Aiming is refused while the level's opening objective banner is up. SwiftShader runs about one frame
+a second in stereo, so the game's zoom takes a long time to come in.
