@@ -53,9 +53,7 @@ Status 2026-11-12. Harness-verified on the level 1 pistol; not run on a headset 
     the MVP in its own c10 (bit for bit). Before (603a81b), the frame's last K was used: during a burst that was a
     spinning shell's, so the lock threw the gun around (Kenny's log: "moved the wrist up to 1.85 m, turned 178°").
   - **VR recoil kick** (`recoil`, 0..2, default 1): per shot (`vr_note_shot` from the muzzle flash hook) the target
-    pose pitches up about the wrist and moves back: 3° / 2 cm one-handed, half with a two-handed gun, rising over
-    ~15 ms and settling over ~70 ms. (It was a 5° / 2.5 cm snap on the shot's frame: Kenny's video of the AK firing
-    showed the gun jumping up and back on alternate frames, his "flicking", 2026-11-15.)
+    pose pitches up 5° about the wrist and moves back 2.5 cm, decaying with a 60 ms time constant.
   - The lock L (hand frame) is published (`vr_grip_lock`, 4x4) for the muzzle flash draw (w_hand * L) and main's
     muzzle effects (back = L * grip^-1). Logcat once a second: `arms: lock (last 60 frames): game moved the wrist up to
     ... m and turned it up to ... deg, held still`.
