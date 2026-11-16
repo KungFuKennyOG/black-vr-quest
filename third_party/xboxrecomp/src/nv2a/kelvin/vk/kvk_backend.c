@@ -216,6 +216,7 @@ typedef struct KvkVs {
     int pos_class;
     uint32_t pos_consts[6];     /* VR gun latch: constant registers feeding oPos (kvk_vsh_pos_consts) */
     uint32_t *words, nwords;
+    bool rel;                   /* reads constants through the address register: a skinned mesh's bone palette */
 } KvkVs;
 
 typedef struct KvkPs {
@@ -346,7 +347,77 @@ static void skip_note(const char *why)
 }
 
 static bool is_main(uint32_t w, uint32_t h);
-/* a draw of the world (not the HUD) on the main target: what the player sees of the scene */
+/* Skinned world draws (programs that index the constants through a0: characters' bodies). Kenny 2026-11-16: on the
+ * headset the skinned bodies vanish now and then while their rigid gear stays; never on x86 / SwiftShader. Every such
+ * draw is checked (the bone palette the game sent, its opacity c0.w, its first texture, the fallback shader) and
+ * counted for the stats line, and the last frame's are kept: a both-eye capture (both thumbsticks held 2.5 s) logs
+ * them all, so a capture taken while looking at a broken body says how it was drawn. */
+typedef struct SkinRec {
+    uint32_t vs, icount, vcount;
+    float c0[4], t0[3];
+    uint8_t blend, sf, df, ztest, zfunc, zwrite, atest, afunc, aref, cull, uber, dummy, bad, vm, stereo, fog;
+} SkinRec;
+static struct { unsigned long long draws, nonfinite, huge, clear, notex, uber, vm; } s_skin;
+static SkinRec s_skin_rec[2][96];
+static int s_skin_n[2], s_skin_cur;
+static unsigned long long s_skin_frame;
+static void skin_note(const KGpuDraw *d, const KPixelState *ps, bool uber, bool dummy, bool vm, bool stereo, int cull)
+{
+    const float *c = d->gvs->constants;
+    SkinRec *r;
+    int i, bad = -1, kind = 0;
+    if (s_skin_frame != G.st.frames) { s_skin_frame = G.st.frames; s_skin_cur ^= 1; s_skin_n[s_skin_cur] = 0; }
+    s_skin.draws++;
+    for (i = 60 * 4; i < 192 * 4; i++) {
+        const float v = c[i];
+        if (!(v == v) || v > 3.0e38f || v < -3.0e38f) { bad = i; kind = 1; break; }
+        if ((v > 1.0e7f || v < -1.0e7f) && bad < 0) { bad = i; kind = 2; }
+    }
+    if (kind == 1) s_skin.nonfinite++;
+    else if (kind == 2) s_skin.huge++;
+    if (kind && s_skin.nonfinite + s_skin.huge <= 12u)
+        LOG("skin check: vs %08X frame %llu: constant c%d.%c = %g (%s) in the bone palette", d->gvs->hash,
+            (unsigned long long)G.st.frames, bad / 4, "xyzw"[bad & 3], (double)c[bad], kind == 1 ? "not finite" : "huge");
+    if ((ps->blend || ps->alpha_test) && !(c[3] > 0.02f)) {
+        if (s_skin.clear++ < 12u)
+            LOG("skin check: vs %08X frame %llu: opacity c0.w = %g with %s (blend %d %d, alpha test %d func %d ref %d)",
+                d->gvs->hash, (unsigned long long)G.st.frames, (double)c[3], ps->blend ? "blending" : "the alpha test",
+                (int)ps->blend_sfactor, (int)ps->blend_dfactor, (int)ps->alpha_test, (int)ps->alpha_func, (int)ps->alpha_ref);
+    }
+    if (dummy) s_skin.notex++;
+    if (uber) s_skin.uber++;
+    if (vm) s_skin.vm++;
+    if (s_skin_n[s_skin_cur] >= 96) return;
+    r = &s_skin_rec[s_skin_cur][s_skin_n[s_skin_cur]++];
+    memset(r, 0, sizeof(*r));
+    r->vs = d->gvs->hash; r->icount = d->icount; r->vcount = d->vcount;
+    memcpy(r->c0, c, sizeof(r->c0));
+    r->t0[0] = c[60 * 4 + 3]; r->t0[1] = c[61 * 4 + 3]; r->t0[2] = c[62 * 4 + 3];
+    r->blend = (uint8_t)ps->blend; r->sf = (uint8_t)ps->blend_sfactor; r->df = (uint8_t)ps->blend_dfactor;
+    r->ztest = (uint8_t)ps->depth_test; r->zfunc = (uint8_t)(ps->depth_func & 7); r->zwrite = (uint8_t)ps->depth_write;
+    r->atest = (uint8_t)ps->alpha_test; r->afunc = (uint8_t)ps->alpha_func; r->aref = (uint8_t)ps->alpha_ref;
+    r->cull = (uint8_t)cull; r->uber = uber; r->dummy = dummy; r->bad = (uint8_t)kind; r->vm = vm; r->stereo = stereo;
+}
+/* the skinned draws of the last finished frame and of this one so far, to the log */
+static void skin_dump(const char *why)
+{
+    int f, i;
+    LOG("skin dump (%s): %llu skinned world draws so far, %llu non-finite, %llu huge, %llu clear, %llu without a texture, "
+        "%llu on the fallback shader, %llu taken for the weapon", why, s_skin.draws, s_skin.nonfinite, s_skin.huge,
+        s_skin.clear, s_skin.notex, s_skin.uber, s_skin.vm);
+    for (f = 0; f < 2; f++) {
+        const int k = f ? s_skin_cur : s_skin_cur ^ 1;
+        for (i = 0; i < s_skin_n[k]; i++) {
+            const SkinRec *r = &s_skin_rec[k][i];
+            LOG("skin dump %s %2d: vs %08X idx %u vtx %u c0 %.3f %.3f %.3f %.3f bone0 at %.2f %.2f %.2f blend %u(%u,%u) "
+                "z t%u f%u w%u alpha t%u f%u r%u cull %u%s%s%s%s%s", f ? "now" : "prev", i, r->vs, r->icount, r->vcount,
+                (double)r->c0[0], (double)r->c0[1], (double)r->c0[2], (double)r->c0[3], (double)r->t0[0], (double)r->t0[1],
+                (double)r->t0[2], r->blend, r->sf, r->df, r->ztest, r->zfunc, r->zwrite, r->atest, r->afunc, r->aref,
+                r->cull, r->uber ? " FALLBACK-SHADER" : "", r->dummy ? " NO-TEXTURE" : "", r->bad ? " BAD-BONES" : "",
+                r->vm ? " AS-WEAPON" : "", r->stereo ? "" : " NOT-STEREO");
+        }
+    }
+}
 static bool world_main_draw(const KvkSurf *cs, bool hud);
 /* A world draw dropped because its shader or pipeline was not made in time: logged (Kenny's device logs) */
 static void world_skip_note(const KvkSurf *cs, bool hud, const char *what, uint32_t vs);
@@ -1118,6 +1189,7 @@ static KvkVs *vs_lookup(const void *program, uint32_t hash, uint32_t start, cons
         LOG("vertex program %08X/%u runs on the CPU (unsupported operation)", hash, start);
         return NULL;
     }
+    e->rel = strstr(e->src, "int(a0)") != NULL;
     e->slen = (uint32_t)strlen(e->src);
     e->sid = kvk_hash64(e->src, e->slen);
     e->pos_class = kvk_vsh_pos_class((const Nv2aVshProgram *)program);
@@ -3315,6 +3387,8 @@ static void draw_now(const KGpuDraw *d)
     }
     if (!pipe) { world_skip_note(cs, hud, "pipeline", d->gvs ? d->gvs->hash : 0u); skip_note("pipeline"); return; }
     if (uber) G.st.uber_draws++;
+    if (ve && ve->rel && world_main_draw(cs, hud))
+        skin_note(d, ps, uber, views[0] == G.dummy.view, vm, stereo, (int)pd.cull);
     s1 = tset_get(views, smps);
     if (!s1) { skip_note("texture descriptors"); return; }
 
@@ -4119,6 +4193,9 @@ void kgpu_report(void)
         (unsigned long long)G.st.tex_uploads, (unsigned long long)G.st.tset_writes, (unsigned long long)G.st.tset_flushes,
         (unsigned long long)G.st.np_vertices, (unsigned long long)G.st.np_cache_hits,
         (unsigned long long)(G.st.tex_sig_bytes >> 20));
+    LOG("skin check: %llu skinned world draws: %llu non-finite bones, %llu huge, %llu clear (opacity 0), %llu without a "
+        "texture, %llu on the fallback shader, %llu taken for the weapon", s_skin.draws, s_skin.nonfinite, s_skin.huge,
+        s_skin.clear, s_skin.notex, s_skin.uber, s_skin.vm);
     if (s_wst.waits || s_wst.skips_world)
         LOG("compiles a world draw waited for: %llu (%llu ready in time, %.1f ms in all); world draws skipped: %llu",
             s_wst.waits, s_wst.wait_hits, (double)s_wst.waited_us / 1000.0, s_wst.skips_world);
