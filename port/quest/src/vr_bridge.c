@@ -299,7 +299,9 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
                                            gun_hands == 2, dt);   /* the pistol: the hold below, not this test */
         if (gun_hands == 2) aim[gun] = two_aim;          /* a hold only (the pistol's cupped hand): the look, not the aim */
         if (g_two.engaged != was)
-            XLOGI("two-hand %s (hands %.2f m apart)", g_two.engaged ? "on" : "off", g_two.last_dist);
+            XLOGI("two-hand %s (hands %.2f m apart; gun tracked %d, in game %d, off tracked %d, off grip %.2f, gun "
+                  "two-handed %d)", g_two.engaged ? "on" : "off", g_two.last_dist, valid[gun], in_game, valid[off],
+                  off_grip, gun_hands);
         g_two_hand_on = g_two.engaged && gun_hands == 2;
         /* the look-only hold (the pistol): the two-hand test wants the off hand ahead on the gun line; the pistol's
          * hold is under and behind the grip, so it is just the grip held with the hands close (25 cm, kept to 35) */

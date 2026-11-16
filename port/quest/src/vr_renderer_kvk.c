@@ -851,7 +851,7 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
     /* the target pose of the wrist in the hand frame: rest orientation (once known), wrist_offset */
     for (i = 0; i < 9; i++) th[(i / 3) * 4 + i % 3] = s * (e->have_r0 ? e->r0[i] : q[i]);
     th[3] = target[0]; th[7] = target[1]; th[11] = target[2];
-    /* the VR recoil kick: about the wrist, pitch up and back, decaying (60 ms) after each shot */
+    /* the VR recoil kick: about the wrist, pitch up and back, eased in and out after each shot */
     {
         const float scale = vr_recoil_scale();
         const int64_t shot = vr_last_shot_ns();
@@ -860,7 +860,12 @@ static int arms_auto_grip(ArmsEntry *e, float *constants, VrMat4 k, const float 
         if (scale > 0.0f && shot > 0) {
             const float t = (float)(((int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec - shot) * 1e-9);
             if (t >= 0.0f && t < 0.4f) {
-                const float amp = scale * expf(-t / 0.06f), a = -5.0f * 0.0174533f * amp, back = 0.025f * upm * amp;
+                /* Rises over ~15 ms and settles over ~70 ms (peak 1 at ~30 ms), 3 deg / 2 cm one-handed, half of that with
+                 * a two-handed gun. It was a 5 deg snap on the shot's frame decaying over 60 ms: at the AK's ~10 shots a
+                 * second the gun jumped up and back every other frame (Kenny's video, 2026-11-15: "still flicking"). */
+                const float shape = (1.0f - expf(-t / 0.015f)) * expf(-t / 0.07f) * 1.76f;
+                const float amp = scale * shape * (e->two_checked && e->two_handed == 2 ? 0.5f : 1.0f);
+                const float a = -3.0f * 0.0174533f * amp, back = 0.02f * upm * amp;
                 const float ca = cosf(a), sa = sinf(a);
                 /* T(target) * T(0, 0, -back) * Rx(a) * T(-target) */
                 const float rx[12] = { 1, 0, 0, 0,
