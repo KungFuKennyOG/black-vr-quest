@@ -225,3 +225,7 @@ hidden by walls. Not tested on the headset or the harness (the harness has no XR
   weapon entry drawn in the frame could set it back between draws and the 120 Hz input thread now and then read that.
   Now the renderer takes the most two-handed of the frame's weapon draws and publishes it at the flip, and the hold
   (vrg_two_hand_update) rides out up to 3 updates of any dropped input on the off hand's last place.
+- **Still flicking while walking (headset, c6242a1).** The two-hand hold still dropped for ~5 updates every half
+  second while walking (not firing). The per-frame publish set 0 on any flip without a weapon draw (the eyes composed
+  again on a frame the game had not finished; the Quest's stats show many stale frames while walking). A flip with
+  no weapon draws now keeps the last value; ten in a row let it go.
