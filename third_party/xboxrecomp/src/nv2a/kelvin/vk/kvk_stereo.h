@@ -78,6 +78,11 @@ typedef struct KvkStereoFrame {
     float eye_clip[2][16];      /* per eye C, form `form` */
     float quad_mvp[2][16];      /* the HUD/menu virtual screen per eye (Vulkan clip before its y flip) */
     float misc[4];              /* x: form; y: 1 when valid; z, w: P_game depth row A = m22/m32, B = m23 (z/w = A + B/w) */
+    float laser_mvp[4][16];     /* VR laser sight, drawn in the world: [kind * 2 + eye], kind 0 the beam (unit quad x
+                                 * -0.5..0.5 across, y 0..1 along), 1 the dot (x, y -0.5..0.5); Vulkan clip before y flip */
+    float laser_misc[4];        /* x: 1 to draw it; y: beam strength; z: dot strength; w: the beam's width at its end
+                                 * over its width at the muzzle */
+    float fade;                 /* 0..1: black over the eye picture (the world fading in), not in the GLSL block */
     int valid;
 } KvkStereoFrame;
 

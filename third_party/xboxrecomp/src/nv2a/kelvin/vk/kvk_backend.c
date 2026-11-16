@@ -87,7 +87,7 @@
 #define KVK_TSET_CACHE (KVK_TSET_BUCKETS * KVK_TSET_WAYS)
 #define KVK_TSET_POOL_SETS (KVK_TSET_CACHE + 4096)     /* the cache, plus evicted sets waiting for their frame */
 #define KVK_EYEVIEW_MAX 16
-#define KVK_STEREO_BYTES 272u
+#define KVK_STEREO_BYTES 544u   /* eye_clip, quad_mvp, misc, laser_mvp, laser_misc (the GLSL KvkStereo block) */
 
 #if defined(_MSC_VER)
 #define KVK_RESTRICT __restrict
@@ -319,6 +319,8 @@ static struct {
     int region;
     bool hud, hud_used;
     uint64_t world_draws, stereo_draws;
+    KvkSurf *main_zs;           /* VR laser sight: the main target's depth this frame, and the world's depth test */
+    int main_zfunc;
 } V;
 
 /* last uploads (per chunk), so unchanged constants are not copied again */
@@ -2076,6 +2078,8 @@ static VkDeviceSize stereo_block(void)
         memcpy(p, V.st.eye_clip, 128);
         memcpy(p + 128, V.st.quad_mvp, 128);
         memcpy(p + 256, V.st.misc, 16);
+        memcpy(p + 272, V.st.laser_mvp, 256);
+        memcpy(p + 528, V.st.laser_misc, 16);
         c->stereo = true;
         c->stereo_off = off;
     }
@@ -2093,6 +2097,8 @@ static VkDeviceSize stereo_block_vm(void)
         memcpy(p, V.st_vm.eye_clip, 128);
         memcpy(p + 128, V.st_vm.quad_mvp, 128);
         memcpy(p + 256, V.st_vm.misc, 16);
+        memcpy(p + 272, V.st_vm.laser_mvp, 256);
+        memcpy(p + 528, V.st_vm.laser_misc, 16);
         c->stereo_vm = true;
         c->stereo_vm_off = off;
     }
@@ -3011,6 +3017,54 @@ static void draw_now(const KGpuDraw *d)
         persp_fx_log(d, ve, vm);
     if (stereo && !is_main(ref->gw, ref->gh)) G.st.offscreen_stereo_draws++;
     if (s_vmlog > 0 && V.st.valid) vm_log_draw(d, ve, stereo, vm, cs, zs);
+    /* RECOMP_KVK_VMATTR=<n> (debug): the first n weapon draws' vertex attributes and a checksum of their data */
+    if (vm && d->gvs) {
+        static int left = -1;
+        if (left < 0) { const char *e = getenv("RECOMP_KVK_VMATTR"); left = e ? atoi(e) : 0; }
+        if (left > 0) {
+            int a;
+            left--;
+            LOG("VMATTR f %llu ic %u vs %08X", (unsigned long long)G.st.frames, d->icount, d->gvs->hash);
+            if (left == 7) {   /* once: constants, a4 value histogram per draw, the program's relative reads */
+                const float *k = d->gvs->constants;
+                int r;
+                for (r = 0; r < 192; r++)
+                    if (k[r*4] != 0.0f || k[r*4+1] != 0.0f || k[r*4+2] != 0.0f || k[r*4+3] != 0.0f)
+                        LOG("VMCONST c%d %.5g %.5g %.5g %.5g", r, k[r*4], k[r*4+1], k[r*4+2], k[r*4+3]);
+            }
+            if (left >= 6) {
+                const KGpuAttrSrc *a4 = &d->gvs->attr[4], *a1 = &d->gvs->attr[1];
+                unsigned hist[512];
+                int64_t o;
+                char line[2048];
+                int n = 0, v;
+                memset(hist, 0, sizeof(hist));
+                if (a4->fmt == 5 && a4->data)
+                    for (o = a4->lo; o + 8 <= a4->hi; o += a4->stride) {
+                        const int16_t *q = (const int16_t *)(a4->data + o);
+                        int j;
+                        for (j = 0; j < 4; j++) { v = q[j] + 256; if (v >= 0 && v < 512) hist[v]++; }
+                    }
+                for (v = 0; v < 512 && n < 2000; v++) if (hist[v]) n += snprintf(line + n, sizeof(line) - n, " %d:%u", v - 256, hist[v]);
+                LOG("VMA4 ic %u values%s", d->icount, line);
+                if (a1->data) {
+                    const uint8_t *q = a1->data + a1->lo;
+                    LOG("VMA1 first vertices %u %u %u %u | %u %u %u %u | a4 %d %d %d %d", q[0], q[1], q[2], q[3], q[36], q[37], q[38], q[39],
+                        ((const int16_t *)(a4->data + a4->lo))[0], ((const int16_t *)(a4->data + a4->lo))[1],
+                        ((const int16_t *)(a4->data + a4->lo))[2], ((const int16_t *)(a4->data + a4->lo))[3]);
+                }
+            }
+            for (a = 0; a < 16; a++) {
+                const KGpuAttrSrc *at = &d->gvs->attr[a];
+                uint32_t sum = 0;
+                int64_t i;
+                if (!at->fmt || !at->data) continue;
+                for (i = at->lo; i < at->hi && i < at->lo + 4096; i++) sum = sum * 31u + at->data[i];
+                LOG("VMATTR   a%d fmt %u n %u stride %u data %p lo %lld hi %lld sum %08X", a, at->fmt, at->count, at->stride,
+                    (const void *)at->data, (long long)at->lo, (long long)at->hi, sum);
+            }
+        }
+    }
     /* RECOMP_KVK_SPRITELOG: blended draws into other targets of a stereo frame (effects drawn offscreen) */
     if (G.layers > 1 && V.st.valid && ps->blend && !is_main(ref->gw, ref->gh) && spritelog() && stereo_world_pass())
         LOG("SPRITE f %llu offscreen %ux%u va %08X vs %08X ic %u %s z t%d w%d f%d blend %d %d %d", (unsigned long long)G.st.frames,
@@ -3021,7 +3075,10 @@ static void draw_now(const KGpuDraw *d)
         LOG("SPRITE f %llu hud vs %08X ic %u z t%d w%d f%d blend %d %d %d", (unsigned long long)G.st.frames,
             d->gvs ? d->gvs->hash : 0u, d->icount, ps->depth_test, ps->depth_write, ps->depth_func, ps->blend,
             ps->blend_sfactor, ps->blend_dfactor);
-    if (cs && is_main(cs->gw, cs->gh) && !hud && ps->depth_write && zs) V.world_draws++;
+    if (cs && is_main(cs->gw, cs->gh) && !hud && ps->depth_write && zs) {
+        V.world_draws++;
+        if (stereo && ps->depth_test) { V.main_zs = zs; V.main_zfunc = (int)(ps->depth_func & 7); }
+    }
     if (stereo) { V.stereo_draws++; G.st.stereo_draws++; }
     if (sprite) G.st.sprite_draws++;
     if (vm) G.st.viewmodel_draws++;
@@ -3220,7 +3277,16 @@ static void draw_now(const KGpuDraw *d)
         }
         vsg[12] = viewmodel_scale(gv->hash);
         offs[1] = (uint32_t)upload_dedup(vsg, sizeof(vsg), s_last_vsg_val, &s_last_vsg.chunk, &s_last_vsg.off, &s_last_vsg.have);
-        offs[2] = (uint32_t)upload_dedup(gv->constants, 192 * 16, s_last_c_val, &s_last_c.chunk, &s_last_c.off, &s_last_c.have);
+        {
+            /* VR first-person arms: the weapon's bone palette, edited in a copy (kvk_vr_viewmodel_bones) */
+            const float *cv = gv->constants;
+            float vmk[192 * 4];
+            if (vm) {
+                memcpy(vmk, gv->constants, sizeof(vmk));
+                if (kvk_vr_viewmodel_bones(vmk, gv->attr[0].data)) cv = vmk;
+            }
+            offs[2] = (uint32_t)upload_dedup(cv, 192 * 16, s_last_c_val, &s_last_c.chunk, &s_last_c.off, &s_last_c.have);
+        }
         {
             uint8_t *q = ring_take(sizeof(acb), ualign(), &off);
             memcpy(q, acb, sizeof(acb));
@@ -3311,7 +3377,19 @@ static void draw_now(const KGpuDraw *d)
         ib_first = (uint32_t)(ib_off / (short_idx ? 2u : 4u));
     }
     vkCmdDrawIndexed(cmd(), d->icount, 1, ib_first, 0, 0);
-    if (vm && cs) draw_tint(&pd, &push_c, d->icount, ib_first, kvk_vr_viewmodel_tint());
+    if (vm && cs) {
+        /* RECOMP_KVK_VMSPLIT=1 (debug): each weapon draw of a frame gets its own tint, so the parts can be told apart */
+        static int split = -1, ord; static unsigned long long ord_frame = ~0ull;
+        uint32_t tint = kvk_vr_viewmodel_tint();
+        if (split < 0) { const char *e = getenv("RECOMP_KVK_VMSPLIT"); split = e && *e == '1'; }
+        if (split) {
+            static const uint32_t k_split[4] = { 0x80FF00FFu, 0x80FFFF00u, 0x8000FF00u, 0x800000FFu };
+            if (ord_frame != (unsigned long long)G.st.frames) { ord_frame = G.st.frames; ord = 0; }
+            if (!tint) tint = k_split[0];
+            tint = k_split[ord++ & 3];
+        }
+        draw_tint(&pd, &push_c, d->icount, ib_first, tint);
+    }
     /* BLACKVR_SPRITE_DEBUG=1: corrected screen-space effects green, blended non-perspective world-pass draws left as
      * they are red (full-screen passes among them; the HUD is never tinted) */
     if (cs && is_main(cs->gw, cs->gh) && (sprite || np_tint) && sprite_debug()) draw_tint(&pd, &push_c, d->icount, ib_first, sprite ? 0x6000FF00u : 0x600000FFu);
@@ -3564,6 +3642,8 @@ static bool compose_eyes(KvkSurf *main_cs)
     if (!vr_active() || !vr_acquire_eye_targets(eyes)) return false;
     stereo_prepare();
     vrl_relatch();                                      /* the transforms for the poses just latched */
+    vrl_laser(main_cs);                                 /* the VR laser sight, into the world (depth-tested) */
+    vrl_fade(main_cs);                                  /* the world fading in after a load */
     if (V.hud_used) {
         for (i = 0; i < KVK_MAX_SURF; i++)
             if (G.surf[i].used && G.surf[i].hud && !G.surf[i].depth && G.surf[i].va == main_cs->va) hud_cs = &G.surf[i];
@@ -3627,6 +3707,8 @@ static void flip_now(const KelvinTarget *t, unsigned int color_format)
     V.region = REGION_AUTO;
     V.hud = V.hud_used = false;
     V.world_draws = V.stereo_draws = 0;
+    V.main_zs = NULL;
+    V.main_zfunc = 0;
     /* the driver's pipeline cache: every 1800 frames, and 300 frames after the last new pipeline (a level's set is
      * then in it even if the app is killed soon after: the process ends without a shutdown on the headset) */
     {
@@ -3643,7 +3725,8 @@ static VkShaderModule fixed_module(int which)
     char *src = kvk_glsl_fixed(which);
     VkShaderModule m;
     if (!src) return VK_NULL_HANDLE;
-    m = module_from_glsl(which == KVK_FIX_FULLSCREEN_VS || which == KVK_FIX_QUAD_VS ? KVK_STAGE_VERTEX : KVK_STAGE_FRAGMENT,
+    m = module_from_glsl(which == KVK_FIX_FULLSCREEN_VS || which == KVK_FIX_QUAD_VS || which == KVK_FIX_LASER_VS ?
+                         KVK_STAGE_VERTEX : KVK_STAGE_FRAGMENT,
                          src, true);
     free(src);
     return m;

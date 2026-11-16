@@ -95,6 +95,8 @@ XrSpace shell_world_space(void) { return g_xr.world_space; }
 int shell_config_line(const char *line) { return vr_config_line(&g_xr.cfg, line); }
 void shell_set_gun_latch(int on) { g_xr.cfg.gun_latch = on; }
 int shell_gun_latch(void) { return g_xr.cfg.gun_latch; }
+float shell_haptic_fire(void) { return g_xr.cfg.haptic_fire; }
+void shell_take_pulse(int hand, float *strength, uint32_t *ms) { vrb_take_pulse(hand, strength, ms); }
 
 void shell_panel(ShellPanel *out)
 {

@@ -75,19 +75,32 @@ static void test_buttons(void)
     reset_rt(&rt);
     memset(&t, 0, sizeof(t));
     s_layout = 0;
-    /* right hand: trigger fire (analog), A reload, B melee, grip nothing; left: trigger grenade, X health pack */
+    /* right hand: trigger fire (analog), A reload, B nothing (melee is the swing), grip nothing; left: trigger grenade,
+     * X health pack */
     t.rt = 1.0f; t.lt = 0.25f; t.a = 1; t.b = 1; t.x = 1; t.rgrip = 1.0f; t.lgrip = 1.0f;
     t.ly = 1.0f;
     p = run(&c, &rt, &t, &x, 1.0 / 72.0, &a);
-    CHECK(a.in_game && (a.held & VRA_BIT(VRA_FIRE)) && (a.held & VRA_BIT(VRA_RELOAD)) && (a.held & VRA_BIT(VRA_MELEE)));
+    CHECK(a.in_game && (a.held & VRA_BIT(VRA_FIRE)) && (a.held & VRA_BIT(VRA_RELOAD)) && !(a.held & VRA_BIT(VRA_MELEE)));
     CHECK((a.held & VRA_BIT(VRA_GRENADE)) && (a.held & VRA_BIT(VRA_HEALTH_PACK)));
     CHECK(p.right_trigger == 255 && p.left_trigger == 64);
-    CHECK((p.buttons & VR_PAD_A) && (p.buttons & VR_PAD_B) && (p.buttons & VR_PAD_DPAD_DOWN));
-    CHECK(!(p.buttons & (VR_PAD_X | VR_PAD_Y | VR_PAD_LEFT_SHOULDER | VR_PAD_RIGHT_SHOULDER | VR_PAD_START)));
+    CHECK((p.buttons & VR_PAD_A) && (p.buttons & VR_PAD_DPAD_DOWN));
+    CHECK(!(p.buttons & (VR_PAD_B | VR_PAD_X | VR_PAD_Y | VR_PAD_LEFT_SHOULDER | VR_PAD_RIGHT_SHOULDER | VR_PAD_START)));
     CHECK(p.thumb_ly == 32767 && p.thumb_rx == 0 && p.thumb_ry == 0);
     vr_pad_to_xbox(&p, &digital, analog);
-    CHECK(digital == VR_PAD_DPAD_DOWN && analog[0] == 255 && analog[1] == 255 && analog[2] == 0 && analog[4] == 0);
+    CHECK(digital == VR_PAD_DPAD_DOWN && analog[0] == 255 && analog[1] == 0 && analog[2] == 0 && analog[4] == 0);
     CHECK(analog[6] == 64 && analog[7] == 255);
+    /* B (held since the run above) toggled the laser sight once, on its press only */
+    {
+        VrActionState a2;
+        run(&c, &rt, &t, &x, 1.0 / 72.0, &a2);
+        CHECK(!a2.laser_toggle);
+        t.b = 0;
+        run(&c, &rt, &t, &x, 1.0 / 72.0, &a2);
+        CHECK(!a2.laser_toggle);
+        t.b = 1;
+        run(&c, &rt, &t, &x, 1.0 / 72.0, &a2);
+        CHECK(a2.laser_toggle);
+    }
     /* head-relative locomotion: the stick turned 90 degrees left becomes strafe-left */
     x.move_rotate_deg = 90.0;
     p = run(&c, &rt, &t, &x, 1.0 / 72.0, NULL);
@@ -239,6 +252,25 @@ static void test_weapon_step(void)
     t.rx = 0.9f;
     held_frames(&c, &rt, &t, &x, dt, 5, 0);
     CHECK(rt.turn_accum_deg == -30.0);
+    /* the 3D scope view: no stick turning, the walk at a third */
+    t.rx = 0.0f;
+    held_frames(&c, &rt, &t, &x, dt, 10, 0);
+    x.scope_view = 1;
+    t.rx = 0.9f;
+    held_frames(&c, &rt, &t, &x, dt, 10, 0);
+    CHECK(rt.turn_accum_deg == -30.0);
+    t.rx = 0.0f;
+    t.ly = 0.9f;
+    {
+        VrActionState a;
+        VrPadState p = run(&c, &rt, &t, &x, dt, &a);
+        CHECK(a.move_y > 0 && a.move_y < 32767 / 2);
+        (void)p;
+        x.scope_view = 0;
+        run(&c, &rt, &t, &x, dt, &a);
+        CHECK(a.move_y > 32767 * 3 / 4);
+    }
+    t.ly = 0.0f;
 }
 
 static void test_snap_turn(void)
@@ -715,7 +747,29 @@ static void test_two_hand(void)
         f2 = vrm_q_rotate(out.orientation, V(0, 0, -1));
         CHECK(vrm_dot(f, f2) > 0.99999f);
     }
-    /* released: one-handed again, at once */
+    /* held, the off hand strays 70 deg off the controller's ray and to 1 m: still held, the aim follows it */
+    {
+        const VrVec3 far = vrm_add(gun.position, vrm_q_rotate(gun.orientation, V(-0.94f, 0.0f, -0.34f)));
+        VrVec3 want = vrm_sub(far, gun.position), f3;
+        out = vrg_two_hand_update(&th, &gc, 1, gun, 1, far, 1, 1.0 / 72.0);
+        f3 = vrm_q_rotate(out.orientation, V(0, 0, -1));
+        vrm_normalize(&want);
+        CHECK(th.engaged && vrm_dot(f3, want) > 0.9999f);
+        out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 1, 1.0 / 72.0);
+        CHECK(th.engaged);
+    }
+    /* a one-update drop (a tracking blip, the AK's flick on the headset): still held, on the off hand's last place */
+    {
+        const VrPose before = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 1, 1.0 / 72.0);
+        out = vrg_two_hand_update(&th, &gc, 1, gun, 0, V(0, 0, 0), 1, 1.0 / 72.0);
+        CHECK(th.engaged && vrm_dot(vrm_q_rotate(out.orientation, V(0, 0, -1)),
+                                    vrm_q_rotate(before.orientation, V(0, 0, -1))) > 0.99999f);
+        out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 1, 1.0 / 72.0);
+        CHECK(th.engaged && th.miss == 0 && th.blend == 1.0f);
+    }
+    /* released: one-handed again after 3 updates (25 ms at 120 Hz) */
+    for (i = 0; i < 3; i++) out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 0, 1.0 / 72.0);
+    CHECK(th.engaged);
     out = vrg_two_hand_update(&th, &gc, 1, gun, 1, off, 0, 1.0 / 72.0);
     CHECK(!th.engaged && !memcmp(&out, &gun, sizeof(out)));
     /* grip held far away (60 cm to the side): no */

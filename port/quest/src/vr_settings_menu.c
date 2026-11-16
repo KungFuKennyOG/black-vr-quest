@@ -442,6 +442,20 @@ int vr_menu_rows(int section, VrMenuRow *out, int max)
     return n;
 }
 
+/* A bool setting flipped from a button in the game (the gun hand's B: the laser sight), applied and saved at once. */
+void vrsm_toggle(int id, const char *what)
+{
+    XrShell *s = &g_xr;
+    vrsm_lock();
+    vrsm();
+    vrsm_begin_edit(s);
+    vrs_set(&S.edit, id, vrs_get(&S.edit, id) != 0.0f ? 0.0f : 1.0f);
+    vrsm_apply_live(s);
+    if (vrsm_dirty()) vrsm_save(s);
+    XLOGI("settings: %s %s (button)", what, vrs_get(&S.edit, id) != 0.0f ? "on" : "off");
+    vrsm_unlock();
+}
+
 int vr_menu_activate(int section, int row, int dir)
 {
     XrShell *s = &g_xr;

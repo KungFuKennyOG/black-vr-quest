@@ -1815,6 +1815,56 @@ static int run(int multiview)
         CHECK(shell_config_line("gun_latch = off") && shell_gun_latch() == 0 && shell_config_line("gun_latch = on") &&
               shell_gun_latch() == 1 && !shell_config_line("gun_latch = maybe") && shell_gun_latch() == 1,
               "gun_latch = on | off parses (and nothing else)");
+        /* haptic_fire: the game's shot pulse (vr_game_haptic) is scaled by it, per hand, and taken once */
+        {
+            float st = -1.0f;
+            uint32_t ms = 77;
+            CHECK(shell_haptic_fire() == 0.7f, "haptic_fire defaults to 0.7");
+            CHECK(shell_config_line("haptic_fire = 0.5") && shell_haptic_fire() == 0.5f && !shell_config_line("haptic_fire = 1.5") &&
+                  !shell_config_line("haptic_fire = loud") && shell_haptic_fire() == 0.5f, "haptic_fire parses 0..1 (and nothing else)");
+            vr_game_haptic(1, 1.0f, 40u);
+            vr_game_haptic(1, 0.2f, 10u);                    /* a weaker, shorter one does not lower the pending pulse */
+            shell_take_pulse(1, &st, &ms);
+            CHECK(st == 0.5f && ms == 40u, "pulse: scaled by haptic_fire (%.2f), strongest/longest kept (%u ms)", st, ms);
+            shell_take_pulse(1, &st, &ms);
+            CHECK(st == 0.0f && ms == 0u, "pulse: taken once");
+            vr_game_haptic(0, 1.0f, 40u);
+            shell_take_pulse(1, &st, &ms);
+            CHECK(st == 0.0f, "pulse: the other hand is untouched");
+            shell_take_pulse(0, &st, &ms);
+            CHECK(st == 0.5f, "pulse: left hand got its own");
+            CHECK(shell_config_line("haptic_fire = 0"), "haptic_fire = 0 parses");
+            vr_game_haptic(1, 1.0f, 40u);
+            shell_take_pulse(1, &st, &ms);
+            CHECK(st == 0.0f, "haptic_fire = 0: no pulse");
+            shell_config_line("haptic_fire = 0.7");
+        }
+        /* first-person arms: arms and left_hand (port/notes/arms.md) */
+        {
+            int cut = -1, mode = -1, engaged = -1;
+            vr_arms_state(&cut, &mode, &engaged);
+            CHECK(cut == 1 && mode == VR_LEFT_HAND_TRACKED && engaged == 0, "arms: defaults hands / tracked / not gripping");
+            CHECK(shell_config_line("left_hand = grip") && shell_config_line("arms = full"), "arms / left_hand parse");
+            vr_arms_state(&cut, &mode, &engaged);
+            CHECK(cut == 0 && mode == VR_LEFT_HAND_GRIP, "arms = full, left_hand = grip");
+            CHECK(!shell_config_line("left_hand = sometimes") && !shell_config_line("arms = some"), "bad values refused");
+            CHECK(shell_config_line("left_hand = always") && shell_config_line("left_hand = never") &&
+                  shell_config_line("left_hand = tracked") && shell_config_line("arms = hands"), "all values parse");
+            vr_arms_state(&cut, &mode, &engaged);
+            CHECK(cut == 1 && mode == VR_LEFT_HAND_TRACKED, "back to the defaults");
+        }
+        /* auto-grip: hand_auto and wrist_offset */
+        {
+            int ha = -1;
+            float wo[3];
+            vr_arms_grip_config(&ha, wo);
+            CHECK(ha == 1 && wo[0] == 0.0f && wo[1] == -0.03f && wo[2] == 0.10f, "hand_auto on, wrist_offset 0 -0.03 0.10");
+            CHECK(shell_config_line("wrist_offset = 0.01 -0.05 0.12") && shell_config_line("hand_auto = off"), "parse");
+            vr_arms_grip_config(&ha, wo);
+            CHECK(ha == 0 && wo[0] == 0.01f && wo[1] == -0.05f && wo[2] == 0.12f, "hand_auto off, wrist_offset set");
+            CHECK(!shell_config_line("wrist_offset = 0 0") && !shell_config_line("wrist_offset = 0 0 3"), "bad wrist_offset refused");
+            CHECK(shell_config_line("wrist_offset = 0 -0.03 0.10") && shell_config_line("hand_auto = on"), "back to defaults");
+        }
         CHECK(vr_gun_latch_config()->enabled == 1 && vr_gun_latch_config()->debug_tint == (tinting ? 0x80FFFF00u : 0u),
               "gun latch config: on, debug tint %08X", vr_gun_latch_config()->debug_tint);
         gun_setup();
@@ -1980,6 +2030,8 @@ int main(int argc, char **argv)
 {
     const char *mode = argc > 1 ? argv[1] : "multiview";
     int r;
+    /* the world fade-in (black after the stereo view comes back) is off: these frames check the picture itself */
+    setenv("BLACKVR_FADE_S", "0", 0);
     /* the two-swapchain run also checks the gun latch's debug tint (cyan, half transparent) */
     if (!strcmp(mode, "two")) setenv("BLACKVR_GUN_LATCH_DEBUG", "0x80FFFF00", 1);
     else unsetenv("BLACKVR_GUN_LATCH_DEBUG");

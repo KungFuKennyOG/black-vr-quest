@@ -19,7 +19,8 @@
  *              view -> engaged; disengaged beyond 1.5x the distance or 40 degrees (hysteresis).
  *   two hand   the off hand's grip held near the gun hand (or near a point 30 cm ahead of it along the
  *              gun) engages; the aim then points from the gun hand to the off hand, with the gun hand's
- *              roll, blended in over 0.1 s; grip release (or the off hand dropping behind) disengages.
+ *              roll, blended in over 0.1 s; only letting go of the grip (or the off hand going behind the gun hand)
+ *              disengages.
  */
 #ifndef VR_GESTURES_H
 #define VR_GESTURES_H
@@ -41,7 +42,7 @@ typedef struct {
     int   scope_raise;           /* on/off */
     float scope_distance;        /* m, 0.15 */
     int   two_hand;              /* on/off */
-    float two_hand_engage_m;     /* 0.20 */
+    float two_hand_engage_m;     /* 0.60, within 30 deg of the gun's ray (0.20 caught a hand on a handguard only now and then) */
 } VrGestureConfig;
 
 static inline void vrg_default_config(VrGestureConfig *c)
@@ -57,7 +58,7 @@ static inline void vrg_default_config(VrGestureConfig *c)
     c->scope_raise = 1;
     c->scope_distance = 0.15f;
     c->two_hand = 1;
-    c->two_hand_engage_m = 0.20f;
+    c->two_hand_engage_m = 0.60f;
 }
 
 /* ---- swing -> melee ---------------------------------------------------------------------------------------- */
@@ -304,6 +305,8 @@ typedef struct {
     int   engaged;
     float blend;                 /* 0 one-handed .. 1 two-handed */
     float last_dist;
+    int   miss;                  /* updates in a row the hold's inputs dropped while engaged (held through 3) */
+    VrVec3 last_off;             /* the off hand's last position while engaged */
 } VrTwoHand;
 
 /* Updates the engagement from the off hand's grip; returns the aim pose to use for the gun hand. */
@@ -313,6 +316,13 @@ static inline VrPose vrg_two_hand_update(VrTwoHand *s, const VrGestureConfig *c,
     VrVec3 fwd = vrm_q_rotate(gun.orientation, vrm_v3(0, 0, -1)), d;
     float along, dist;
     if (!c->two_hand || !gun_ok || !off_ok || !off_grip) {
+        /* a dropped input for a tick or two (a tracking blip, a grip reading) keeps the hold on the off hand's last
+         * place: let go for one update, the aim snapped to the one-hand ray and back (the gun flicked) */
+        if (s->engaged && c->two_hand && gun_ok && s->miss < 3) {
+            s->miss++;
+            return vrg_two_hand_pose(gun, s->last_off);
+        }
+        s->miss = 0;
         s->engaged = 0;
         s->blend = 0.0f;
         return gun;
@@ -321,14 +331,21 @@ static inline VrPose vrg_two_hand_update(VrTwoHand *s, const VrGestureConfig *c,
     dist = vrm_len(d);
     along = vrm_dot(d, fwd);
     s->last_dist = dist;
+    /* the off hand must be on the gun's line ahead (within 30 deg of the controller's ray): the aim turns toward it, so a
+     * hand off to the side within reach turned the gun sideways (the shotgun held across the view on the headset) */
     if (!s->engaged) {
-        const VrVec3 ahead = vrm_add(gun.position, vrm_scale(fwd, 0.30f));
-        if ((dist <= c->two_hand_engage_m || vrm_len(vrm_sub(off_pos, ahead)) <= c->two_hand_engage_m) && along > 0.03f)
+        if (dist <= c->two_hand_engage_m && dist > 0.08f && along > dist * 0.866f)
             s->engaged = 1;
-    } else if (along < 0.02f || dist > 0.9f) {
+    } else if (along < 0.0f || dist < 0.05f || dist > 1.2f) {
+        /* held, it stays held wherever the hand goes (the gun follows it), unless it goes behind the gun hand's ray
+         * (the aim would point back), onto the gun hand, or past any reach (tracking lost). It let go 45 deg off the
+         * controller's ray, but a two-handed hold turns the gun wrist that far: Kenny, "ungrips when my left hand
+         * strays a bit too far even though im still gripping", 2026-11-14 */
         s->engaged = 0;
     }
     if (!s->engaged) { s->blend = 0.0f; return gun; }
+    s->miss = 0;
+    s->last_off = off_pos;
     s->blend += (float)(dt / 0.1);
     if (s->blend > 1.0f) s->blend = 1.0f;
     {

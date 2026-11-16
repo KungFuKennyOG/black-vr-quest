@@ -15,6 +15,7 @@
  * swapchains and Vulkan objects are made the first time it opens.
  */
 #include <errno.h>
+#include <math.h>
 #include <dirent.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -337,6 +338,174 @@ static void op_destroy(XrShell *s)
     xrs_swapchain_destroy(s, &P.sc);
     xrs_swapchain_destroy(s, &P.laser);
     P.inited = 0;
+}
+
+
+/* ---- the laser sight (blackvr.ini laser; VR SETTINGS > Comfort) ------------------------------------------------------
+ * A real-looking laser sight: the beam barely there (a red laser in the air shows only faintly, more near the muzzle),
+ * soft-edged and fading along its length; the dot small and bright with a soft glow where the shot goes. From the
+ * drawn gun's muzzle along its barrel (the game thread publishes both in the gun hand's aim space and the length:
+ * vr_set_gun_laser), placed from the same latched hand the drawn gun is (VrRenderGun.hand: two-handed aim included).
+ * Composition quads, drawn over the scene (not hidden by walls). One 64x128 swapchain, painted once: the beam's
+ * texture in x 0..15 (alpha falling along y), the dot's in x 32..63, y 0..31. */
+/* A small texture painted once on the CPU (paint: premultiplied RGBA8 rows, sRGB-encoded for an sRGB swapchain,
+ * BGRA for a BGRA one) into its own one-image swapchain, for composition quads. */
+typedef struct {
+    const char *name;
+    uint32_t w, h;
+    void (*paint)(uint8_t *px, int srgb, int bgra);
+    int inited, failed, filled;
+    XrsSwapchain sc;
+    VkCommandPool pool;
+    VkCommandBuffer cmd;
+    VkFence fence;
+    VkBuffer buf;
+    VkDeviceMemory mem;
+} PaintedTex;
+
+static int ptex_init(XrShell *s, PaintedTex *T)
+{
+    VkCommandPoolCreateInfo cp = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    VkCommandBufferAllocateInfo ca = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    VkFenceCreateInfo fi = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkBufferCreateInfo bc = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    VkMemoryAllocateInfo ma = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    VkMemoryRequirements mr;
+    VkPhysicalDeviceMemoryProperties mp;
+    uint32_t i;
+    int ok;
+    if (T->inited) return 1;
+    if (T->failed || !s->vk_device || !s->session) return 0;
+    T->failed = 1;
+    vr_queue_lock();
+    ok = xrs_swapchain_create(s, &T->sc, T->w, T->h, 1);
+    vr_queue_unlock();
+    if (!ok) { XLOGE("%s: swapchain refused", T->name); return 0; }
+    cp.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    cp.queueFamilyIndex = s->vk_queue_family;
+    if (vkCreateCommandPool(s->vk_device, &cp, NULL, &T->pool) != VK_SUCCESS) return 0;
+    ca.commandPool = T->pool;
+    ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ca.commandBufferCount = 1;
+    if (vkAllocateCommandBuffers(s->vk_device, &ca, &T->cmd) != VK_SUCCESS) return 0;
+    fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    if (vkCreateFence(s->vk_device, &fi, NULL, &T->fence) != VK_SUCCESS) return 0;
+    bc.size = T->w * T->h * 4u;
+    bc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bc.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(s->vk_device, &bc, NULL, &T->buf) != VK_SUCCESS) return 0;
+    vkGetBufferMemoryRequirements(s->vk_device, T->buf, &mr);
+    vkGetPhysicalDeviceMemoryProperties(s->vk_phys, &mp);
+    ma.allocationSize = mr.size;
+    ma.memoryTypeIndex = UINT32_MAX;
+    for (i = 0; i < mp.memoryTypeCount; i++)
+        if ((mr.memoryTypeBits & (1u << i)) &&
+            (mp.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) { ma.memoryTypeIndex = i; break; }
+    if (ma.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(s->vk_device, &ma, NULL, &T->mem) != VK_SUCCESS) return 0;
+    if (vkBindBufferMemory(s->vk_device, T->buf, T->mem, 0) != VK_SUCCESS) return 0;
+    T->inited = 1;
+    T->failed = 0;
+    XLOGI("%s ready", T->name);
+    return 1;
+}
+
+static void ptex_fill(XrShell *s, PaintedTex *T)
+{
+    VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    VkImageMemoryBarrier mb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    VkImageSubresourceRange rr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    VkBufferImageCopy bic;
+    void *map;
+    uint32_t im;
+    if (T->filled || !xrs_swapchain_acquire(s, &T->sc, &im)) return;
+    if (vkMapMemory(s->vk_device, T->mem, 0, VK_WHOLE_SIZE, 0, &map) != VK_SUCCESS) { xrs_swapchain_release(s, &T->sc); return; }
+    T->paint((uint8_t *)map, s->color_format == VK_FORMAT_R8G8B8A8_SRGB || s->color_format == VK_FORMAT_B8G8R8A8_SRGB,
+             s->color_format == VK_FORMAT_B8G8R8A8_SRGB || s->color_format == VK_FORMAT_B8G8R8A8_UNORM);
+    vkUnmapMemory(s->vk_device, T->mem);
+    vkWaitForFences(s->vk_device, 1, &T->fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(s->vk_device, 1, &T->fence);
+    vkResetCommandBuffer(T->cmd, 0);
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(T->cmd, &bi);
+    mb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    mb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.srcQueueFamilyIndex = mb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    mb.image = T->sc.images[im];
+    mb.subresourceRange = rr;
+    vkCmdPipelineBarrier(T->cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &mb);
+    memset(&bic, 0, sizeof(bic));
+    bic.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    bic.imageSubresource.layerCount = 1;
+    bic.imageExtent.width = T->w;
+    bic.imageExtent.height = T->h;
+    bic.imageExtent.depth = 1;
+    vkCmdCopyBufferToImage(T->cmd, T->buf, T->sc.images[im], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    mb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    mb.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    vkCmdPipelineBarrier(T->cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, NULL, 0, NULL, 1, &mb);
+    vkEndCommandBuffer(T->cmd);
+    submit(s, T->cmd, T->fence);
+    xrs_swapchain_release(s, &T->sc);
+    T->filled = 1;
+}
+
+
+/* (The laser sight is drawn in the world by the renderer since 2026-11-15: vr_renderer_kvk.c laser_fill.) */
+
+/* ---- the 3D scope view's surround (port/notes/scope.md) ------------------------------------------------------------
+ * The renderer draws the zoomed world over the whole view (vr_renderer_kvk.c scope_eyes) and the game draws its own
+ * scope (sniperhud: the lens vignette, reticle and X2/X5 marks) on the HUD layer, which xr_session.c then centres on
+ * the view (XRS_SCOPE_HUD_*). That picture ends at the HUD quad's edges (tan +-0.80 x +-0.60); this black surround,
+ * under the HUD layer, covers the rest of the view: transparent to tan 0.51, black by tan 0.58, out to tan +-2
+ * (63 deg). One 512x512 swapchain, painted once. */
+#define SR_TEX 512u
+#define SR_APERTURE_TAN (0.633f * XRS_SCOPE_HUD_TAN)   /* black by 0.73x, inside the quad's 0.75x height */
+#define SR_RING_TAN 2.0f
+
+static void sr_paint(uint8_t *px, int srgb, int bgra)
+{
+    const float half = (float)SR_TEX * 0.5f, r_ap = SR_APERTURE_TAN / SR_RING_TAN;
+    uint32_t x, y;
+    (void)srgb; (void)bgra;             /* black: the same bytes in every format */
+    for (y = 0; y < SR_TEX; y++)
+        for (x = 0; x < SR_TEX; x++) {
+            const float u = ((float)x + 0.5f - half) / half, v = ((float)y + 0.5f - half) / half;
+            float t = (sqrtf(u * u + v * v) - r_ap) / (r_ap * 0.15f);
+            uint8_t *o = px + (y * SR_TEX + x) * 4u;
+            t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+            o[0] = o[1] = o[2] = 0;
+            o[3] = (uint8_t)(t * t * (3.0f - 2.0f * t) * 255.0f + 0.5f);
+        }
+}
+
+static struct {
+    PaintedTex t;
+    XrCompositionLayerQuad q;
+} SR = { { "scope surround", SR_TEX, SR_TEX, sr_paint } };
+
+uint32_t xrs_scope_layers(XrShell *s, const XrCompositionLayerBaseHeader **out, uint32_t cap)
+{
+    const float dist = 10.0f;
+    if (cap < 1 || !(vr_scope_view() > 1.0f) || !s->view_space || !ptex_init(s, &SR.t)) return 0;
+    ptex_fill(s, &SR.t);
+    if (!SR.t.filled) return 0;
+    memset(&SR.q, 0, sizeof(SR.q));
+    SR.q.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+    SR.q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    SR.q.space = s->view_space;
+    SR.q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    SR.q.subImage.swapchain = SR.t.sc.handle;
+    SR.q.subImage.imageRect.extent.width = (int32_t)SR_TEX;
+    SR.q.subImage.imageRect.extent.height = (int32_t)SR_TEX;
+    SR.q.pose.orientation.w = 1.0f;
+    SR.q.pose.position.z = -dist;
+    SR.q.size.width = SR.q.size.height = 2.0f * SR_RING_TAN * dist;
+    out[0] = (const XrCompositionLayerBaseHeader *)&SR.q;
+    return 1;
 }
 
 static const XrsPanelOps k_ops = { op_input, op_draw, op_layers, op_destroy };

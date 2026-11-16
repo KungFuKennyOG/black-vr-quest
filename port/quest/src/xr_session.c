@@ -413,10 +413,15 @@ static void input_sync(XrShell *s, XrTime t, double dt)
         XrHapticActionInfo hi = { XR_TYPE_HAPTIC_ACTION_INFO };
         hi.action = s->act_haptic;
         hi.subactionPath = s->hand_path[h];
-        if (rumble[h] > 0.02f) {
+        float pulse = 0.0f;
+        uint32_t pulse_ms = 0;
+        float amp;
+        vrb_take_pulse(h, &pulse, &pulse_ms);
+        amp = pulse > rumble[h] ? pulse : rumble[h];   /* a shot pulse rides on top of the game's rumble */
+        if (amp > 0.02f) {
             XrHapticVibration vib = { XR_TYPE_HAPTIC_VIBRATION };
-            vib.amplitude = rumble[h] > 1.0f ? 1.0f : rumble[h];
-            vib.duration = 50000000;   /* 50 ms, refreshed every frame while held */
+            vib.amplitude = amp > 1.0f ? 1.0f : amp;
+            vib.duration = pulse_ms > 50u && pulse > 0.02f ? (XrDuration)pulse_ms * 1000000 : 50000000;   /* 50 ms, refreshed every frame while held */
             vib.frequency = XR_FREQUENCY_UNSPECIFIED;
             xrApplyHapticFeedback(s->session, &hi, (const XrHapticBaseHeader *)&vib);
             buzzing[h] = 1;
@@ -786,7 +791,7 @@ void xrs_frame(XrShell *s)
     XrCompositionLayerProjectionView pv[VR_EYE_COUNT];
     XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
     XrCompositionLayerQuad hudq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
-    const XrCompositionLayerBaseHeader *layers[6];   /* projection, HUD or flat, settings panel + its laser */
+    const XrCompositionLayerBaseHeader *layers[10];  /* projection, scope surround, HUD or flat, settings panel + its laser */
     uint32_t nl = 0, i;
     static double last_t;
     static double t0;
@@ -880,6 +885,10 @@ void xrs_frame(XrShell *s)
             proj.viewCount = VR_EYE_COUNT;
             proj.views = pv;
             layers[nl++] = (const XrCompositionLayerBaseHeader *)&proj;
+            /* the 3D scope view: the game's own scope (on the HUD) over a black surround, both centred on the view */
+            const int scoped = vr_scope_view() > 1.0f;
+            if (renderer && mode == VR_PRESENT_STEREO && !show_quad_too && scoped)
+                nl += xrs_scope_layers(s, layers + nl, (uint32_t)(sizeof(layers) / sizeof(layers[0])) - nl);
             if (renderer && mode == VR_PRESENT_STEREO && s->submit.hud && s->hud.handle) {
                 /* the HUD: head-locked (the compositor keeps it on the current head pose), premultiplied alpha */
                 const VrHudLayout *hl = vr_hud_layout();
@@ -890,7 +899,11 @@ void xrs_frame(XrShell *s)
                 hudq.subImage.imageRect.extent.width = (int32_t)s->hud.width;
                 hudq.subImage.imageRect.extent.height = (int32_t)s->hud.height;
                 hudq.pose = identity_pose();
-                {
+                if (scoped) {
+                    /* the scope's picture centred on the view (its centre is the zoomed gun line), far out (the eyes
+                     * look through it at the distance), XRS_SCOPE_HUD_TAN wide */
+                    hudq.pose.position.z = -XRS_SCOPE_HUD_DIST;
+                } else {
                     /* turned about the eyes' x axis by hud_height, still facing them: BLACK's HUD lives along the
                      * top of its image, 22 deg above the view centre when level */
                     const float a = hl->pitch_deg * 0.017453292f;
@@ -899,8 +912,8 @@ void xrs_frame(XrShell *s)
                     hudq.pose.position.y = hl->distance_m * sinf(a);
                     hudq.pose.position.z = -hl->distance_m * cosf(a);
                 }
-                hudq.size.width = hl->width_m;
-                hudq.size.height = hl->width_m * (float)s->hud.height / (float)s->hud.width;
+                hudq.size.width = scoped ? 2.0f * XRS_SCOPE_HUD_TAN * XRS_SCOPE_HUD_DIST : hl->width_m;
+                hudq.size.height = hudq.size.width * (float)s->hud.height / (float)s->hud.width;
                 layers[nl++] = (const XrCompositionLayerBaseHeader *)&hudq;
             }
         }
@@ -932,6 +945,13 @@ void xrs_frame(XrShell *s)
     ei.layers = layers;
     xrEndFrame(s->session, &ei);
     pthread_mutex_unlock(&s->queue_lock);
+}
+
+/* xr_panel.c's scope surround; a build without the panel draws none */
+__attribute__((weak)) uint32_t xrs_scope_layers(XrShell *s, const XrCompositionLayerBaseHeader **out, uint32_t cap)
+{
+    (void)s; (void)out; (void)cap;
+    return 0;
 }
 
 void xrs_session_destroy(XrShell *s)

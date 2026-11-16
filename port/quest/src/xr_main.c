@@ -40,6 +40,9 @@ XrShell g_xr;
 #ifndef BLACKVR_XBE_SIG
 #define BLACKVR_XBE_SIG ""
 #endif
+#ifndef BLACKVR_GIT
+#define BLACKVR_GIT "unknown commit"
+#endif
 #ifndef BLACKVR_VERSION
 #define BLACKVR_VERSION "dev"
 #endif
@@ -75,15 +78,26 @@ static const char k_default_ini[] =
     "world_scale = 1.0        ; game units per metre (tune if the world feels too big/small)\n"
     "max_head_offset = 0.5\n"
     "aim_converge = 10.0\n"
+    "aim_barrel = on          ; on: shots converge on the gun's barrel line (off: on the controller's ray)\n"
     "hand_weapon = 1\n"
     "weapon_offset = 0.12 -0.18 0.30\n"
     "scope_zoom = 2.5\n"
+    "scope_view = zoom        ; zoom: the scope zooms the 3D view, aimed with the gun | flat: a flat window\n"
+    "scope_mono = on          ; on: in the scope both eyes see the same image (easier at high zoom)\n"
     "fov_margin = 1.10\n"
     "bob_filter = 1\n"
     "hud_distance = 2.0       ; metres: the head-locked HUD\n"
     "hud_width = 2.4          ; metres (4:3)\n"
+    "arms = hands             ; hands: the arms end at the wrists | full: the game's whole arms\n"
+    "left_hand = tracked      ; tracked: follows your off controller | grip | always | never\n"
+    "hand_auto = on           ; on: the game's right hand is placed on your hand for every gun (measured)\n"
+    "wrist_offset = 0 -0.03 0.10 ; metres from the controller to your wrist: right, up, back\n"
+    "recoil = 1.0             ; 0..2: the gun's kick in your hand per shot (0 = none)\n"
+    "haptic_fire = 0.7        ; 0..1: shot pulse on the gun hand (0 = off); the game's own rumble (hits) stays\n"
     "hud_height = -12         ; degrees: the in-game HUD below (-) or above eye level\n"
     "tutorial_hints = on      ; on: mission 1's control hints every time (off: only until you beat it, as the game does)\n"
+    "laser = off              ; on: a laser sight from the gun's muzzle along its barrel, to where the shot goes\n"
+    "skip_movies = off        ; on: the movie cutscenes end at once (the in-engine scenes still play)\n"
     "gun_latch = on           ; on | off: the weapon follows the controller at display time\n"
     "# env RECOMP_BLACK_HZ=60\n"
     "# In the headset: Options -> VR SETTINGS (settings_menu = panel: the floating panel instead)\n";
@@ -337,7 +351,7 @@ void android_main(struct android_app *app)
     /* Device preflight (port/notes/device-preflight.md): one "PREFLIGHT <check>: OK|WARN|FAIL" line per check, tag
      * BlackVR, before anything can crash for a device-only reason. The game folder and storage are checked while
      * finding the folder; the rest after blackvr.ini, whose "env BLACKVR_PREFLIGHT=0" line skips them. */
-    bvr_pf_begin(BLACKVR_VERSION);
+    bvr_pf_begin(BLACKVR_VERSION " (" BLACKVR_GIT ", built " __DATE__ " " __TIME__ ")");
     find_game_root(s);
     load_config(s);
     export_config(s);

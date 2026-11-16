@@ -223,17 +223,26 @@ typedef struct {
     float units_per_metre;     /* == VrFrameState.world_scale */
     float max_head_offset_m;   /* clamp for positional head offset */
     float aim_converge_m;      /* hand-aim convergence distance */
+    int   aim_barrel;          /* 1: the shot converges on the drawn gun's barrel line (else on the controller's ray) */
     float vm_offset_m[3];      /* viewmodel natural offset in aim space (x right, y up, z fwd) */
-    float scope_zoom_min;      /* zoom factor at/above which the scope goes flat */
+    float scope_zoom_min;      /* zoom factor at/above which the scope view starts */
+    int   scope_3d;            /* 1: the scope view zooms the 3D view, aimed with the gun (DrBeef's ports); 0: a flat
+                                * head-locked window (blackvr.ini scope_view = zoom | flat) */
+    int   scope_mono;          /* 1: in the 3D scope view both eyes see the same image (blackvr.ini scope_mono) */
     float fov_margin;          /* game FOV enlargement factor over the eye FOV union */
     int   bob_filter;          /* 1: low-pass the camera's vertical position */
     int   hand_weapon;         /* 1: move first-person weapon to the aim hand */
     int   tutorial_hints;      /* 1: mission 1's control hints show also after it was completed (game: until then) */
+    int   laser;               /* 1: a laser sight from the drawn gun's muzzle along its barrel (blackvr.ini laser) */
+    int   skip_movies;         /* 1: every movie (FMV cutscene) ends at its first frame (blackvr.ini skip_movies) */
 } VrGameConfig;
 const VrGameConfig *vr_game_config(void);
 
 /* Rumble from the game (XInput motor speeds 0..65535). */
 void vr_set_rumble(uint16_t left_motor, uint16_t right_motor);
+/* A short haptic pulse from the game (game thread): hand 0 left / 1 right, strength 0..1 (scaled by the ini's
+ * haptic_fire), milliseconds. Used for the player's shots (the muzzle flash draw). */
+void vr_game_haptic(int hand, float strength, uint32_t ms);
 /* Pad state for the runtime's XInput path; 0 when not connected. */
 int vr_get_pad(VrPadState *out);
 
@@ -405,6 +414,42 @@ const VrGameGun *vr_game_gun(void);   /* the one stored with the newest camera (
  * renderer moves a draw only when its position is made through one of
  * these bit for bit. The renderer implements it; the shell has a no-op. */
 void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register);
+/* Game thread, with the weapon mesh's MVP (after vr_mark_viewmodel_mvp): K = hand_from_model (row-major 4x4,
+ * column vectors; LH, game units), the gun hand's aim frame from the weapon's model space (vgm_weapon_hand_frame),
+ * for the first-person arms. */
+void vr_mark_viewmodel_offhand(const float k[16], const float grip_correction[3]);   /* + the correction K used */
+/* First-person arms -> game thread: the auto-grip correction (game units, added to the weapon's grip offset) so the
+ * game's right wrist lands at blackvr.ini wrist_offset from the controller (port/notes/arms.md). */
+void vr_set_grip_correction(const float c[3]);
+void vr_grip_correction(float c[3]);
+/* the per-draw wrist lock of the last weapon render: L (row-major 4x4, column vectors) in the gun hand's aim frame
+ * (LH, game units): the drawn gun is the game's gun moved by L in that frame (identity when none) */
+void vr_set_grip_lock(const float l[16]);
+void vr_grip_lock(float l[16]);
+/* Render thread: how the game holds the gun drawn now, from its left hand at rest: 2 two-handed (left hand on the gun
+ * ahead: the grip takes it, two-handed aim), 1 a hold only (the pistol's cupped hand: the grip shows it, no aim), 0
+ * one-handed (the UZI: the grip does nothing, the left hand stays free). */
+void vr_set_gun_two_handed(int two);
+/* Game thread: the drawn gun's barrel as the game holds it (the muzzle record's at, unit, in the gun hand's LH frame,
+ * before the arms' lock), valid 0/1. Render thread: read it to point an angled gun along the controller. */
+void vr_set_gun_barrel(const float d[3], int valid);
+/* Game thread: the drawn gun's muzzle and barrel in the gun hand's OpenXR aim space (metres; x right, y up, z back),
+ * and how far the shot would go (m, to the game's aim point); valid 0/1. XR thread: the laser sight reads it. */
+void vr_set_gun_laser(const float muzzle[3], const float dir[3], float length_m, int valid);
+/* Game thread: the 3D scope view's zoom (> 1 while it is on: STEREO, a scoped weapon zoomed past scope_zoom), else 0.
+ * Render / XR / input threads read it. */
+void vr_set_scope_view(float zoom);
+/* A count of fresh controller button presses (A/B/X/Y/Menu/triggers), from the input thread; the game thread compares
+ * it with the count when a movie started, to skip the movie on any press. */
+unsigned vr_button_presses(void);
+float vr_scope_view(void);
+int vr_gun_laser(float muzzle[3], float dir[3], float *length_m);
+int vr_gun_barrel(float d[3]);
+/* Game thread: the player fired (the muzzle flash was drawn). Render thread: the time of the last shot (CLOCK_MONOTONIC
+ * ns, 0 = none) and the recoil kick scale (blackvr.ini recoil). */
+void vr_note_shot(void);
+int64_t vr_last_shot_ns(void);
+float vr_recoil_scale(void);
 
 /* --- The weapon's late latch (render thread) --------------------------------
  * vr_set_render_gun(): what the frame being drawn placed its weapon at
@@ -415,8 +460,10 @@ void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register);
 typedef struct {
     VrPose   game_hand;     /* VrGameGun.hand of the frame */
     VrPose   hand;          /* the late latch's */
+    VrPose   off;           /* the off hand's aim pose, same latch (first-person arms) */
     int      hand_index;
     int      valid;
+    int      off_valid;
     uint64_t serial;        /* == VrRenderPose.serial of the latch */
 } VrRenderGun;
 void vr_set_render_gun(const VrGameGun *gun);
@@ -429,6 +476,13 @@ typedef struct {
     uint32_t debug_tint;    /* 0: off */
 } VrGunLatchConfig;
 const VrGunLatchConfig *vr_gun_latch_config(void);
+
+enum { VR_LEFT_HAND_GRIP = 0, VR_LEFT_HAND_ALWAYS = 1, VR_LEFT_HAND_NEVER = 2, VR_LEFT_HAND_TRACKED = 3 };
+/* First-person arms (render thread; port/notes/arms.md): cut = blackvr.ini arms (hands), mode = left_hand
+ * (VR_LEFT_HAND_*), engaged = the two-handed grip is on now. */
+void vr_arms_state(int *cut, int *mode, int *engaged);
+/* hand_auto (1: auto-grip on) and wrist_offset (metres, OpenXR aim space of the gun hand: x right, y up, z back) */
+void vr_arms_grip_config(int *hand_auto, float wrist_offset_m[3]);
 
 /* --- Both-eye capture (debug; port/notes/renderer.md section 12) -------------
  * A request (both thumbsticks held VR_CAPTURE_HOLD_S -- past the 1 s recentre

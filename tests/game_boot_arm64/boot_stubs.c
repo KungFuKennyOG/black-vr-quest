@@ -112,11 +112,20 @@ void vr_get_recentre(VrPose *origin) { memset(origin, 0, sizeof(*origin)); origi
 double vr_consume_turn(void) { return 0.0; }
 const VrGameConfig *vr_game_config(void) { return &s_cfg; }
 void vr_set_rumble(uint16_t l, uint16_t r) { (void)l; (void)r; }
+void vr_game_haptic(int hand, float strength, uint32_t ms) { (void)hand; (void)strength; (void)ms; }
 int  vr_get_pad(VrPadState *out) { memset(out, 0, sizeof(*out)); return 0; }
 void vr_mark_world_pass(uint32_t va, int begin) { (void)va; (void)begin; }
 /* gun latch (port/notes/gun-latch.md) */
 void vr_publish_game_gun(const VrGameGun *gun) { (void)gun; }
 void vr_mark_viewmodel_mvp(const float mvp[16], int constant_register) { (void)mvp; (void)constant_register; }
+void vr_mark_viewmodel_offhand(const float a[16], const float c[3]) { (void)a; (void)c; }
+void vr_grip_correction(float c[3]) { c[0] = c[1] = c[2] = 0.0f; }
+void vr_set_gun_barrel(const float d[3], int valid) { (void)d; (void)valid; }
+void vr_set_gun_laser(const float m[3], const float d[3], float l, int v) { (void)m; (void)d; (void)l; (void)v; }
+void vr_set_scope_view(float z) { (void)z; }
+unsigned vr_button_presses(void) { return 0; }
+void vr_grip_lock(float d[16]) { int i; for (i = 0; i < 16; i++) d[i] = (i % 5 == 0) ? 1.0f : 0.0f; }
+void vr_note_shot(void) { }
 /* VR controls (port/notes/xr-shell.md "Input") */
 void vr_set_action_resolver(int (*resolve)(int slot)) { (void)resolve; }
 void vr_publish_game_input(const VrGameInputState *s) { (void)s; }

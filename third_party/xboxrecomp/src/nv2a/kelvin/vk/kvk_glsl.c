@@ -58,7 +58,8 @@ static const char kvk_push[] =
 "layout(push_constant) uniform KvkPush { vec4 p0; vec4 p1; uvec4 texlayer; uvec4 dflags; } pc;\n";
 
 static const char kvk_stereo[] =
-"layout(std140, set = 0, binding = 5) uniform KvkStereo { mat4 eye_clip[2]; mat4 quad_mvp[2]; vec4 st_misc; };\n"
+"layout(std140, set = 0, binding = 5) uniform KvkStereo { mat4 eye_clip[2]; mat4 quad_mvp[2]; vec4 st_misc;\n"
+"    mat4 laser_mvp[4]; vec4 laser_misc; };\n"
 /* The D3D-convention clip position (y up, z in [0, 1]) as Vulkan wants it: the eye's correction for world draws,
  * then y down. */
 "vec4 kvk_finish(vec4 p) {\n"
@@ -947,6 +948,47 @@ char *kvk_glsl_fixed(int which)
             /* p0.x layer; p0.y < 0: opaque (a menu frame), else premultiplied colour scaled by p0.y (the HUD) */
             "    vec4 c = texture(Tex0, vec3(v_uv, pc.p0.x));\n"
             "    o_color = pc.p0.y < 0.0 ? vec4(c.rgb, 1.0) : c * pc.p0.y;\n"
+            "}\n");
+        break;
+    case KVK_FIX_LASER_VS:
+        ks_add(&b, "%s", kvk_stereo);
+        ks_add(&b,
+            "layout(location = 0) out vec2 v_uv;\n"
+            "void main() {\n"
+            "    vec2 c = vec2(float(gl_VertexIndex & 1), float((gl_VertexIndex >> 1) & 1));\n"
+            "    int k = int(pc.p1.y);\n"
+            "    int e = pc.p1.x < 0.0 ? int(gl_ViewIndex) : int(pc.p1.x);\n"
+            /* the beam: x across (-0.5..0.5), y from the muzzle (0) to the hit (1); the dot: centred */
+            /* the beam widens toward its end (laser_misc.w: the width there over the width at the muzzle) */
+            "    float wx = (c.x - 0.5) * (k == 0 ? mix(1.0, max(laser_misc.w, 1.0), c.y) : 1.0);\n"
+            "    gl_Position = laser_mvp[min(k, 1) * 2 + e] * vec4(wx, k == 0 ? c.y : c.y - 0.5, 0.0, 1.0);\n"
+            "    gl_Position.y = -gl_Position.y;\n"
+            /* kind 2: the fade, the whole picture */
+            "    if (k == 2) gl_Position = vec4(c * 2.0 - 1.0, 0.5, 1.0);\n"
+            "    v_uv = c;\n"
+            "}\n");
+        break;
+    case KVK_FIX_LASER_PS:
+        ks_add(&b,
+            "layout(location = 0) in vec2 v_uv;\n"
+            "layout(location = 0) out vec4 o_color;\n"
+            "void main() {\n"
+            "    vec3 red = vec3(1.0, 0.10, 0.06);\n"
+            "    float a;\n"
+            "    if (pc.p1.y > 1.5) { o_color = vec4(0.0, 0.0, 0.0, pc.p0.x); return; }\n"
+            "    if (pc.p1.y < 0.5) {\n"
+            /* a faint trace off the muzzle (the light in the air close to it), gone by the end of its quad */
+            "        float x = (v_uv.x - 0.5) * 2.0, f = 1.0 - v_uv.y;\n"
+            "        a = exp(-x * x * 40.0) * 0.8 + exp(-x * x * 5.0) * 0.2;\n"
+            "        a *= smoothstep(0.0, 0.03, v_uv.y) * f * f;\n"
+            "    } else {\n"
+            "        vec2 d = (v_uv - 0.5) * 2.0;\n"
+            "        float r2 = dot(d, d);\n"
+            /* a hot pinpoint in a tight glow */
+            "        a = exp(-r2 * 28.0) * 1.8 + exp(-r2 * 6.0) * 0.45;\n"
+            "    }\n"
+            "    a = clamp(a * pc.p0.x, 0.0, 1.0);\n"
+            "    o_color = vec4(mix(red, vec3(1.0, 0.85, 0.8), a * a * 0.5) * a, a);\n"
             "}\n");
         break;
     case KVK_FIX_COPY_PS:

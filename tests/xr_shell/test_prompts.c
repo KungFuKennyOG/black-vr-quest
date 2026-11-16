@@ -55,6 +55,10 @@ static uint32_t actions_of(VrPromptInput in, int left_handed, int scope_up)
             case VRP_MENU: t.menu = 1; break;
             default: break;
             }
+            switch (in.kind) {
+            case VRP_SWING: x.melee_swing = time < 0.05 + dt; break;   /* the swing detector fires once */
+            default: break;
+            }
         }
         x.game_ticks = ++tick;
         vr_map_actions(&c, &rt, &t, &x, dt, &a);

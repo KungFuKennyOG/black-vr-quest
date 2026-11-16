@@ -369,6 +369,48 @@ static void test_weapon_to_hand(void)
     CHECK(vnear(vgm_col(moved, 2), vgm_col(w_hand, 2), 1e-5));
 }
 
+/* First-person arms: the hand frame K (model -> gun hand aim frame) agrees with the re-target, the off-hand mirror
+ * puts a mirrored point at the off controller, and the grip snap puts the off hand straight ahead of the gun hand. */
+static void test_arms_frames(void)
+{
+    const float upm = 100.0f;
+    const VrMat4 w_head = vgm_lh_from_pose(pose(10, 0, 0, 1, 1.7f, 2), upm);
+    const VrMat4 w_entity = vgm_lh_from_pose(pose(25, -12, 0, 1, 1.7f, 2), upm);
+    const VrPose hand_p = pose(40, -20, 10, 1.3f, 1.3f, 1.7f), off_p = pose(-30, 15, 5, 0.9f, 1.25f, 1.5f);
+    const VrMat4 w_hand = vgm_lh_from_pose(hand_p, upm);
+    const VrVec3 grip = vrm_v3(12.0f, -18.0f, 30.0f);
+    const VrMat4 mv = vgm_lh_from_pose(pose(5, 30, -8, 0.1f, -0.2f, 0.3f), upm);   /* any rigid model-view */
+    VrMat4 yv, k, a, rel, view_model, w_off;
+    const float p[4] = { 3.0f, -4.0f, 25.0f, 1.0f };
+    float v1[4], v2[4], t[4], kp[4];
+    CHECK(vgm_weapon_to_hand(w_head, w_entity, w_hand, grip, &yv));
+    CHECK(vgm_weapon_hand_frame(w_head, w_entity, grip, mv, &k));
+    /* the re-targeted weapon: world = w_head * yv * mv * p == w_hand * k * p */
+    view_model = vrm_m4_mul(w_head, vrm_m4_mul(yv, mv));
+    vrm_m4_apply(view_model, p, v1);
+    vrm_m4_apply(vrm_m4_mul(w_hand, k), p, v2);
+    CHECK(NEAR(v1[0], v2[0], 1e-3) && NEAR(v1[1], v2[1], 1e-3) && NEAR(v1[2], v2[2], 1e-3));
+    /* the mirror: world(A p) == world_from_off * S * (k p) */
+    rel = vgm_off_hand_rel(hand_p, off_p, 0, upm);
+    CHECK(vgm_off_hand_mirror(k, rel, &a));
+    vrm_m4_apply(vrm_m4_mul(w_hand, vrm_m4_mul(k, a)), p, v1);
+    vrm_m4_apply(k, p, kp);
+    kp[0] = -kp[0];
+    w_off = vgm_lh_from_pose(off_p, upm);
+    vrm_m4_apply(w_off, kp, v2);
+    CHECK(NEAR(v1[0], v2[0], 1e-2) && NEAR(v1[1], v2[1], 1e-2) && NEAR(v1[2], v2[2], 1e-2));
+    /* gripping: the off hand straight ahead along the gun hand's forward, same orientation, at least 8 cm */
+    {
+        const VrPose ahead = { vrm_q(0, 0, 0, 1), vrm_v3(0, 0, -0.35f) }, behind = { vrm_q(0, 0, 0, 1), vrm_v3(0.1f, 0.2f, 0.05f) };
+        VrMat4 g = vgm_off_hand_rel(hand_p, vrm_pose_mul(hand_p, ahead), 1, upm);
+        CHECK(NEAR(VRM_AT(g, 0, 3), 0.0, 1e-3) && NEAR(VRM_AT(g, 1, 3), 0.0, 1e-3) && NEAR(VRM_AT(g, 2, 3), 35.0, 1e-2));
+        CHECK(NEAR(VRM_AT(g, 0, 0), 1.0, 1e-6) && NEAR(VRM_AT(g, 1, 1), 1.0, 1e-6) && NEAR(VRM_AT(g, 2, 2), 1.0, 1e-6));
+        g = vgm_off_hand_rel(hand_p, vrm_pose_mul(hand_p, behind), 1, upm);
+        CHECK(NEAR(VRM_AT(g, 2, 3), 8.0, 1e-2) && NEAR(VRM_AT(g, 0, 3), 0.0, 1e-3));
+    }
+    (void)t;
+}
+
 int main(void)
 {
     test_quat_pose();
@@ -382,6 +424,7 @@ int main(void)
     test_bob();
     test_weapon_retarget();
     test_weapon_to_hand();
+    test_arms_frames();
     printf("xr_shell math: %u checks passed\n", checks);
     return 0;
 }

@@ -23,6 +23,7 @@
 #include <math.h>
 #include <pthread.h>
 #include "xr_shell.h"
+#include "vr_settings.h"
 #include "vr_game_math.h"
 #include "vr_gestures.h"
 
@@ -94,6 +95,8 @@ static float g_trigger[2];
 static int g_have_origin, g_recentre_pending;
 static VrPose g_origin;
 static float g_rumble[2];
+static float g_pulse[2];          /* pending game haptic pulse (strength, already scaled), taken by the XR frame */
+static uint32_t g_pulse_ms[2];
 
 /* ---- latched frames (game thread) ------------------------------------------ */
 #define LATCH_RING 3
@@ -111,6 +114,18 @@ static volatile int g_cam_idx = -1;
 static uint32_t g_cam_count;                    /* cameras published: the game's rendered frames (VR controls' taps) */
 static int64_t g_cam_time_ns;
 static volatile int g_present_mode = VR_PRESENT_FLAT_MENU;
+static int64_t mono_ns(void);
+static volatile int64_t g_world_mode_ns;        /* the last time the game set a world mode (stereo / flat scope) */
+
+/* The game's mode counts as the world (in game) for 150 ms after it was last set so. The game decides per world camera,
+ * and some frames decide a flat mode for one camera and stereo again for the next: read between them (120 Hz), the
+ * controls left the game for an update -- the two-hand hold dropped a few times a second and the gun flicked
+ * (Kenny's log, 2026-11-15: "two-hand off (... in game 0 ...)" then "on" 8 ms later). */
+static int vrb_world_mode(int mode)
+{
+    return mode == VR_PRESENT_STEREO || mode == VR_PRESENT_FLAT_SCOPE ||
+           (g_world_mode_ns && mono_ns() - g_world_mode_ns < 150000000LL);
+}
 
 /* ---- render side -------------------------------------------------------------- */
 static VrEyeTransforms g_eye_tf;
@@ -197,6 +212,10 @@ static VrVec3 g_hand_vel[2];
 static int g_hand_vel_ok[2];
 static int g_duck_recal = 1, g_was_in_game;
 static VrInputContext g_last_ctx;
+static unsigned g_button_presses;                /* fresh button presses (vr_button_presses) */
+static int g_scope_one_hand;                     /* frames the 3D scope has been held one-handed */
+static int g_gun_two_handed;                     /* the drawn gun takes the off hand (set by the renderer) */
+static int g_hold_on;                            /* the pistol's look-only hold: grip held, hands close */
 static int g_two_hand_on;                       /* the two-handed aim of the last input step (latch_gun) */
 
 void vr_set_action_resolver(int (*resolve)(int slot)) { g_resolver = resolve; }
@@ -271,7 +290,7 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
     int in_game;
     const VrGestureConfig *gc = &s->cfg.gest;
     pthread_mutex_lock(&g_lock);
-    in_game = (mode == VR_PRESENT_STEREO || mode == VR_PRESENT_FLAT_SCOPE) && g_cam_time_ns &&
+    in_game = vrb_world_mode(mode) && g_cam_time_ns &&
               mono_ns() - g_cam_time_ns < 3000000000LL;
     g_touch = *touch;
     gun = s->cfg.game.aim_hand & 1;
@@ -284,11 +303,28 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
     {
         const int was = g_two.engaged;
         const float off_grip = gun ? touch->lgrip : touch->rgrip;
-        aim[gun] = vrg_two_hand_update(&g_two, gc, valid[gun] && in_game, aim[gun], valid[off], aim[off].position,
-                                       off_grip > 0.6f, dt);
+        const int gun_hands = __atomic_load_n(&g_gun_two_handed, __ATOMIC_RELAXED);   /* 0 none, 1 hold only, 2 aim */
+        const VrPose two_aim = vrg_two_hand_update(&g_two, gc, valid[gun] && in_game, aim[gun], valid[off], aim[off].position,
+                                       /* held: takes the gun at 50 %, lets go only under 25 % (a relaxed hold on a
+                                        * foregrip hovers around one threshold, and dropped the grip every second) */
+                                       (g_two.engaged ? off_grip > 0.15f : off_grip > 0.5f) &&
+                                           gun_hands == 2, dt);   /* the pistol: the hold below, not this test */
+        if (gun_hands == 2) aim[gun] = two_aim;          /* a hold only (the pistol's cupped hand): the look, not the aim */
         if (g_two.engaged != was)
-            XLOGI("two-hand %s (hands %.2f m apart)", g_two.engaged ? "on" : "off", g_two.last_dist);
-        g_two_hand_on = g_two.engaged;
+            XLOGI("two-hand %s (hands %.2f m apart; gun tracked %d, in game %d, off tracked %d, off grip %.2f, gun "
+                  "two-handed %d)", g_two.engaged ? "on" : "off", g_two.last_dist, valid[gun], in_game, valid[off],
+                  off_grip, gun_hands);
+        g_two_hand_on = g_two.engaged && gun_hands == 2;
+        /* the look-only hold (the pistol): the two-hand test wants the off hand ahead on the gun line; the pistol's
+         * hold is under and behind the grip, so it is just the grip held with the hands close (25 cm, kept to 35) */
+        {
+            const int was_hold = g_hold_on;
+            const VrVec3 dv = vrm_sub(aim[off].position, aim[gun].position);
+            const float dist = vrm_len(dv);
+            g_hold_on = gun_hands == 1 && valid[gun] && valid[off] && in_game &&
+                        (g_hold_on ? off_grip > 0.15f && dist < 0.45f : off_grip > 0.5f && dist < 0.35f);
+            if (g_hold_on != was_hold) XLOGI("hold %s (hands %.2f m apart)", g_hold_on ? "on" : "off", dist);
+        }
     }
     for (h = 0; h < 2; h++) {
         g_live.hand[h].aim = aim[h];
@@ -354,6 +390,15 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
             eye[0] = vrm_sub(head_pos, vrm_scale(right, half_ipd));
             eye[1] = vrm_add(head_pos, vrm_scale(right, half_ipd));
             scope = vrg_scope_update(&g_scope, gc, valid[gun], aim[gun], eye, fwd);
+            /* the 3D scope view, as in DrBeef's ports: a two-handed gun looks through its scope only with both hands on */
+            if (scope && s->cfg.game.scope_3d && __atomic_load_n(&g_gun_two_handed, __ATOMIC_RELAXED) == 2 &&
+                !g_two.engaged) {
+                if (!was) g_scope.engaged = 0;
+                else if (++g_scope_one_hand > 30) g_scope.engaged = 0, g_scope_one_hand = 0;  /* let go for 30 frames */
+                scope = g_scope.engaged;
+            } else {
+                g_scope_one_hand = 0;
+            }
             if (scope != was)
                 XLOGI("scope raise: %s (sight %.3f m from the eye, %.1f deg off the view, weapon scoped %d, aiming %d)",
                       scope ? "up" : "down", g_scope.last_dist, g_scope.last_angle_deg, game_known ? gin.scoped : -1,
@@ -370,11 +415,30 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
     else if (gc->scope_raise) g_aim_request = scope;
     else g_aim_request = (gun ? touch->rgrip : touch->lgrip) > 0.6f;
 
+    {
+        /* any button pressed (a fresh press), for the movie skip (vr_button_presses) */
+        static unsigned prev;
+        const unsigned now = (touch->a ? 1u : 0u) | (touch->b ? 2u : 0u) | (touch->x ? 4u : 0u) | (touch->y ? 8u : 0u) |
+                             (touch->menu ? 16u : 0u) | (touch->rt > 0.5f ? 32u : 0u) | (touch->lt > 0.5f ? 64u : 0u);
+        if (now & ~prev) __atomic_add_fetch(&g_button_presses, 1u, __ATOMIC_RELAXED);
+        if ((now ^ prev) & 15u) {
+            /* the face buttons as the headset reports them (rare: one line per press and release) */
+            static const char *const k_face[4] = { "A", "B", "X", "Y" };
+            int k;
+            for (k = 0; k < 4; k++)
+                if ((now ^ prev) & (1u << k))
+                    XLOGI("button %s %s (in game %d, two-hand %d, left grip %.2f)", k_face[k], now & (1u << k) ? "down" : "up",
+                          in_game, g_two.engaged, touch->lgrip);
+        }
+        prev = now;
+    }
     memset(&ctx, 0, sizeof(ctx));
     ctx.in_game = in_game;
     ctx.move_rotate_deg = move_rot;
     ctx.melee_swing = swing;
     ctx.scope_up = in_game && game_known && gin.scoped && gin.aiming;
+    /* the 3D scope view: a third of the walk, no stick turning (RTCWQuest's comfort rules) */
+    ctx.scope_view = in_game && vr_scope_view() > 1.0f;
     /* taps last 2 of the game's rendered frames (each has >= 1 input update; pause and menus read once a frame) */
     ctx.ticks_valid = game_known;
     ctx.game_ticks = g_cam_count;
@@ -388,6 +452,7 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
                   game_known ? gin.crouched : -1, g_csync.tries);
     }
     vr_map_actions(&s->cfg.input, &g_in_rt, touch, &ctx, dt, &act);
+    if (act.laser_toggle) vrsm_toggle(VRS_LASER, "laser sight");
     if (g_in_rt.fired_mask) {
         char line[160];
         int i, n = 0;
@@ -619,6 +684,33 @@ double vr_consume_turn(void)
 
 const VrGameConfig *vr_game_config(void) { return &g_xr.cfg.game; }
 
+void vr_game_haptic(int hand, float strength, uint32_t ms)
+{
+    const float k = g_xr.cfg.haptic_fire;
+    const int h = hand & 1;
+    float a = strength * k;
+    if (!(a > 0.0f)) return;
+    if (a > 1.0f) a = 1.0f;
+    if (ms < 5u) ms = 5u;
+    if (ms > 200u) ms = 200u;
+    pthread_mutex_lock(&g_lock);
+    if (a > g_pulse[h]) g_pulse[h] = a;
+    if (ms > g_pulse_ms[h]) g_pulse_ms[h] = ms;
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* XR thread: the pending pulse of a hand (0 when none), cleared. */
+void vrb_take_pulse(int hand, float *strength, uint32_t *ms)
+{
+    const int h = hand & 1;
+    pthread_mutex_lock(&g_lock);
+    *strength = g_pulse[h];
+    *ms = g_pulse_ms[h];
+    g_pulse[h] = 0.0f;
+    g_pulse_ms[h] = 0;
+    pthread_mutex_unlock(&g_lock);
+}
+
 void vr_set_rumble(uint16_t left_motor, uint16_t right_motor)
 {
     pthread_mutex_lock(&g_lock);
@@ -701,6 +793,7 @@ int vr_game_camera_fresh(void)
 void vr_set_present_mode(int mode)
 {
     if (mode >= VR_PRESENT_STEREO && mode <= VR_PRESENT_FLAT_SCOPE) g_present_mode = mode;
+    if (mode == VR_PRESENT_STEREO || mode == VR_PRESENT_FLAT_SCOPE) g_world_mode_ns = mono_ns();
 }
 int vr_present_mode(void) { return vrb_present_mode_now(); }
 
@@ -772,6 +865,127 @@ void vr_set_render_gun(const VrGameGun *gun)
 
 const VrRenderGun *vr_render_gun(void) { return &g_rgun; }
 
+static float g_grip_corr[3];
+
+void vr_set_grip_correction(const float c[3])
+{
+    pthread_mutex_lock(&g_lock);
+    memcpy(g_grip_corr, c, sizeof(g_grip_corr));
+    pthread_mutex_unlock(&g_lock);
+}
+
+void vr_grip_correction(float c[3])
+{
+    pthread_mutex_lock(&g_lock);
+    memcpy(c, g_grip_corr, sizeof(g_grip_corr));
+    pthread_mutex_unlock(&g_lock);
+}
+
+static float g_grip_lock[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+static int64_t g_last_shot_ns;
+
+void vr_set_grip_lock(const float l[16])
+{
+    pthread_mutex_lock(&g_lock);
+    memcpy(g_grip_lock, l, sizeof(g_grip_lock));
+    pthread_mutex_unlock(&g_lock);
+}
+
+void vr_grip_lock(float l[16])
+{
+    pthread_mutex_lock(&g_lock);
+    memcpy(l, g_grip_lock, sizeof(g_grip_lock));
+    pthread_mutex_unlock(&g_lock);
+}
+
+void vr_set_gun_two_handed(int two) { __atomic_store_n(&g_gun_two_handed, two < 0 ? 0 : two > 2 ? 2 : two, __ATOMIC_RELAXED); }
+
+unsigned vr_button_presses(void) { return __atomic_load_n(&g_button_presses, __ATOMIC_RELAXED); }
+static uint32_t g_scope_view_bits;
+void vr_set_scope_view(float zoom)
+{
+    uint32_t b;
+    if (!(zoom > 1.0f)) zoom = 0.0f;
+    memcpy(&b, &zoom, sizeof(b));
+    __atomic_store_n(&g_scope_view_bits, b, __ATOMIC_RELAXED);
+}
+float vr_scope_view(void)
+{
+    const uint32_t b = __atomic_load_n(&g_scope_view_bits, __ATOMIC_RELAXED);
+    float z;
+    memcpy(&z, &b, sizeof(z));
+    return z;
+}
+static float g_laser_p[3], g_laser_d[3], g_laser_len;
+static int64_t g_laser_ns;
+void vr_set_gun_laser(const float muzzle[3], const float dir[3], float length_m, int valid)
+{
+    pthread_mutex_lock(&g_lock);
+    if (valid) {
+        memcpy(g_laser_p, muzzle, sizeof(g_laser_p));
+        memcpy(g_laser_d, dir, sizeof(g_laser_d));
+        g_laser_len = length_m;
+        g_laser_ns = mono_ns();
+    } else {
+        g_laser_ns = 0;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+int vr_gun_laser(float muzzle[3], float dir[3], float *length_m)
+{
+    int ok;
+    pthread_mutex_lock(&g_lock);
+    memcpy(muzzle, g_laser_p, sizeof(g_laser_p));
+    memcpy(dir, g_laser_d, sizeof(g_laser_d));
+    *length_m = g_laser_len;
+    {
+        /* fresh: the game is in gameplay (BLACKVR_LASER_FRESH_MS: the x86 harness runs at ~1 frame/s) */
+        static long long fresh_ns = -1;
+        if (fresh_ns < 0) {
+            const char *e = getenv("BLACKVR_LASER_FRESH_MS");
+            fresh_ns = (e && atoll(e) > 0 ? atoll(e) : 250LL) * 1000000LL;
+        }
+        ok = g_laser_ns && mono_ns() - g_laser_ns < fresh_ns;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return ok;
+}
+static float g_gun_barrel[3];
+static int g_gun_barrel_ok;
+void vr_set_gun_barrel(const float d[3], int valid)
+{
+    pthread_mutex_lock(&g_lock);
+    if (valid) memcpy(g_gun_barrel, d, sizeof(g_gun_barrel));
+    g_gun_barrel_ok = valid;
+    pthread_mutex_unlock(&g_lock);
+}
+int vr_gun_barrel(float d[3])
+{
+    int ok;
+    pthread_mutex_lock(&g_lock);
+    memcpy(d, g_gun_barrel, sizeof(g_gun_barrel));
+    ok = g_gun_barrel_ok;
+    pthread_mutex_unlock(&g_lock);
+    return ok;
+}
+
+void vr_note_shot(void) { __atomic_store_n(&g_last_shot_ns, mono_ns(), __ATOMIC_RELAXED); }
+int64_t vr_last_shot_ns(void) { return __atomic_load_n(&g_last_shot_ns, __ATOMIC_RELAXED); }
+float vr_recoil_scale(void) { return g_xr.cfg.recoil; }
+
+void vr_arms_grip_config(int *hand_auto, float wrist_offset_m[3])
+{
+    *hand_auto = g_xr.cfg.hand_auto;
+    memcpy(wrist_offset_m, g_xr.cfg.wrist_offset_m, 3 * sizeof(float));
+}
+
+void vr_arms_state(int *cut, int *mode, int *engaged)
+{
+    *cut = g_xr.cfg.arms_cut;
+    *mode = g_xr.cfg.left_hand;
+    *engaged = __atomic_load_n(&g_two.engaged, __ATOMIC_RELAXED) != 0 || __atomic_load_n(&g_hold_on, __ATOMIC_RELAXED) != 0;
+}
+
 const VrGunLatchConfig *vr_gun_latch_config(void)
 {
     static VrGunLatchConfig c;
@@ -810,6 +1024,16 @@ static void latch_gun(XrShell *s, XrTime t)
         return;
     g_rgun.hand = pose_from_xr(&loc.pose);
     g_rgun.valid = 1;
+    {
+        /* the off hand at the same display time (first-person arms) */
+        XrSpaceLocation lo = { XR_TYPE_SPACE_LOCATION };
+        const int off = (in.hand_index & 1) ^ 1;
+        if (s->aim_space[off] && XR_SUCCEEDED(xrLocateSpace(s->aim_space[off], s->world_space, t, &lo)) &&
+            (lo.locationFlags & need) == need) {
+            g_rgun.off = pose_from_xr(&lo.pose);
+            g_rgun.off_valid = 1;
+        }
+    }
     {
         /* two-handed aim: the weapon follows the gun hand -> off hand line at display time too */
         int two;

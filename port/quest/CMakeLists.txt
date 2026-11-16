@@ -111,6 +111,17 @@ target_link_options(blackvr PRIVATE -u ANativeActivity_onCreate -Wl,-z,max-page-
 target_link_libraries(blackvr PRIVATE native_app_glue openxr_loader blackvr_imgui vulkan android log aaudio m dl)
 # For the preflight banner and its XBE check: the version, and the XBE the recompiled code was generated from (a
 # --with-game APK only; the copy on the headset is compared with it: size and the first 16 signature bytes).
+# the commit the APK was built from, for the PREFLIGHT banner (which build is on the headset)
+execute_process(COMMAND git -C "${BLACK_ROOT}" rev-parse --short HEAD OUTPUT_VARIABLE _bvr_git
+                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE _bvr_git_rc)
+if(_bvr_git_rc EQUAL 0 AND _bvr_git)
+    execute_process(COMMAND git -C "${BLACK_ROOT}" status --porcelain --untracked-files=no OUTPUT_VARIABLE _bvr_dirty
+                    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(_bvr_dirty)
+        set(_bvr_git "${_bvr_git}+local")
+    endif()
+    target_compile_definitions(blackvr PRIVATE BLACKVR_GIT="${_bvr_git}")
+endif()
 if(EXISTS "${BLACK_ROOT}/VERSION")
     file(STRINGS "${BLACK_ROOT}/VERSION" _bvr_version LIMIT_COUNT 1)
     target_compile_definitions(blackvr PRIVATE BLACKVR_VERSION="${_bvr_version}")

@@ -180,11 +180,17 @@ void vrsm_begin_edit(XrShell *s);      /* edit = the running config, restart set
 unsigned vrsm_apply_live(XrShell *s);  /* edit -> the running config; OpenXR side effects queued for the XR thread */
 void vrsm_xr_frame(XrShell *s);        /* XR thread, every frame: runs what was queued */
 int  vrsm_save(XrShell *s);
+void vrsm_toggle(int id, const char *what);   /* a bool setting flipped by a button in the game: applied, saved */
 void vrsm_ini_path(XrShell *s, char *p, size_t cap);
 void vrsm_sampler(int want);           /* the per-thread CPU sampler, while a settings page is shown */
 void vrsm_info_update(XrShell *s);
 /* xr_panel.c: the panel for this shell; call after blackvr.ini was read (it keeps that config as "as started") */
 const XrsPanelOps *xrs_panel_attach(XrShell *s);
+/* The 3D scope view (port/notes/scope.md): the HUD quad (the game's own scope picture) centred on the view, XRS_SCOPE_HUD_DIST
+ * out and tan +-XRS_SCOPE_HUD_TAN wide, over xrs_scope_layers' black surround. */
+#define XRS_SCOPE_HUD_DIST 10.0f
+#define XRS_SCOPE_HUD_TAN 0.8f
+uint32_t xrs_scope_layers(XrShell *s, const XrCompositionLayerBaseHeader **out, uint32_t cap);
 typedef struct {
     int open, inited, released;
     XrSwapchain panel, laser;
@@ -257,6 +263,7 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim[2], c
 void vrb_recentre_from(const VrPose *head);
 int  vrb_take_recentre_request(void);
 void vrb_get_rumble(float *left, float *right);
+void vrb_take_pulse(int hand, float *strength, uint32_t *ms);
 int  vrb_present_mode_now(void);
 void vrb_renderer_claim(XrShell *s);     /* the renderer takes the swapchains from the test pattern */
 void vrb_touch_debug(VrPadState *pad);   /* latest pad for the test pattern */

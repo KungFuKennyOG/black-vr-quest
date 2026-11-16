@@ -24,6 +24,8 @@ XrSpace shell_world_space(void);
 int shell_config_line(const char *line);
 void shell_set_gun_latch(int on);
 int shell_gun_latch(void);
+float shell_haptic_fire(void);
+void shell_take_pulse(int hand, float *strength, uint32_t *ms);
 /* the settings panel (port/notes/settings-panel.md) */
 typedef struct {
     int open, inited, released;

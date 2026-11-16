@@ -35,13 +35,26 @@
  *   world_scale       = 1.0       ; game units per metre
  *   max_head_offset   = 0.5       ; metres the view may lean from the body
  *   aim_converge      = 10.0      ; metres: where the hand's ray crosses the game's shot
+ *   aim_barrel        = on        ; on: the shot converges on the drawn gun's barrel line, not the controller's ray
  *   hand_weapon       = 1         ; first-person weapon follows the hand (aim = hand only)
  *   weapon_offset     = 0.12 -0.18 0.30   ; weapon grip in camera space (x right, y up, z fwd), metres
- *   scope_zoom        = 2.5       ; zoom factor at which the scope view goes flat
+ *   scope_zoom        = 2.5       ; zoom factor at which the scope view starts (2.0 at most for scoped weapons)
+ *   scope_view        = zoom      ; zoom: the 3D view zooms, aimed with the gun, in a dark ring | flat: a flat window
+ *   scope_mono        = on        ; on | off: in the 3D scope both eyes see the same image
  *   fov_margin        = 1.10      ; game frustum enlargement over the eye FOV union (late-latch room)
  *   bob_filter        = 1
  *   hud_distance      = 2.0       ; metres: the head-locked HUD / virtual screen
  *   hud_width         = 2.4       ; metres (4:3)
+ *   arms              = hands     ; hands: the first-person arms end at the wrists (VR) | full: the game's arms
+ *   left_hand         = tracked   ; tracked: the game's off hand follows the off controller (on the gun while
+ *                                 ; gripping two-handed) | grip: the game's pose, shown only while gripping
+ *                                 ; | always: the game's pose | never (port/notes/arms.md)
+ *   hand_auto         = on        ; on: the gun is placed so the game's right wrist sits at wrist_offset from the
+ *                                 ; controller, measured per weapon (vm_offset is then only the starting guess)
+ *   wrist_offset      = 0 -0.03 0.10 ; metres, controller aim space: x right, y up, z back
+ *   recoil            = 1.0       ; 0..2: the VR recoil kick per shot (the game's own recoil swing of the arm is
+ *                                 ; locked out: the gun stays rigid in the hand)
+ *   haptic_fire       = 0.7       ; 0..1: shot pulse on the gun hand's controller (0 = off; the game's own rumble stays)
  *   hud_height        = -12       ; degrees: the in-game HUD tilted below (-) or above eye level (menus and the
  *                                 ; cutscene screen stay level)
  *   gun_latch         = on        ; on | off: the first-person weapon follows the hand pose latched at display
@@ -78,6 +91,12 @@ typedef struct {
     int   multiview;
     int   locomotion;
     float hud_distance_m, hud_width_m;   /* head-locked HUD quad layer (vr-glue) */
+    float haptic_fire;       /* 0..1: strength of the shot pulse on the gun hand (0 off) */
+    int   arms_cut;          /* 1: first-person arms end at the wrists (arms = hands) */
+    int   left_hand;         /* VR_LEFT_HAND_* */
+    int   hand_auto;         /* 1: the gun is moved so the game's right wrist sits at wrist_offset from the controller */
+    float wrist_offset_m[3]; /* the wrist in the gun hand's OpenXR aim space (x right, y up, z back), metres */
+    float recoil;            /* 0..2: the VR recoil kick per shot (the game's own recoil swing is locked out) */
     float hud_pitch_deg;                 /* the in-game HUD quad tilted about the eyes (negative: below eye level) */
     int   foveation;         /* VR_FOVEATION_* */
     int   game_hz;           /* 30 | 60 -> RECOMP_BLACK_HZ / RECOMP_BLACK_60HZ */
@@ -118,6 +137,14 @@ static inline void vr_config_defaults(VrShellConfig *c)
     c->locomotion = VR_LOCO_HEAD;
     c->hud_distance_m = 2.0f;
     c->hud_width_m = 2.4f;
+    c->haptic_fire = 0.7f;
+    c->arms_cut = 1;
+    c->left_hand = VR_LEFT_HAND_TRACKED;
+    c->hand_auto = 1;
+    c->wrist_offset_m[0] = 0.0f;
+    c->wrist_offset_m[1] = -0.03f;
+    c->wrist_offset_m[2] = 0.10f;
+    c->recoil = 1.0f;
     c->hud_pitch_deg = -12.0f;      /* BLACK's HUD sits along the top of its image: 22 deg up at 0 */
     c->gun_latch = 1;
     vr_input_default_config(&c->input);
@@ -127,14 +154,19 @@ static inline void vr_config_defaults(VrShellConfig *c)
     c->game.units_per_metre = 1.0f;
     c->game.max_head_offset_m = 0.5f;
     c->game.aim_converge_m = 10.0f;
+    c->game.aim_barrel = 1;
     c->game.vm_offset_m[0] = 0.12f;
     c->game.vm_offset_m[1] = -0.18f;
     c->game.vm_offset_m[2] = 0.30f;
     c->game.scope_zoom_min = 2.5f;
+    c->game.scope_3d = 1;
+    c->game.scope_mono = 1;
     c->game.fov_margin = 1.10f;
     c->game.bob_filter = 1;
     c->game.hand_weapon = 1;
     c->game.tutorial_hints = 1;
+    c->game.laser = 0;
+    c->game.skip_movies = 0;
 }
 
 static inline char *vr_cfg_trim(char *s)
@@ -218,6 +250,30 @@ static inline int vr_config_line(VrShellConfig *c, const char *line_in)
     }
     if (!strcmp(key, "hud_distance")) { if (!vr_cfg_float(val, 0.5f, 10.0f, &f)) return 0; c->hud_distance_m = f; return 1; }
     if (!strcmp(key, "hud_width")) { if (!vr_cfg_float(val, 0.3f, 10.0f, &f)) return 0; c->hud_width_m = f; return 1; }
+    if (!strcmp(key, "arms")) {
+        if (!strcmp(val, "hands") || !strcmp(val, "cut")) c->arms_cut = 1;
+        else if (!strcmp(val, "full")) c->arms_cut = 0;
+        else return 0;
+        return 1;
+    }
+    if (!strcmp(key, "hand_auto")) return vr_cfg_bool(val, &c->hand_auto);
+    if (!strcmp(key, "recoil")) { if (!vr_cfg_float(val, 0.0f, 2.0f, &f)) return 0; c->recoil = f; return 1; }
+    if (!strcmp(key, "wrist_offset")) {
+        float v[3];
+        int b;
+        if (sscanf(val, "%f %f %f", &v[0], &v[1], &v[2]) != 3) return 0;
+        for (b = 0; b < 3; b++) { if (!(v[b] >= -0.5f && v[b] <= 0.5f)) return 0; c->wrist_offset_m[b] = v[b]; }
+        return 1;
+    }
+    if (!strcmp(key, "left_hand")) {
+        if (!strcmp(val, "tracked")) c->left_hand = VR_LEFT_HAND_TRACKED;
+        else if (!strcmp(val, "grip")) c->left_hand = VR_LEFT_HAND_GRIP;
+        else if (!strcmp(val, "always")) c->left_hand = VR_LEFT_HAND_ALWAYS;
+        else if (!strcmp(val, "never")) c->left_hand = VR_LEFT_HAND_NEVER;
+        else return 0;
+        return 1;
+    }
+    if (!strcmp(key, "haptic_fire")) { if (!vr_cfg_float(val, 0.0f, 1.0f, &f)) return 0; c->haptic_fire = f; return 1; }
     if (!strcmp(key, "hud_height")) { if (!vr_cfg_float(val, -45.0f, 30.0f, &f)) return 0; c->hud_pitch_deg = f; return 1; }
     if (!strcmp(key, "gun_latch")) return vr_cfg_bool(val, &c->gun_latch);
     if (!strcmp(key, "settings_menu")) {
@@ -269,11 +325,20 @@ static inline int vr_config_line(VrShellConfig *c, const char *line_in)
     if (!strcmp(key, "two_hand")) return vr_cfg_bool(val, &c->gest.two_hand);
     if (!strcmp(key, "world_scale")) { if (!vr_cfg_float(val, 0.001f, 1000, &f)) return 0; c->game.units_per_metre = f; return 1; }
     if (!strcmp(key, "max_head_offset")) { if (!vr_cfg_float(val, 0, 3, &f)) return 0; c->game.max_head_offset_m = f; return 1; }
+    if (!strcmp(key, "aim_barrel")) return vr_cfg_bool(val, &c->game.aim_barrel);
     if (!strcmp(key, "aim_converge")) { if (!vr_cfg_float(val, 0.5f, 1000, &f)) return 0; c->game.aim_converge_m = f; return 1; }
     if (!strcmp(key, "hand_weapon")) return vr_cfg_bool(val, &c->game.hand_weapon);
     if (!strcmp(key, "bob_filter")) return vr_cfg_bool(val, &c->game.bob_filter);
     if (!strcmp(key, "tutorial_hints")) return vr_cfg_bool(val, &c->game.tutorial_hints);
+    if (!strcmp(key, "laser")) return vr_cfg_bool(val, &c->game.laser);
+    if (!strcmp(key, "skip_movies")) return vr_cfg_bool(val, &c->game.skip_movies);
     if (!strcmp(key, "scope_zoom")) { if (!vr_cfg_float(val, 1.0f, 100, &f)) return 0; c->game.scope_zoom_min = f; return 1; }
+    if (!strcmp(key, "scope_view")) {
+        if (!strcmp(val, "zoom")) { c->game.scope_3d = 1; return 1; }
+        if (!strcmp(val, "flat")) { c->game.scope_3d = 0; return 1; }
+        return vr_cfg_bool(val, &c->game.scope_3d);         /* on | off, as VR SETTINGS saves it */
+    }
+    if (!strcmp(key, "scope_mono")) return vr_cfg_bool(val, &c->game.scope_mono);
     if (!strcmp(key, "fov_margin")) { if (!vr_cfg_float(val, 1.0f, 2.0f, &f)) return 0; c->game.fov_margin = f; return 1; }
     if (!strcmp(key, "weapon_offset")) {
         float v[3];
