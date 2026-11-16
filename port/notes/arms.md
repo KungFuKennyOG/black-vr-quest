@@ -227,3 +227,9 @@ hidden by walls. Not tested on the headset or the harness (the harness has no XR
   second while walking (not firing). The per-frame publish set 0 on any flip without a weapon draw (the eyes composed
   again on a frame the game had not finished; the Quest's stats show many stale frames while walking). A flip with
   no weapon draws now keeps the last value; ten in a row let it go.
+- **Still flicking (headset, 7d0d467): the real cause.** The new log line said `in game 0` on every drop (grip 1.00,
+  both tracked, gun two-handed 2). The game decides its mode per world camera, and some frames decide a flat mode for
+  one camera and stereo again for the next (no flat frame is ever presented: the heartbeat's flat count stays put).
+  The controls (120 Hz) read the mode between them, left the game for an update and dropped the two-hand hold. The
+  controls now count the world mode as on for 150 ms after the game last set it (`vrb_world_mode`); the settings
+  panel's own test stays immediate.

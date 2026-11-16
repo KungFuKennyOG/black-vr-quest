@@ -114,6 +114,18 @@ static volatile int g_cam_idx = -1;
 static uint32_t g_cam_count;                    /* cameras published: the game's rendered frames (VR controls' taps) */
 static int64_t g_cam_time_ns;
 static volatile int g_present_mode = VR_PRESENT_FLAT_MENU;
+static int64_t mono_ns(void);
+static volatile int64_t g_world_mode_ns;        /* the last time the game set a world mode (stereo / flat scope) */
+
+/* The game's mode counts as the world (in game) for 150 ms after it was last set so. The game decides per world camera,
+ * and some frames decide a flat mode for one camera and stereo again for the next: read between them (120 Hz), the
+ * controls left the game for an update -- the two-hand hold dropped a few times a second and the gun flicked
+ * (Kenny's log, 2026-11-15: "two-hand off (... in game 0 ...)" then "on" 8 ms later). */
+static int vrb_world_mode(int mode)
+{
+    return mode == VR_PRESENT_STEREO || mode == VR_PRESENT_FLAT_SCOPE ||
+           (g_world_mode_ns && mono_ns() - g_world_mode_ns < 150000000LL);
+}
 
 /* ---- render side -------------------------------------------------------------- */
 static VrEyeTransforms g_eye_tf;
@@ -278,7 +290,7 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
     int in_game;
     const VrGestureConfig *gc = &s->cfg.gest;
     pthread_mutex_lock(&g_lock);
-    in_game = (mode == VR_PRESENT_STEREO || mode == VR_PRESENT_FLAT_SCOPE) && g_cam_time_ns &&
+    in_game = vrb_world_mode(mode) && g_cam_time_ns &&
               mono_ns() - g_cam_time_ns < 3000000000LL;
     g_touch = *touch;
     gun = s->cfg.game.aim_hand & 1;
@@ -781,6 +793,7 @@ int vr_game_camera_fresh(void)
 void vr_set_present_mode(int mode)
 {
     if (mode >= VR_PRESENT_STEREO && mode <= VR_PRESENT_FLAT_SCOPE) g_present_mode = mode;
+    if (mode == VR_PRESENT_STEREO || mode == VR_PRESENT_FLAT_SCOPE) g_world_mode_ns = mono_ns();
 }
 int vr_present_mode(void) { return vrb_present_mode_now(); }
 
