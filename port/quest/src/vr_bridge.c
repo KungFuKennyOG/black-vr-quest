@@ -278,6 +278,19 @@ static int horizontal_yaw(VrQuat q, double *yaw)
     return 1;
 }
 
+/* The scope's stock (DrBeef's weapon_stabilised): the off hand tracked, its grip held (taken at 50 %, kept to 15 %) and
+ * within 60 cm of the gun hand. */
+static int scope_stock_held(const XrShell *s, const VrTouchState *touch, const VrPose aim[2], const int valid[2], int gun,
+                            int off)
+{
+    static int held;
+    const float g = gun ? touch->lgrip : touch->rgrip;
+    (void)s;
+    held = valid[off] && valid[gun] && vrm_len(vrm_sub(aim[off].position, aim[gun].position)) < 0.6f &&
+           (held ? g > 0.15f : g > 0.5f);
+    return held;
+}
+
 void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2], const VrPose grip[2],
                    const int valid[2], double dt)
 {
@@ -396,9 +409,11 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
              * the scope aims with the stock; it went down when the head turned 40 deg off the gun hand's ray) */
             g_scope.free_aim = g_scope.engaged && s->cfg.game.scope_3d;
             scope = vrg_scope_update(&g_scope, gc, valid[gun], aim[gun], eye, fwd);
-            /* the 3D scope view, as in DrBeef's ports: a two-handed gun looks through its scope only with both hands on */
+            /* the 3D scope view, as in DrBeef's ports: a two-handed gun looks through its scope only with both hands on
+             * (the off hand's grip held near the gun: weapon_stabilised; not the two-hand aim's own test, which also
+             * wants the hand on the controller's ray) */
             if (scope && s->cfg.game.scope_3d && __atomic_load_n(&g_gun_two_handed, __ATOMIC_RELAXED) == 2 &&
-                !g_two.engaged) {
+                !scope_stock_held(s, touch, aim, valid, gun, off)) {
                 if (!was) g_scope.engaged = 0;
                 else if (++g_scope_one_hand > 30) g_scope.engaged = 0, g_scope_one_hand = 0;  /* let go for 30 frames */
                 scope = g_scope.engaged;
@@ -421,7 +436,7 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
     {
         const int was = g_scope_aim.active;
         const int on = in_game && game_known && gin.scoped && s->cfg.game.scope_3d && scope;
-        const int stock = g_two.engaged && valid[off];
+        const int stock = scope_stock_held(s, touch, aim, valid, gun, off);
         const VrQuat q = vrg_scope_aim_update(&g_scope_aim, gc, on, g_live.head, aim[gun], stock, aim[off].position, dt);
         g_scope_aim_on = on && g_scope_aim.active;
         if (g_scope_aim_on) {

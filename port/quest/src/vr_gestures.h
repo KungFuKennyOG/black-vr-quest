@@ -377,10 +377,14 @@ static inline VrPose vrg_two_hand_update(VrTwoHand *s, const VrGestureConfig *c,
  *     turned since. Nothing jumps sideways on the way in; the pitch is the aim's own;
  *   - no roll in the aim (the renderer gives the picture the head's roll, so the horizon stays level).
  * A gun with no off hand on it (off_ok 0 from the start) uses the gun hand's own ray the same way. An off hand lost
- * while engaged holds the last aim. */
+ * for a tick or two holds the aim; for longer, the gun hand's ray takes over from where the aim is (no jump), and the
+ * stock again when the off hand comes back. (It held the last aim for good: with the gun hidden the grip read as off
+ * and the scope froze, Kenny 2026-11-15.) */
+
 typedef struct {
     int    active;
     int    stock;                /* the virtual stock (head -> off hand); 0: the gun hand's ray */
+    int    miss;                 /* updates in a row without the off hand while on the stock (held through 3) */
     float  yaw0_view, yaw0_aim;  /* rad, positive left: the head's and the aim's yaw as the scope came up */
     VrVec3 v;                    /* the smoothed aim vector (stage) */
     VrQuat q;                    /* the aim: forward -z along it, level */
@@ -395,6 +399,16 @@ static inline int vrg_dir_yaw_pitch(VrVec3 d, float *yaw, float *pitch)
     *yaw = atan2f(-d.x, -d.z);
     *pitch = atan2f(d.y, h);
     return 1;
+}
+
+/* the aim continues from where it is along raw: its yaw is counted from raw's from now on */
+static inline void vrg_scope_rebase(VrScopeAim *s, VrVec3 raw)
+{
+    float y0, p0, y1, p1;
+    if (!vrg_dir_yaw_pitch(s->v, &y0, &p0) || !vrg_dir_yaw_pitch(raw, &y1, &p1)) return;
+    s->yaw0_view += (float)vrm_wrap_rad((double)(y0 - s->yaw0_aim));
+    s->yaw0_aim = y1;
+    s->v = raw;
 }
 
 /* the level orientation looking along yaw / pitch */
@@ -434,14 +448,17 @@ static inline VrQuat vrg_scope_aim_update(VrScopeAim *s, const VrGestureConfig *
     VrVec3 raw;
     float yaw, pitch, hy, hp;
     int have_raw = 1;
-    if (!on) { s->active = 0; return gun.orientation; }
+    if (!on) { s->active = 0; s->miss = 0; return gun.orientation; }
     if (off_ok) {
         raw = vrm_sub(vrm_add(off_pos, vrm_v3(0.0f, c->scope_lift_m, 0.0f)), head.position);
-    } else if (s->active && s->stock) {
-        raw = s->v;                                   /* the off hand let go or lost: the last aim is held */
+        s->miss = 0;
+    } else if (s->active && s->stock && s->miss < 3) {
+        raw = s->v;                                   /* the off hand dropped for a tick: the aim is held */
         have_raw = 0;
+        s->miss++;
     } else {
         raw = vrm_q_rotate(gun.orientation, vrm_v3(0, 0, -1));
+        if (s->active && s->stock) { vrg_scope_rebase(s, raw); s->stock = 0; }   /* the gun hand takes over */
     }
     if (!s->active) {
         if (!vrg_dir_yaw_pitch(raw, &yaw, &pitch)) return gun.orientation;     /* no aim to start from yet */
@@ -454,13 +471,8 @@ static inline VrQuat vrg_scope_aim_update(VrScopeAim *s, const VrGestureConfig *
         const float tau = c->scope_smooth_s;
         const float k = tau > 1e-4f && dt > 0.0 ? 1.0f - expf(-(float)dt / tau) : 1.0f;
         if (off_ok && !s->stock) {                    /* the off hand came on later: the stock takes over where the */
-            float y0, p0, y1, p1;                     /* aim is (no jump): its yaw is counted from here */
-            if (vrg_dir_yaw_pitch(s->v, &y0, &p0) && vrg_dir_yaw_pitch(raw, &y1, &p1)) {
-                s->yaw0_view += (float)vrm_wrap_rad((double)(y0 - s->yaw0_aim));
-                s->yaw0_aim = y1;
-                s->v = raw;
-                s->stock = 1;
-            }
+            vrg_scope_rebase(s, raw);                 /* aim is (no jump): its yaw is counted from here */
+            s->stock = 1;
         }
         s->v = vrm_add(s->v, vrm_scale(vrm_sub(raw, s->v), k));
     }

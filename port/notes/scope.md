@@ -63,3 +63,13 @@ the off hand, lift 0.12 m, smoothing 50 ms)`.
   binoculars, far things look nearer.
 - **Reprojection.** The compositor treats the zoomed picture as the head's view. A head turn between the render and the
   display moves it as if unzoomed (zoom x too little). At 72 Hz this is a fraction of a frame.
+
+## Headset, 2026-11-15 23:29 (27f777f): "the aiming for the sniper is just stuck" -> fixed
+The log: `scope aim: on (the stock ...)`, then 0.7 s later `two-hand off (... gun two-handed 0)`. Once the zoom hides the
+gun there are no weapon draws, and the renderer's "ten flips without the gun" rule published the gun as not
+two-handed: the two-hand hold dropped, the stock read as gone and the aim held its last value for good.
+- The renderer no longer counts flips while the scope hides the gun (`scope_hides_weapon`).
+- The stock is DrBeef's `weapon_stabilised`: the off hand tracked, its grip held (50 %, kept to 15 %), within 60 cm
+  of the gun hand (`scope_stock_held`), not the two-hand aim's own test.
+- Losing the off hand for more than 3 updates hands the aim to the gun hand's ray from where it is (no jump); the
+  stock takes over again when the hand comes back (`vrg_scope_rebase`). Tests: `test_scope_aim`.

@@ -750,13 +750,27 @@ static void test_scope_aim(void)
         CHECK(y1 < y0 && y1 > y0 - (float)(2 * VRM_DEG) * 0.5f);
         off = off2;
     }
-    /* the off hand lost: the last aim is held */
+    /* the off hand lost for a tick: the last aim is held; for longer: the gun hand's ray takes over without a jump, and
+     * turns the aim from there (it froze for good, Kenny 2026-11-15) */
     {
-        float y0, y1;
+        float y0, y1, y2;
         CHECK(vrg_dir_yaw_pitch(vrm_q_rotate(q, V(0, 0, -1)), &y0, &pitch));
         q = vrg_scope_aim_update(&sa, &gc, 1, head, gun, 0, V(5, 5, 5), 1.0 / 72.0);
         CHECK(vrg_dir_yaw_pitch(vrm_q_rotate(q, V(0, 0, -1)), &y1, &pitch));
-        CHECK(fabsf(y1 - y0) < 1e-5f);
+        CHECK(fabsf(y1 - y0) < 1e-5f && sa.stock);
+        for (i = 0; i < 3; i++) q = vrg_scope_aim_update(&sa, &gc, 1, head, gun, 0, V(5, 5, 5), 1.0 / 72.0);
+        CHECK(!sa.stock);
+        CHECK(vrg_dir_yaw_pitch(vrm_q_rotate(q, V(0, 0, -1)), &y1, &pitch));
+        CHECK(fabsf(y1 - y0) < 1e-4f);                         /* no jump on the switch */
+        gun = pose_look(gun.position, -40 - 10, 15);           /* the gun hand turns 10 deg right */
+        for (i = 0; i < 100; i++) q = vrg_scope_aim_update(&sa, &gc, 1, head, gun, 0, V(5, 5, 5), 1.0 / 72.0);
+        CHECK(vrg_dir_yaw_pitch(vrm_q_rotate(q, V(0, 0, -1)), &y2, &pitch));
+        CHECK(fabsf(y2 - (y0 - (float)(10 * VRM_DEG))) < 2e-3f);
+        /* the off hand back: the stock again, from where the aim is */
+        q = vrg_scope_aim_update(&sa, &gc, 1, head, gun, 1, off, 1.0 / 72.0);
+        CHECK(sa.stock);
+        CHECK(vrg_dir_yaw_pitch(vrm_q_rotate(q, V(0, 0, -1)), &y1, &pitch));
+        CHECK(fabsf(y1 - y2) < 1e-3f);
     }
     /* down and up again: it starts from the head's yaw again */
     vrg_scope_aim_update(&sa, &gc, 0, head, gun, 1, off, 1.0 / 72.0);

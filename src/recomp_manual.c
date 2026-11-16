@@ -1324,6 +1324,70 @@ void black_viewmodel_muzzle_constants(uint32_t upload, uint32_t caller)
 }
 /* END BLACK_VIEWMODEL_OWNER */
 
+/* BEGIN BLACK_DRAW_LISTS
+ * The renderer's seven draw lists ([0x2D67F4]+0xCA6C, 0x18 apart: entries, sort keys, count, capacity, id, sort) are
+ * set up each frame by 15A5F0 (eax = renderer+0x14, edx = the capacity table at 0x28F410: 1200, 32, 400, 150, 16, 3,
+ * 48), with their entries (20 bytes) and sort keys (8 bytes) inside the renderer. A full list drops every mesh added
+ * after it (15A820 and the inline adds compare the count with the capacity). VR's view is far wider than the TV's
+ * (both eyes x 1.10), so more meshes pass the culling: Kenny 2026-11-15, enemies with only the torso and hips drawn,
+ * then whole again. Lists 0, 2 and 3 (every mesh in reach; the facts and the sizes as TGP482's "draw list room" fix)
+ * get room of their own here, 4096 / 2048 / 512. RECOMP_BLACK_DRAWLISTS=0: the game's own sizes (the log still says
+ * how full they got). */
+#define BLACK_DL_COUNT 7
+static uint32_t black_dl_room[BLACK_DL_COUNT];
+static unsigned black_dl_max[BLACK_DL_COUNT], black_dl_full[BLACK_DL_COUNT], black_dl_frames;
+static int black_dl_on = -1;
+static unsigned black_dl_native[BLACK_DL_COUNT] = { 1200, 32, 400, 150, 16, 3, 48 };
+static const unsigned black_dl_want[BLACK_DL_COUNT] = { 4096, 0, 2048, 512, 0, 0, 0 };
+
+extern void sub_0015A5F0_gen(void);
+void sub_0015A5F0(void)
+{
+    const uint32_t lists = g_eax + 0xCA58u, table = g_edx;
+    unsigned i;
+    if (black_dl_on < 0) {
+        const char *e = getenv("RECOMP_BLACK_DRAWLISTS");
+        black_dl_on = !(e && *e == '0');
+        fprintf(stderr, "[BLACK] draw lists: %s\n", black_dl_on ? "lists 0/2/3 enlarged to 4096/2048/512 entries"
+                                                                : "the game's own sizes (RECOMP_BLACK_DRAWLISTS=0)");
+    }
+    /* last frame's fill, before the reset */
+    if (black_pc_ram_span(lists, BLACK_DL_COUNT * 0x18u)) {
+        for (i = 0; i < BLACK_DL_COUNT; i++) {
+            const unsigned n = GUEST32(lists + i * 0x18u + 8u);
+            if (n > black_dl_max[i] && n < 0x100000u) black_dl_max[i] = n;
+            if (n >= black_dl_native[i] && black_dl_native[i]) black_dl_full[i]++;
+        }
+        if (++black_dl_frames >= 600u) {
+            int over = 0;
+            for (i = 0; i < BLACK_DL_COUNT; i++) over |= black_dl_full[i] != 0;
+            if (over)
+                fprintf(stderr, "[BLACK] draw lists (last %u frames): most entries %u/%u/%u/%u/%u/%u/%u; frames at or past the "
+                        "game's own size (1200/32/400/150/16/3/48): %u/%u/%u/%u/%u/%u/%u%s\n", black_dl_frames,
+                        black_dl_max[0], black_dl_max[1], black_dl_max[2], black_dl_max[3], black_dl_max[4], black_dl_max[5],
+                        black_dl_max[6], black_dl_full[0], black_dl_full[1], black_dl_full[2], black_dl_full[3],
+                        black_dl_full[4], black_dl_full[5], black_dl_full[6],
+                        black_dl_on ? "" : " (meshes were dropped: the lists are not enlarged)");
+            black_dl_frames = 0;
+            memset(black_dl_max, 0, sizeof(black_dl_max));
+            memset(black_dl_full, 0, sizeof(black_dl_full));
+        }
+    }
+    if (table == 0x0028F410u && black_pc_ram_span(table, BLACK_DL_COUNT * 4u))
+        for (i = 0; i < BLACK_DL_COUNT; i++) black_dl_native[i] = GUEST32(table + i * 4u);
+    sub_0015A5F0_gen();
+    if (!black_dl_on || !black_pc_ram_span(lists, BLACK_DL_COUNT * 0x18u)) return;
+    for (i = 0; i < BLACK_DL_COUNT; i++) {
+        const uint32_t l = lists + i * 0x18u, want = black_dl_want[i];
+        if (!want || want <= GUEST32(l + 0xCu)) continue;
+        if (!black_dl_room[i] && !(black_dl_room[i] = xbox_HeapAlloc(want * 28u, 16u))) continue;
+        GUEST32(l) = black_dl_room[i];                                     /* entries, 20 bytes each */
+        if (GUEST32(l + 4u)) GUEST32(l + 4u) = black_dl_room[i] + want * 20u;   /* sort keys, 8 bytes each */
+        GUEST32(l + 0xCu) = want;
+    }
+}
+/* END BLACK_DRAW_LISTS */
+
 
 static double black_fov_vertical, black_fov_window_per_aspect;
 static volatile LONG black_fov_announced;

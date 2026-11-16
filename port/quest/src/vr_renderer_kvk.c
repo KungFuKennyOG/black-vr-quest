@@ -542,7 +542,9 @@ bool kvk_vr_stereo_hook(KvkStereoFrame *out, const KvkStereoConfig *cfg, int pha
          * the gun let it go. */
         static int g_no_gun;
         if (g_two_seen) { vr_set_gun_two_handed(g_two_frame); g_no_gun = 0; }
-        else if (++g_no_gun == 10) vr_set_gun_two_handed(0);
+        /* the 3D scope hides the gun (no weapon draws while zoomed): that is not the gun gone. Counted, it let the
+         * two-handed hold go 10 flips into the zoom and the scope's aim froze (Kenny's log, 2026-11-15 23:29:44) */
+        else if (!scope_hides_weapon() && ++g_no_gun == 10) vr_set_gun_two_handed(0);
         g_two_frame = 0;
         g_two_seen = 0;
     }
