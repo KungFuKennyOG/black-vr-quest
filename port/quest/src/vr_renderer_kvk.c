@@ -411,15 +411,26 @@ static void scope_eyes(VrFrameState *f, const VrPose *hand)
     VrQuat q;
     int i;
     if (!(z > 1.001f) || !(e > 0.0f)) return;
-    if (hand) {
-        dir = vr_gun_laser(pm, am, &len) ? vrm_v3(am[0], am[1], am[2]) : vrm_v3(0, 0, -1);   /* the barrel, else the ray */
-        dir = vrm_q_rotate(hand->orientation, dir);
-    } else {
-        dir = vrm_q_rotate(f->eye[0].pose.orientation, vrm_v3(0, 0, -1));
+    {
+        /* Where it looks (DrBeef's scope): the scope aim (vr_scope_aim, the virtual stock from the head through the off
+         * hand), level, with the head's roll, so the picture's horizon stays level in the world. It looked along the
+         * drawn barrel, with up from the head: the picture was tilted as the barrel left the gaze, and the game's
+         * camera (culling) still faced the head (Kenny 2026-11-15: "tilted and there's a ton of clipping"). */
+        VrQuat aimq;
+        if (vr_scope_aim(&aimq)) {
+            q = vrg_scope_view_rotation(aimq, f->eye[0].pose.orientation);   /* the eyes: the real head */
+        } else {
+            if (hand) {
+                dir = vr_gun_laser(pm, am, &len) ? vrm_v3(am[0], am[1], am[2]) : vrm_v3(0, 0, -1);
+                dir = vrm_q_rotate(hand->orientation, dir);
+            } else {
+                dir = vrm_q_rotate(f->eye[0].pose.orientation, vrm_v3(0, 0, -1));
+            }
+            if (!vrm_normalize(&dir)) return;
+            up = vrm_q_rotate(f->eye[0].pose.orientation, vrm_v3(0, 1, 0));    /* the roll stays the head's */
+            q = vrg_look_rotation(dir, up);
+        }
     }
-    if (!vrm_normalize(&dir)) return;
-    up = vrm_q_rotate(f->eye[0].pose.orientation, vrm_v3(0, 1, 0));    /* the roll stays the head's */
-    q = vrg_look_rotation(dir, up);
     mid = vrm_scale(vrm_add(f->eye[0].pose.position, f->eye[1].pose.position), 0.5f);
     for (i = 0; i < VR_EYE_COUNT; i++) {
         VrPose *p = &f->eye[i].pose;

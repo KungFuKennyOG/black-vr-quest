@@ -40,6 +40,7 @@
  */
 #include <time.h>
 #include "vr_game_math.h"
+#include "vr_gestures.h"
 
 #define BVR_RENDERER 0x002D67F4u
 #define BVR_OWNER 0x002D12B8u
@@ -599,6 +600,15 @@ static void black_vr_look(uint32_t look)
             const VrVec3 eh = vrm_q_rotate(vrm_q_conj(hand_rel.orientation), vrm_sub(head_rel.position, hand_rel.position));
             bvr_publish_laser(eh);
         }
+        {
+            /* the 3D scope (port/notes/scope.md): the look is the scope's aim, straight from the eye (DrBeef's ports
+             * shoot from where the scope looks); no barrel convergence, the gun is hidden */
+            VrQuat sq;
+            if (vr_scope_aim(&sq)) {
+                VrVec3 sd = vrm_q_rotate(vrm_q_mul(vrm_q_conj(origin.orientation), sq), vrm_v3(0, 0, -1));
+                if (vrm_normalize(&sd)) { d = sd; hand_mode = 0; }
+            }
+        }
         if (hand_mode && cfg->aim_barrel) {
             /* shots converge on the drawn gun's barrel line (not the controller's ray), aim_converge metres out; with
              * the laser on, at its hit (bvr_publish_laser) */
@@ -876,6 +886,16 @@ static void black_vr_camera_after_world(uint32_t camera)
 
         vr_get_recentre(&origin);
         head_rel = vgm_relative(origin, f->head);
+        {
+            /* the 3D scope: the camera looks where the scope does (its aim, with the head's roll), so the game culls
+             * and draws for the zoomed view. It faced the head, and the zoomed view along the gun lost what lay
+             * outside the head's frustum ("a ton of clipping", Kenny 2026-11-15). The renderer turns the eyes the
+             * same way (vr_renderer_kvk.c scope_eyes). */
+            VrQuat sq;
+            if (vr_scope_view() > 1.0f && vr_scope_aim(&sq))
+                head_rel.orientation = vrm_q_normalize(vrm_q_mul(vrm_q_conj(origin.orientation),
+                                                                 vrg_scope_view_rotation(sq, f->head.orientation)));
+        }
         head_rel.position = vgm_clamp_len(head_rel.position, cfg->max_head_offset_m);
         head_stage = vrm_pose_mul(origin, head_rel);
         bvr.head_q = head_rel.orientation;
@@ -1450,6 +1470,7 @@ static void black_vr_shot_begin(uint32_t shot)
     const VrGameConfig *cfg = vr_game_config();
     uint32_t ctl, actor, core;
     bvr_shot.on = 0;
+    if (vr_scope_aim(NULL)) return;                               /* scoped: the game's shot, along the look */
     if (!vr_active() || !cfg->aim_barrel || cfg->aim_mode != VR_AIM_HAND || bvr.mode != VR_PRESENT_STEREO ||
         !bvr_gun_fx() || !bvr_fxl.ok || !bvr.yv_ok || !black_pc_ram_span(0x2D45D4u, 4u) || !black_pc_ram_span(shot, 8u))
         return;

@@ -481,3 +481,17 @@ column next to a building) was still wrong.
 
 **Platform / arm64 stream:** port the Kelvin core files listed in section 6 (x86 SIMD and `windows.h` includes).
 The CPU vertex fallback (`kelvin_vsh.c`) is on the critical path whenever a vertex program is not yet compiled.
+
+## Compile waits for world draws (2026-11-15)
+
+Kenny on the headset: "sometimes the bodies only show the upper body and butt/crotch floating and moving, but no head
+arms or legs, then they reappear". Leading cause (not yet confirmed from a device log): a draw whose vertex program,
+combiner or pipeline is still being made on a compile worker was skipped, and a character's parts use different ones.
+At a level start the worker queue holds the whole pipeline manifest, so a draw's own compile waited behind it.
+- Compiles a draw asks for go to an **urgent queue** the workers take first; a manifest precreation a draw needs is
+  copied there once (`KvkPipe.promoted`; `claim` makes sure only one copy builds it).
+- A **world draw on the main target** (not the HUD) whose program or pipeline is not ready waits for it, at most
+  10 ms in all per frame (`compile_wait`; `RECOMP_KVK_COMPILE_WAIT_US`, 0 = off). Past that it is skipped as before.
+- Log: `world draw skipped: its vertex program|pipeline was not made in time (vs ..., frame ...; N world draws skipped
+  so far, M compile waits, T ms waited in all)` (first 20, then every 200th) and, with the stats line,
+  `compiles a world draw waited for: ...`. No such lines while the bodies break = it is something else.

@@ -207,6 +207,9 @@ static VrSwing g_swing;
 static VrDuck g_duck;
 static VrCrouchSync g_csync;
 static VrScope g_scope;
+static VrScopeAim g_scope_aim;                    /* the 3D scope's aim (vr_scope_aim) */
+static int g_scope_aim_on;
+static VrQuat g_scope_aim_q;
 static VrTwoHand g_two;
 static VrVec3 g_hand_vel[2];
 static int g_hand_vel_ok[2];
@@ -389,6 +392,9 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
             const int was = g_scope.engaged;
             eye[0] = vrm_sub(head_pos, vrm_scale(right, half_ipd));
             eye[1] = vrm_add(head_pos, vrm_scale(right, half_ipd));
+            /* once up, only the distance lets the 3D scope go (DrBeef: the gun's angle to the view does not count,
+             * the scope aims with the stock; it went down when the head turned 40 deg off the gun hand's ray) */
+            g_scope.free_aim = g_scope.engaged && s->cfg.game.scope_3d;
             scope = vrg_scope_update(&g_scope, gc, valid[gun], aim[gun], eye, fwd);
             /* the 3D scope view, as in DrBeef's ports: a two-handed gun looks through its scope only with both hands on */
             if (scope && s->cfg.game.scope_3d && __atomic_load_n(&g_gun_two_handed, __ATOMIC_RELAXED) == 2 &&
@@ -408,6 +414,27 @@ void vrb_set_input(XrShell *s, const VrTouchState *touch, const VrPose aim_in[2]
         g_scope.engaged = 0;
     }
     g_was_in_game = in_game;
+
+    /* the 3D scope's aim (DrBeef's virtual stock): from the head through the off hand on the handguard, the yaw counted
+     * from where the head faced as the scope came up. The game's aim (its look, so its shots and its camera) follows it
+     * from here; the gun is hidden while the view is zoomed. */
+    {
+        const int was = g_scope_aim.active;
+        const int on = in_game && game_known && gin.scoped && s->cfg.game.scope_3d && scope;
+        const int stock = g_two.engaged && valid[off];
+        const VrQuat q = vrg_scope_aim_update(&g_scope_aim, gc, on, g_live.head, aim[gun], stock, aim[off].position, dt);
+        g_scope_aim_on = on && g_scope_aim.active;
+        if (g_scope_aim_on) {
+            g_scope_aim_q = q;
+            aim[gun].orientation = q;
+            aim[gun].position = g_live.head.position;      /* shots and the look from the eye, as through a scope */
+            g_live.hand[gun].aim = aim[gun];
+        }
+        if (g_scope_aim.active != was)
+            XLOGI("scope aim: %s (%s, lift %.2f m, smoothing %.0f ms)", g_scope_aim.active ? "on" : "off",
+                  g_scope_aim.stock ? "the stock: head to the off hand" : "the gun hand's ray", gc->scope_lift_m,
+                  gc->scope_smooth_s * 1000.0f);
+    }
 
     /* the aim intent the game hook writes: scoped weapons only; scope_raise off -> the gun hand's grip holds it */
     if (!in_game || !game_known) g_aim_request = -1;
@@ -902,6 +929,16 @@ void vr_set_gun_two_handed(int two) { __atomic_store_n(&g_gun_two_handed, two < 
 
 unsigned vr_button_presses(void) { return __atomic_load_n(&g_button_presses, __ATOMIC_RELAXED); }
 static uint32_t g_scope_view_bits;
+int vr_scope_aim(VrQuat *q)
+{
+    int on;
+    pthread_mutex_lock(&g_lock);
+    on = g_scope_aim_on;
+    if (on && q) *q = g_scope_aim_q;
+    pthread_mutex_unlock(&g_lock);
+    return on;
+}
+
 void vr_set_scope_view(float zoom)
 {
     uint32_t b;

@@ -439,6 +439,10 @@ void vr_set_gun_laser(const float muzzle[3], const float dir[3], float length_m,
 /* Game thread: the 3D scope view's zoom (> 1 while it is on: STEREO, a scoped weapon zoomed past scope_zoom), else 0.
  * Render / XR / input threads read it. */
 void vr_set_scope_view(float zoom);
+/* The 3D scope's aim (stage space, forward -z, level; DrBeef's virtual stock, vr_gestures.h vrg_scope_aim_update),
+ * from the input thread while a scoped weapon is raised to the eye: 1 and q, else 0. The game's look and shots follow
+ * it, its camera and the zoomed eyes look along it (with the head's roll). */
+int vr_scope_aim(VrQuat *q);
 /* A count of fresh controller button presses (A/B/X/Y/Menu/triggers), from the input thread; the game thread compares
  * it with the count when a movie started, to skip the movie on any press. */
 unsigned vr_button_presses(void);

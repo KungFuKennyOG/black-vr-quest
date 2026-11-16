@@ -239,7 +239,9 @@ typedef struct KvkPipeKey {
 
 /* state: 0 being created on a compile worker, 1 ready, 2 failed (atomic). The GPU thread owns the table; a worker
  * only fills in pipe and state of an entry the GPU thread inserted. */
-typedef struct KvkPipe { bool used; KvkPipeKey key; VkPipeline pipe; int state; } KvkPipe;
+typedef struct KvkPipe { bool used; KvkPipeKey key; VkPipeline pipe; int state; int claim; bool promoted; } KvkPipe;
+/* claim: set (atomic exchange) by the worker that creates it; a second job for the same entry (a draw's urgent copy
+ * of a manifest precreation still in the queue) then does nothing. promoted: that urgent copy was posted (GPU thread) */
 
 typedef struct KvkRp { bool used; VkFormat cf, df; uint32_t views; int cload, dload; VkRenderPass rp; } KvkRp;
 typedef struct KvkFb { bool used; VkImageView c, d; VkRenderPass rp; uint32_t w, h; VkFramebuffer fb; } KvkFb;
@@ -342,6 +344,12 @@ static void skip_note(const char *why)
     G.st.skipped++;
     if (s_dbg) LOG("draw skipped: %s", why);
 }
+
+static bool is_main(uint32_t w, uint32_t h);
+/* a draw of the world (not the HUD) on the main target: what the player sees of the scene */
+static bool world_main_draw(const KvkSurf *cs, bool hud);
+/* A world draw dropped because its shader or pipeline was not made in time: logged (Kenny's device logs) */
+static void world_skip_note(const KvkSurf *cs, bool hud, const char *what, uint32_t vs);
 
 static void queue_lock(void)
 {
@@ -840,6 +848,12 @@ typedef struct KvkJob { int kind; void *p; } KvkJob;
 #define KVK_JOBS 4096
 static KvkJob s_jobs[KVK_JOBS];
 static int s_jhead, s_jtail, s_jbusy, s_nworkers;
+/* Urgent jobs: what a draw is waiting for (a vertex program, a combiner, a pipeline met in this frame). Workers take
+ * these first: at a level start the queue holds the whole pipeline manifest, and a draw's own job waited behind it
+ * while the draw was skipped (Kenny 2026-11-15: enemies drawn with only the torso and hips for a while). */
+#define KVK_UJOBS 1024
+static KvkJob s_ujobs[KVK_UJOBS];
+static int s_uhead, s_utail;
 static pthread_mutex_t s_jlock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t s_jcond = PTHREAD_COND_INITIALIZER, s_jdone = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t s_manifest_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -888,9 +902,9 @@ static void *worker_main(void *arg)
     for (;;) {
         KvkJob j;
         pthread_mutex_lock(&s_jlock);
-        while (s_jhead == s_jtail) pthread_cond_wait(&s_jcond, &s_jlock);
-        j = s_jobs[s_jtail % KVK_JOBS];
-        s_jtail++;
+        while (s_jhead == s_jtail && s_uhead == s_utail) pthread_cond_wait(&s_jcond, &s_jlock);
+        if (s_uhead != s_utail) j = s_ujobs[s_utail++ % KVK_UJOBS];
+        else j = s_jobs[s_jtail++ % KVK_JOBS];
         s_jbusy++;
         pthread_mutex_unlock(&s_jlock);
         job_run(j);
@@ -902,7 +916,7 @@ static void *worker_main(void *arg)
     return NULL;
 }
 
-static void job_post(int kind, void *p)
+static void job_post_q(int kind, void *p, bool urgent)
 {
     bool run_now = false;
     pthread_mutex_lock(&s_jlock);
@@ -918,8 +932,13 @@ static void job_post(int kind, void *p)
         }
         if (!s_nworkers) s_nworkers = -1;
     }
-    if (s_nworkers < 0 || s_jhead - s_jtail >= KVK_JOBS) {
+    if (s_nworkers < 0 || (urgent ? s_uhead - s_utail >= KVK_UJOBS : s_jhead - s_jtail >= KVK_JOBS)) {
         run_now = true;
+    } else if (urgent) {
+        s_ujobs[s_uhead % KVK_UJOBS].kind = kind;
+        s_ujobs[s_uhead % KVK_UJOBS].p = p;
+        s_uhead++;
+        pthread_cond_signal(&s_jcond);
     } else {
         s_jobs[s_jhead % KVK_JOBS].kind = kind;
         s_jobs[s_jhead % KVK_JOBS].p = p;
@@ -930,10 +949,59 @@ static void job_post(int kind, void *p)
     if (run_now) { KvkJob j; j.kind = kind; j.p = p; job_run(j); }
 }
 
+static void job_post(int kind, void *p) { job_post_q(kind, p, false); }
+static void job_post_urgent(int kind, void *p) { job_post_q(kind, p, true); }
+
+/* ---- waiting a little for a compile a world draw needs ----------------------------------------------------------
+ * A draw whose vertex program or pipeline is still being made used to be skipped. For the world on the main target
+ * that dropped parts of characters (their limbs and heads use other programs than the torso) until the compile was
+ * done. Such a draw now waits for it, at most KVK_WAIT_FRAME_US in all per frame (a frame's hitch is bounded; past
+ * that the draw is skipped as before). RECOMP_KVK_COMPILE_WAIT_US=<us> sets the budget, 0 turns the wait off. */
+static long long s_wait_budget_us = -1;
+static unsigned long long s_wait_frame;
+static long long s_wait_left_us;
+static struct { unsigned long long waits, waited_us, wait_hits, skips_world; } s_wst;
+
+static bool compile_wait(const int *state)
+{
+    struct timespec ts;
+    long long t0;
+    bool ok;
+    if (s_wait_budget_us < 0) {
+        const char *e = getenv("RECOMP_KVK_COMPILE_WAIT_US");
+        s_wait_budget_us = e && *e ? atoll(e) : 10000;
+        if (s_wait_budget_us < 0) s_wait_budget_us = 0;
+    }
+    if (s_wait_frame != G.st.frames) { s_wait_frame = G.st.frames; s_wait_left_us = s_wait_budget_us; }
+    if (s_wait_left_us <= 0 || __atomic_load_n(state, __ATOMIC_ACQUIRE) != 0) return __atomic_load_n(state, __ATOMIC_ACQUIRE) == 1;
+    t0 = (long long)(kvk_now_ns() / 1000u);
+    pthread_mutex_lock(&s_jlock);
+    while (__atomic_load_n(state, __ATOMIC_ACQUIRE) == 0) {
+        const long long left = s_wait_left_us - ((long long)(kvk_now_ns() / 1000u) - t0);
+        long long ns;
+        if (left <= 0) break;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ns = (long long)ts.tv_nsec + (left < 2000 ? left : 2000) * 1000;   /* re-check every 2 ms at most */
+        ts.tv_sec += (time_t)(ns / 1000000000LL);
+        ts.tv_nsec = (long)(ns % 1000000000LL);
+        pthread_cond_timedwait(&s_jdone, &s_jlock, &ts);
+    }
+    pthread_mutex_unlock(&s_jlock);
+    {
+        const long long us = (long long)(kvk_now_ns() / 1000u) - t0;
+        s_wait_left_us -= us;
+        ok = __atomic_load_n(state, __ATOMIC_ACQUIRE) == 1;
+        s_wst.waits++;
+        s_wst.waited_us += (unsigned long long)us;
+        if (ok) s_wst.wait_hits++;
+    }
+    return ok;
+}
+
 void kvk_wait_compiles(void)
 {
     pthread_mutex_lock(&s_jlock);
-    while (s_jhead != s_jtail || s_jbusy) pthread_cond_wait(&s_jdone, &s_jlock);
+    while (s_jhead != s_jtail || s_uhead != s_utail || s_jbusy) pthread_cond_wait(&s_jdone, &s_jlock);
     pthread_mutex_unlock(&s_jlock);
 }
 
@@ -1058,8 +1126,20 @@ static KvkVs *vs_lookup(const void *program, uint32_t hash, uint32_t start, cons
         e->words = (uint32_t *)malloc((size_t)nwords * 4);
         if (e->words) { memcpy(e->words, words, (size_t)nwords * 4); e->nwords = nwords; }
     }
-    job_post(0, e);
+    job_post_urgent(0, e);
     return __atomic_load_n(&e->state, __ATOMIC_ACQUIRE) == 1 ? e : NULL;
+}
+
+/* The vertex program's entry, whatever its state (NULL: never seen). */
+static KvkVs *vs_entry(uint32_t hash, uint32_t start)
+{
+    unsigned int i, slot = (hash ^ (start * 40503u)) % KVK_VS_MAX;
+    for (i = 0; i < KVK_VS_MAX; i++, slot = (slot + 1) % KVK_VS_MAX) {
+        KvkVs *q = &G.vs[slot];
+        if (!q->used) return NULL;
+        if (q->hash == hash && q->start == start) return q;
+    }
+    return NULL;
 }
 
 static VkShaderModule ps_lookup(const PSConst *c, uint64_t *sid, uint32_t *slen)
@@ -1089,7 +1169,7 @@ static VkShaderModule ps_lookup(const PSConst *c, uint64_t *sid, uint32_t *slen)
     if (!e->src) { e->state = 2; return VK_NULL_HANDLE; }
     e->slen = (uint32_t)strlen(e->src);
     e->sid = kvk_hash64(e->src, e->slen);
-    job_post(1, e);
+    job_post_urgent(1, e);
     if (__atomic_load_n(&e->state, __ATOMIC_ACQUIRE) != 1) return VK_NULL_HANDLE;
     *sid = e->sid; *slen = e->slen;
     return e->mod;
@@ -1474,6 +1554,7 @@ static void pipe_job_run(KvkPipeJob *pj)
     VkShaderModule lv = VK_NULL_HANDLE, lf = VK_NULL_HANDLE;
     VkPipeline pipe = VK_NULL_HANDLE;
     bool ok;
+    if (__atomic_exchange_n(&pj->e->claim, 1, __ATOMIC_ACQ_REL)) { free(pj); return; }   /* the other copy makes it */
     if (!d.vs) d.vs = lv = module_from_cache(KVK_STAGE_VERTEX, d.vs_sid, d.vs_len);
     if (!d.fs) d.fs = lf = module_from_cache(KVK_STAGE_FRAGMENT, d.fs_sid, d.fs_len);
     ok = d.vs && d.fs && VKOK(pipe_create(&d, &pipe));
@@ -1485,7 +1566,8 @@ static void pipe_job_run(KvkPipeJob *pj)
     free(pj);
 }
 
-static VkPipeline pipe_get(const KvkPipeDesc *d)
+/* wait: a world draw on the main target, which may wait a little for a pipeline being made (compile_wait) */
+static VkPipeline pipe_get_w(const KvkPipeDesc *d, bool wait)
 {
     KvkPipeKey k;
     uint64_t h;
@@ -1499,16 +1581,27 @@ static VkPipeline pipe_get(const KvkPipeDesc *d)
     for (i = 0; i < KVK_PIPE_MAX; i++, slot = (slot + 1) % KVK_PIPE_MAX) {
         KvkPipe *q = &G.pipe[slot];
         if (!q->used) { e = q; break; }
-        if (!memcmp(&q->key, &k, sizeof(k)))
+        if (!memcmp(&q->key, &k, sizeof(k))) {
+            int st = __atomic_load_n(&q->state, __ATOMIC_ACQUIRE);
+            if (st == 0 && !q->promoted && !__atomic_load_n(&q->claim, __ATOMIC_ACQUIRE)) {
+                /* still in the queue (a manifest precreation behind many others): an urgent copy, once; the claim
+                 * decides which copy makes it */
+                KvkPipeJob *pj = (KvkPipeJob *)calloc(1, sizeof(*pj));
+                q->promoted = true;
+                if (pj) { pj->e = q; pj->d = *d; pj->k = k; pj->record = false; job_post_urgent(3, pj); }
+            }
+            if (st == 0 && wait) compile_wait(&q->state);
             return __atomic_load_n(&q->state, __ATOMIC_ACQUIRE) == 1 ? q->pipe : VK_NULL_HANDLE;
+        }
     }
     if (!e) return VK_NULL_HANDLE;
     if (stable && pipe_async()) {
         KvkPipeJob *pj = (KvkPipeJob *)calloc(1, sizeof(*pj));
         if (!pj) return VK_NULL_HANDLE;
-        e->used = true; e->key = k; e->state = 0; e->pipe = VK_NULL_HANDLE;
+        e->used = true; e->key = k; e->state = 0; e->pipe = VK_NULL_HANDLE; e->claim = 0; e->promoted = true;
         pj->e = e; pj->d = *d; pj->k = k; pj->record = true;
-        job_post(3, pj);
+        job_post_urgent(3, pj);
+        if (wait) compile_wait(&e->state);
         return __atomic_load_n(&e->state, __ATOMIC_ACQUIRE) == 1 ? e->pipe : VK_NULL_HANDLE;
     }
     if (!VKOK(pipe_create(d, &e->pipe))) return VK_NULL_HANDLE;   /* not inserted: retried at the next use, as before */
@@ -1518,6 +1611,8 @@ static VkPipeline pipe_get(const KvkPipeDesc *d)
     if (stable) pipe_manifest_add(d, &k);
     return e->pipe;
 }
+
+static VkPipeline pipe_get(const KvkPipeDesc *d) { return pipe_get_w(d, false); }
 
 static VkRenderPass rp_get(VkFormat cf, VkFormat df, uint32_t views, int cload, int dload);
 
@@ -1576,7 +1671,7 @@ static void pipe_manifest_precreate(void)
             }
             if (!e) continue;
             if (!(pj = (KvkPipeJob *)calloc(1, sizeof(*pj)))) break;
-            e->used = true; e->key = k; e->state = 0; e->pipe = VK_NULL_HANDLE;
+            e->used = true; e->key = k; e->state = 0; e->pipe = VK_NULL_HANDLE; e->claim = 0; e->promoted = false;
             pj->e = e; pj->d = d; pj->k = k; pj->record = false;
             job_post(3, pj);
             queued++;
@@ -1797,6 +1892,18 @@ static VkDescriptorSet tset_get(const VkImageView v[4], const VkSampler s[4])
 /* ---- surfaces ---------------------------------------------------------------------------------------------------- */
 
 static bool is_main(unsigned int gw, unsigned int gh) { return gw == 640 && gh == 480; }
+
+static bool world_main_draw(const KvkSurf *cs, bool hud) { return cs && !hud && is_main(cs->gw, cs->gh); }
+
+static void world_skip_note(const KvkSurf *cs, bool hud, const char *what, uint32_t vs)
+{
+    if (!world_main_draw(cs, hud)) return;
+    s_wst.skips_world++;
+    if (s_wst.skips_world <= 20u || !(s_wst.skips_world % 200u))
+        LOG("world draw skipped: its %s was not made in time (vs %08X, frame %llu; %llu world draws skipped so far, "
+            "%llu compile waits, %.1f ms waited in all)", what, vs, (unsigned long long)G.st.frames,
+            s_wst.skips_world, s_wst.waits, (double)s_wst.waited_us / 1000.0);
+}
 
 static void surf_free(KvkSurf *s)
 {
@@ -2996,7 +3103,11 @@ static void draw_now(const KGpuDraw *d)
 
     if (d->gvs) {
         ve = vs_lookup(d->gvs->program, d->gvs->hash, d->gvs->start, NULL, 0);
-        if (!ve || !ve->mod) { skip_note("vertex program not ready"); return; }
+        if ((!ve || !ve->mod) && world_main_draw(cs, hud)) {
+            KvkVs *pe = vs_entry(d->gvs->hash, d->gvs->start);
+            if (pe && compile_wait(&pe->state) && pe->mod) ve = pe;
+        }
+        if (!ve || !ve->mod) { world_skip_note(cs, hud, "vertex program", d->gvs->hash); skip_note("vertex program not ready"); return; }
     }
     /* VR: world draws on the main target get the eye transform */
     if (G.layers > 1 && !hud && V.st.valid && V.region != REGION_SCREEN &&
@@ -3188,13 +3299,21 @@ static void draw_now(const KGpuDraw *d)
     pipe = pipe_get(&pd);
     if (!pipe && !uber) {
         /* the specialised combiner's pipeline is still being created: the ubershader's, if that one is ready */
+        const KvkPipeDesc spec = pd;
         pd.fs = ps->smooth ? G.ps_uber : G.ps_uber_flat;
         pd.fs_sid = ps->smooth ? KVK_SID_UBER : KVK_SID_UBER_FLAT;
         pd.fs_len = 0;
         pipe = pipe_get(&pd);
         uber = pipe != VK_NULL_HANDLE;
+        if (!pipe && world_main_draw(cs, hud)) {
+            /* neither is ready: a world draw waits a little for one (compile_wait), the specialised one first */
+            if ((pipe = pipe_get_w(&spec, true)) != VK_NULL_HANDLE) { pd = spec; uber = false; }
+            else if ((pipe = pipe_get_w(&pd, true)) != VK_NULL_HANDLE) uber = true;
+        }
+    } else if (!pipe && world_main_draw(cs, hud)) {
+        pipe = pipe_get_w(&pd, true);
     }
-    if (!pipe) { skip_note("pipeline"); return; }
+    if (!pipe) { world_skip_note(cs, hud, "pipeline", d->gvs ? d->gvs->hash : 0u); skip_note("pipeline"); return; }
     if (uber) G.st.uber_draws++;
     s1 = tset_get(views, smps);
     if (!s1) { skip_note("texture descriptors"); return; }
@@ -4000,6 +4119,9 @@ void kgpu_report(void)
         (unsigned long long)G.st.tex_uploads, (unsigned long long)G.st.tset_writes, (unsigned long long)G.st.tset_flushes,
         (unsigned long long)G.st.np_vertices, (unsigned long long)G.st.np_cache_hits,
         (unsigned long long)(G.st.tex_sig_bytes >> 20));
+    if (s_wst.waits || s_wst.skips_world)
+        LOG("compiles a world draw waited for: %llu (%llu ready in time, %.1f ms in all); world draws skipped: %llu",
+            s_wst.waits, s_wst.wait_hits, (double)s_wst.waited_us / 1000.0, s_wst.skips_world);
 }
 
 void kgpu_note_kick(void) { G.epoch++; }
