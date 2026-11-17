@@ -1,7 +1,7 @@
 # BLACK VR for Meta Quest 3 / 3S
 
 A standalone Quest app (`com.kenny.blackvr`) that runs the BLACK static recompilation in
-VR. You supply your own original Xbox BLACK disc files; nothing from the game is in the APK.
+VR. You supply your own original Xbox BLACK disc files; the APK contains none of the game's assets.
 
 > **Status (2026-11-02): smoke build.** The APK installs and starts the VR shell, and with
 > no game linked (or no game files) it shows a **test scene**: head tracking, stereo,

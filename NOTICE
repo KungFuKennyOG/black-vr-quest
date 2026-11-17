@@ -39,6 +39,21 @@ They contain no generated game-function bodies or retail files. The game is buil
 locally from the user's matching retail files. Wine, Proton and DXVK are external
 runtime dependencies, not bundled or relicensed by this project.
 
+BLACK VR (Meta Quest 3 port)
+----------------------------
+
+Copyright (c) 2026 KungFuKennyOG.
+
+The Quest port's own code (port/, its additions to src/, tests/ and scripts/,
+and its other changes) is MIT licensed under LICENSE, except where a file or
+component carries a different notice. Its changes to xemu-derived files, and the
+files it adds to them (including the Kelvin Vulkan backend under
+third_party/xboxrecomp/src/nv2a/kelvin/vk/), remain LGPL-2.1-or-later, as below.
+No code from DrBeef's Quest ports is used.
+
+The Quest APK contains no game assets: players copy their own retail files to
+the headset. Game files must never be distributed with it.
+
 Preserved xboxrecomp NOTICE
 ==========================
 
