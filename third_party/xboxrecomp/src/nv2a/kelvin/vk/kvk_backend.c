@@ -372,7 +372,9 @@ static void skin_dump_frame(const char *tag, int k);
  * static geometry reads the same every frame. The pusher draws well after the game queued the draw (the real GPU
  * does too), so bytes that differ from what the same mesh held last time were rewritten or replaced under it: logged
  * as it happens (the vanishing bodies last a second or two, the periodic dump comes every five). */
-static struct { unsigned long long key, hash; uint32_t bytes, icount; unsigned long long seen, changed; } s_vmesh[64];
+static struct { unsigned long long key, hash; uint32_t bytes, icount; unsigned long long seen, changed, zero, used; int have_zero; } s_vmesh[64];
+static int s_vmesh_slot;          /* the entry of the mesh skin_vertices last looked at, -1: none */
+static unsigned long long s_bone_changes;
 static unsigned long long s_vmesh_changes;
 static unsigned long long skin_vhash(const uint8_t *p, size_t n)
 {
@@ -382,12 +384,32 @@ static unsigned long long skin_vhash(const uint8_t *p, size_t n)
     for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
     return h;
 }
+static void np_attr(const KGpuAttrSrc *as, uint32_t e, float r[4]);
+/* The bones a mesh's vertices name with a weight above zero (v4: palette rows, three per bone; v1: the weights). */
+static unsigned long long skin_used(const KGpuDraw *d)
+{
+    const KGpuAttrSrc *ai = &d->gvs->attr[4], *aw = &d->gvs->attr[1];
+    unsigned long long used = 0;
+    uint32_t e, e0, e1, k;
+    if (!ai->fmt || !ai->stride || ai->hi <= ai->lo) return ~0ull;
+    e0 = (uint32_t)(ai->lo / ai->stride); e1 = (uint32_t)(ai->hi / ai->stride);
+    for (e = e0; e <= e1 && e - e0 < 65536u; e++) {
+        float iv[4], wv[4];
+        np_attr(ai, e, iv); np_attr(aw, e, wv);
+        for (k = 0; k < 4; k++) {
+            const int b = (int)iv[k] / 3;
+            if (wv[k] > 0.004f && b >= 0 && b < 44) used |= 1ull << b;
+        }
+    }
+    return used ? used : ~0ull;
+}
 static int skin_vertices(const KGpuDraw *d, unsigned long long *key, unsigned long long *hash, uint32_t *bytes)
 {
     const KGpuAttrSrc *a0 = &d->gvs->attr[0];
     const uint8_t *lo, *hi;
     int i, slot = -1, changed = 0;
     *key = *hash = 0; *bytes = 0;
+    s_vmesh_slot = -1;
     if (!a0->fmt || !d->gvs->attr[1].fmt || a0->hi <= a0->lo || a0->hi - a0->lo > (1 << 20)) return 0;
     lo = a0->data + a0->lo; hi = a0->data + a0->hi;
     *key = (unsigned long long)(uintptr_t)lo; *bytes = (uint32_t)(hi - lo);
@@ -409,8 +431,11 @@ static int skin_vertices(const KGpuDraw *d, unsigned long long *key, unsigned lo
         }
     } else {
         s_vmesh[slot].key = *key; s_vmesh[slot].bytes = *bytes; s_vmesh[slot].changed = 0; s_vmesh[slot].seen = 0;
+        s_vmesh[slot].have_zero = 0; s_vmesh[slot].used = skin_used(d);
+        LOG("skin bones: mesh %u indices at %llX uses bones %011llX", d->icount, *key & 0xFFFFFFFull, s_vmesh[slot].used & 0xFFFFFFFFFFFull);
     }
     s_vmesh[slot].hash = *hash; s_vmesh[slot].icount = d->icount; s_vmesh[slot].seen++;
+    s_vmesh_slot = slot;
     return changed;
 }
 static void skin_note(const KGpuDraw *d, const KPixelState *ps, bool uber, bool dummy, bool vm, bool stereo, int cull)
@@ -449,6 +474,46 @@ static void skin_note(const KGpuDraw *d, const KPixelState *ps, bool uber, bool 
         unsigned long long vk, vh;
         uint32_t vb;
         const int vc = skin_vertices(d, &vk, &vh, &vb);
+        if (s_vmesh_slot >= 0) {
+            /* The bones this mesh is drawn with, the moment they go wrong (Kenny's video 2026-11-17: a running teammate
+             * loses head and legs for half a second, arms and gear stay; no 5 s sample has landed on one). Three
+             * signs, each logged as it happens: a bone that becomes all zero or stops being (slot 0 is left out: no
+             * vertex uses it and it flips every frame, on SwiftShader too); a bone whose axes are not unit length
+             * (collapsed or blown up); a bone that jumps more than a metre between two draws of the mesh. */
+            static float last_t[64][44][3];
+            static unsigned long long last_bad[64];
+            unsigned long long zero = 0, bad = 0;
+            int b, k, jb = -1;
+            float jd = 0.0f, bl = 0.0f;
+            int bb = -1;
+            for (b = 0; b < 44; b++) {
+                const float *m = c + (60 + 3 * b) * 4;
+                int z = 1;
+                float l2, dx, dy, dz, dd;
+                if (!(s_vmesh[s_vmesh_slot].used >> b & 1u)) continue;       /* a slot no vertex of this mesh reads: leftovers */
+                for (k = 0; k < 12; k++) if (m[k] != 0.0f) { z = 0; break; }
+                if (z) { zero |= 1ull << b; continue; }
+                l2 = m[0] * m[0] + m[4] * m[4] + m[8] * m[8];              /* the first axis (a column of the 3x4) */
+                if (!(l2 > 0.25f && l2 < 4.0f)) { bad |= 1ull << b; if (bb < 0) { bb = b; bl = l2; } }
+                dx = m[3] - last_t[s_vmesh_slot][b][0]; dy = m[7] - last_t[s_vmesh_slot][b][1]; dz = m[11] - last_t[s_vmesh_slot][b][2];
+                dd = dx * dx + dy * dy + dz * dz;
+                if (s_vmesh[s_vmesh_slot].have_zero && !(s_vmesh[s_vmesh_slot].zero >> b & 1u) && dd > jd) { jd = dd; jb = b; }
+                last_t[s_vmesh_slot][b][0] = m[3]; last_t[s_vmesh_slot][b][1] = m[7]; last_t[s_vmesh_slot][b][2] = m[11];
+            }
+            if (s_vmesh[s_vmesh_slot].have_zero) {
+                const int zc = s_vmesh[s_vmesh_slot].zero != zero, bc = last_bad[s_vmesh_slot] != bad, jc = jd > 1.0f;
+                if (zc || bc || jc) {
+                    s_bone_changes++;
+                    if (s_bone_changes <= 400u || !(s_bone_changes % 1000u))
+                        LOG("skin bones: frame %llu: mesh %u indices at %llX:%s empty %011llX -> %011llX;%s misshapen %011llX -> "
+                            "%011llX (bone %d axis length^2 %.3g);%s furthest jump %.2f (bone %d) [event %llu]",
+                            (unsigned long long)G.st.frames, d->icount, vk & 0xFFFFFFFull, zc ? " CHANGED" : "",
+                            s_vmesh[s_vmesh_slot].zero, zero, bc ? " CHANGED" : "", last_bad[s_vmesh_slot], bad, bb, (double)bl,
+                            jc ? " JUMP" : "", (double)sqrtf(jd), jb, s_bone_changes);
+                }
+            }
+            s_vmesh[s_vmesh_slot].zero = zero; s_vmesh[s_vmesh_slot].have_zero = 1; last_bad[s_vmesh_slot] = bad;
+        }
         if (s_skin_n[s_skin_cur] >= 96) return;
         r = &s_skin_rec[s_skin_cur][s_skin_n[s_skin_cur]++];
         memset(r, 0, sizeof(*r));
