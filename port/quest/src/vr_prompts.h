@@ -46,7 +46,7 @@ typedef enum {
 typedef struct {
     uint8_t kind;          /* VrPromptKind */
     uint8_t hand;          /* 0 left, 1 right */
-    uint8_t hold;          /* held, not tapped (Y hold = Fire mode, Menu hold = Back) */
+    uint8_t hold;          /* held, not tapped (Y hold = Suppressor, Menu hold = Back) */
 } VrPromptInput;
 
 enum { VRP_LEFT = 0, VRP_RIGHT = 1 };
@@ -72,8 +72,8 @@ static inline VrPromptInput vrp_slot_input(int slot, int gun_hand)
     case 16: r.kind = VRP_RAISE; break;
     case 25: r.kind = VRP_MENU; r.hand = VRP_LEFT; break;
     case 27: r.kind = VRP_TRIGGER; r.hand = off; break;
-    case 30: r.kind = VRP_BUTTON_HIGH; r.hand = off; r.hold = 1; break;
-    case 31: r.kind = VRP_BUTTON_HIGH; r.hand = off; break;
+    case 30: r.kind = VRP_BUTTON_HIGH; r.hand = off; break;
+    case 31: r.kind = VRP_BUTTON_HIGH; r.hand = off; r.hold = 1; break;
     case 32: r.kind = VRP_SWING; break;               /* melee: no button (Kenny: melee IRL) */
     case 33: r.kind = VRP_BUTTON_LOW; r.hand = off; break;
     case 35: r.kind = VRP_STICK_UPDOWN; break;
