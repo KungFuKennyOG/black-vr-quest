@@ -481,7 +481,11 @@ static void skin_note(const KGpuDraw *d, const KPixelState *ps, bool uber, bool 
              * vertex uses it and it flips every frame, on SwiftShader too); a bone whose axes are not unit length
              * (collapsed or blown up); a bone that jumps more than a metre between two draws of the mesh. */
             static float last_t[64][44][3];
-            static unsigned long long last_bad[64];
+            static unsigned long long last_bad[64], last_frame[64];
+            static unsigned jump_dumps;
+            float was[44][3];
+            unsigned long long jmask = 0;
+            float jo[3] = {0, 0, 0}, jn[3] = {0, 0, 0}, jr[9] = {0};
             unsigned long long zero = 0, bad = 0;
             int b, k, jb = -1;
             float jd = 0.0f, bl = 0.0f;
@@ -495,9 +499,18 @@ static void skin_note(const KGpuDraw *d, const KPixelState *ps, bool uber, bool 
                 if (z) { zero |= 1ull << b; continue; }
                 l2 = m[0] * m[0] + m[4] * m[4] + m[8] * m[8];              /* the first axis (a column of the 3x4) */
                 if (!(l2 > 0.25f && l2 < 4.0f)) { bad |= 1ull << b; if (bb < 0) { bb = b; bl = l2; } }
+                was[b][0] = last_t[s_vmesh_slot][b][0]; was[b][1] = last_t[s_vmesh_slot][b][1]; was[b][2] = last_t[s_vmesh_slot][b][2];
                 dx = m[3] - last_t[s_vmesh_slot][b][0]; dy = m[7] - last_t[s_vmesh_slot][b][1]; dz = m[11] - last_t[s_vmesh_slot][b][2];
                 dd = dx * dx + dy * dy + dz * dz;
-                if (s_vmesh[s_vmesh_slot].have_zero && !(s_vmesh[s_vmesh_slot].zero >> b & 1u) && dd > jd) { jd = dd; jb = b; }
+                if (s_vmesh[s_vmesh_slot].have_zero && !(s_vmesh[s_vmesh_slot].zero >> b & 1u)) {
+                    if (dd > 0.25f) jmask |= 1ull << b;                    /* every bone that moved over half a metre */
+                    if (dd > jd) {
+                        jd = dd; jb = b;
+                        jo[0] = last_t[s_vmesh_slot][b][0]; jo[1] = last_t[s_vmesh_slot][b][1]; jo[2] = last_t[s_vmesh_slot][b][2];
+                        jn[0] = m[3]; jn[1] = m[7]; jn[2] = m[11];
+                        jr[0] = m[0]; jr[1] = m[1]; jr[2] = m[2]; jr[3] = m[4]; jr[4] = m[5]; jr[5] = m[6]; jr[6] = m[8]; jr[7] = m[9]; jr[8] = m[10];
+                    }
+                }
                 last_t[s_vmesh_slot][b][0] = m[3]; last_t[s_vmesh_slot][b][1] = m[7]; last_t[s_vmesh_slot][b][2] = m[11];
             }
             if (s_vmesh[s_vmesh_slot].have_zero) {
@@ -510,9 +523,30 @@ static void skin_note(const KGpuDraw *d, const KPixelState *ps, bool uber, bool 
                             (unsigned long long)G.st.frames, d->icount, vk & 0xFFFFFFFull, zc ? " CHANGED" : "",
                             s_vmesh[s_vmesh_slot].zero, zero, bc ? " CHANGED" : "", last_bad[s_vmesh_slot], bad, bb, (double)bl,
                             jc ? " JUMP" : "", (double)sqrtf(jd), jb, s_bone_changes);
+                    if (jc && (s_bone_changes <= 400u || !(s_bone_changes % 1000u)))
+                        LOG("skin bones: frame %llu: mesh %u: bones moved %011llX; bone %d from %.2f %.2f %.2f to %.2f %.2f %.2f, axes "
+                            "%.2f %.2f %.2f / %.2f %.2f %.2f / %.2f %.2f %.2f; mesh last drawn %llu frame(s) ago; c117 %.2f %.2f %.2f %.2f",
+                            (unsigned long long)G.st.frames, d->icount, jmask, jb, (double)jo[0], (double)jo[1], (double)jo[2],
+                            (double)jn[0], (double)jn[1], (double)jn[2], (double)jr[0], (double)jr[1], (double)jr[2], (double)jr[3],
+                            (double)jr[4], (double)jr[5], (double)jr[6], (double)jr[7], (double)jr[8],
+                            (unsigned long long)(G.st.frames - last_frame[s_vmesh_slot]), (double)c[117 * 4], (double)c[117 * 4 + 1],
+                            (double)c[117 * 4 + 2], (double)c[117 * 4 + 3]);
                 }
             }
+            if (s_vmesh[s_vmesh_slot].have_zero && jd > 1.0f && jump_dumps < 16u) {
+                /* the whole pose either side of the jump, for the first few: which limbs went, and where to */
+                char line[1024]; int n = 0;
+                jump_dumps++;
+                for (b = 0; b < 44 && n < 940; b++) {
+                    const float *m = c + (60 + 3 * b) * 4;
+                    if (!(s_vmesh[s_vmesh_slot].used >> b & 1u) || (zero >> b & 1u)) continue;
+                    n += snprintf(line + n, sizeof line - (size_t)n, " %d:%.2f,%.2f,%.2f>%.2f,%.2f,%.2f", b, (double)was[b][0],
+                                  (double)was[b][1], (double)was[b][2], (double)m[3], (double)m[7], (double)m[11]);
+                }
+                LOG("skin bones: frame %llu: mesh %u pose (bone:was>now):%s", (unsigned long long)G.st.frames, d->icount, line);
+            }
             s_vmesh[s_vmesh_slot].zero = zero; s_vmesh[s_vmesh_slot].have_zero = 1; last_bad[s_vmesh_slot] = bad;
+            last_frame[s_vmesh_slot] = G.st.frames;
         }
         if (s_skin_n[s_skin_cur] >= 96) return;
         r = &s_skin_rec[s_skin_cur][s_skin_n[s_skin_cur]++];
