@@ -10,8 +10,17 @@ recompilation of the original Xbox game, with a native Quest renderer (Vulkan, s
 > **Early alpha.** It runs the game from boot through the menus and into missions in stereo, with sound, on a
 > Quest 3. Expect rough edges, frame drops in busy fights, and bugs. See [Known issues](#known-issues).
 
-**You need your own copy of the game.** This project contains no game files. BLACK belongs to its owners
-(Criterion Games / Electronic Arts). This project is not affiliated with or endorsed by them.
+**This project does not include any game files.** You need your own legally acquired copy of BLACK for the
+original Xbox. We do not condone piracy. BLACK belongs to Criterion Games / Electronic Arts, and this project is not
+affiliated with or endorsed by them.
+
+### Quick start
+
+1. [Check your disc](#check-your-disc) is the supported release.
+2. Turn on [developer mode](#1-turn-on-developer-mode-once) on the headset.
+3. Download `blackvr.apk` from [Releases](../../releases).
+4. [Install it and copy your game files](#3-install). On a Mac it's one command.
+5. Play from **Library → Unknown sources**.
 
 ## VR features
 
@@ -41,8 +50,21 @@ recompilation of the original Xbox game, with a native Quest renderer (Vulkan, s
   - The PS2 version and other Xbox releases won't work. The app tells you if the disc doesn't match.
   - A full dump matters: missing files mean missing levels or cutscenes.
 - About **1.5 GB** free on the headset.
+- Only download BLACK VR from this repository's [Releases](../../releases) page. It isn't distributed anywhere
+  else, so an APK from another site, Discord server or "game included" bundle didn't come from here.
 - A **USB-C data cable** and a computer (Mac, Windows or Linux) to copy things to the headset. An Android phone works
   too (see [Without a computer](#without-a-computer)).
+
+### Check your disc
+
+Check the `default.xbe` from your extracted disc before you start:
+
+- Mac / Linux: `shasum -a 256 default.xbe`
+- Windows (PowerShell): `Get-FileHash default.xbe`
+
+It should print `df2739c372d254a90aeeccf5971d12097f22d89fbb90db021fda96dd4deb68f6`. If it doesn't, the release
+APK won't run your disc. Don't worry if you only have the image: the app checks it at startup too, and the Mac
+installer extracts it for you.
 
 ## 1. Turn on developer mode (once)
 
@@ -220,6 +242,7 @@ Report problems in [Issues](../../issues) with your headset model, what you saw 
 - Frame rate drops in busy scenes at 60 Hz. The game runs a little slower while it drops (it isn't frame-skipped).
 - Some effects may still look wrong in VR. Reports with a log help.
 - Only one disc release is supported.
+- Bugs from the original game are still there. If something also happens on the Xbox, it's probably not the port.
 - Not tested on Quest 2 or Quest Pro. It needs a lot of CPU and memory, so Quest 2 likely won't work.
 
 ## Building from source
