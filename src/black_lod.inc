@@ -72,6 +72,40 @@ void black_lod_trace(uint32_t site, uint32_t object)
     PcVideoSettings settings;
     fenv_t caller_environment;
     unsigned caller_csr;
+#ifdef BLACK_VR
+    if (site == 0x001C55A0u && (!enabled || strcmp(enabled, "1")) && black_pc_ram_span(object, 0xC9u) &&
+        black_pc_ram_span(0x002D12B8u, 4u)) {
+        /* VR, every 5 s for 40 ms (two or three game frames): every character the game picked a model for, with the
+         * choice. Read against the renderer's skin dumps (kvk_backend.c), which list the bodies actually drawn at
+         * about the same moment: a character here and no body there was dropped after this point; a character
+         * missing here was never considered (Kenny's vanishing bodies, 2026-11-16). */
+        static RECOMP_TLS double window_until, next_at;
+        struct timespec ts;
+        double now;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        now = (double)ts.tv_sec + ts.tv_nsec * 1e-9;
+        if (now >= next_at) { next_at = now + 5.0; window_until = now + 0.04; }
+        if (now <= window_until) {
+            const unsigned csr0 = _mm_getcsr();
+            fenv_t env0;
+            const uint32_t cam = GUEST32(0x002D12B8u);
+            uint32_t db = GUEST32(object + 0xC0u), fb = black_pc_ram_span(cam, 0x16A4u) ? GUEST32(cam + 0x16A0u) : 0u;
+            uint32_t pos[3] = { 0u, 0u, 0u };
+            float d, f, px, py, pz;
+            if (black_pc_ram_span(object, 0x40u)) { pos[0] = GUEST32(object + 0x30u); pos[1] = GUEST32(object + 0x34u); pos[2] = GUEST32(object + 0x38u); }
+            fegetenv(&env0);
+            fesetenv(FE_DFL_ENV);
+            _mm_setcsr(0x1F80u);
+            memcpy(&d, &db, 4); memcpy(&f, &fb, 4); memcpy(&px, &pos[0], 4); memcpy(&py, &pos[1], 4); memcpy(&pz, &pos[2], 4);
+            fprintf(stderr, "[LOD] character %08X model %u of its set, distance %.2f, camera factor %.3f, +30 %.2f %.2f %.2f, "
+                    "flags +C4 %08X +C8 %08X\n", object, (unsigned)*(const uint8_t *)((uintptr_t)g_xbox_mem_offset + object + 0xC8u),
+                    (double)d, (double)f, (double)px, (double)py, (double)pz, GUEST32(object + 0xC4u), GUEST32(object + 0xC8u));
+            fesetenv(&env0);
+            _mm_setcsr(csr0);
+        }
+        return;
+    }
+#endif
     if (!enabled || strcmp(enabled, "1") || emitted >= 512u || !black_pc_ram_span(object, 0xC9u) ||
         !black_pc_ram_span(0x002D12B8u, 4u)) return;
     camera = GUEST32(0x002D12B8u);

@@ -358,6 +358,8 @@ typedef struct SkinRec {
     uint8_t blend, sf, df, ztest, zfunc, zwrite, atest, afunc, aref, cull, uber, dummy, bad, vm, stereo, fog;
     uint8_t af[16];            /* each vertex attribute: fmt << 4 | components */
     float pal[4][4];           /* the first bone's three rows, and the 20th's first */
+    unsigned long long zero;   /* bit k: bone k's three rows (c60+3k..) are all zero */
+    float lit[5][4];           /* c1..c5: the eye and the lighting terms of the body program */
 } SkinRec;
 static struct { unsigned long long draws, nonfinite, huge, clear, notex, uber, vm; } s_skin;
 static SkinRec s_skin_rec[2][96];
@@ -408,6 +410,13 @@ static void skin_note(const KGpuDraw *d, const KPixelState *ps, bool uber, bool 
     r->cull = (uint8_t)cull; r->uber = uber; r->dummy = dummy; r->bad = (uint8_t)kind; r->vm = vm; r->stereo = stereo;
     for (i = 0; i < 16; i++) r->af[i] = (uint8_t)((d->gvs->attr[i].fmt & 15u) << 4 | (d->gvs->attr[i].count & 15u));
     memcpy(r->pal[0], c + 60 * 4, 12 * sizeof(float));
+    memcpy(r->lit, c + 4, sizeof(r->lit));
+    for (i = 0; i < 44; i++) {
+        const float *b = c + (60 + 3 * i) * 4;
+        int k, z = 1;
+        for (k = 0; k < 12; k++) if (b[k] != 0.0f) { z = 0; break; }
+        if (z) r->zero |= 1ull << i;
+    }
     memcpy(r->pal[3], c + 117 * 4, 4 * sizeof(float));
 }
 /* the skinned draws of the last finished frame and of this one so far, to the log */
@@ -430,6 +439,13 @@ static void skin_dump_frame(const char *tag, int k)
             (double)r->t0[1], (double)r->t0[2], r->blend, r->sf, r->df, r->ztest, r->zfunc, r->zwrite, r->atest, r->afunc,
             r->aref, r->cull, r->uber ? " FALLBACK-SHADER" : "", r->dummy ? " NO-TEXTURE" : "", r->bad ? " BAD-BONES" : "",
             r->vm ? " AS-WEAPON" : "", r->stereo ? "" : " NOT-STEREO");
+        LOG("skin dump %s f %llu %2d: zero bones %011llX | c1 %.2f %.2f %.2f %.2f c2 %.3f %.3f %.3f %.3f c3 %.3f %.3f %.3f %.3f c4 "
+            "%.3f %.3f %.3f %.3f c5 %.3f %.3f %.3f %.3f", tag, (unsigned long long)G.st.frames, i, r->zero,
+            (double)r->lit[0][0], (double)r->lit[0][1], (double)r->lit[0][2], (double)r->lit[0][3],
+            (double)r->lit[1][0], (double)r->lit[1][1], (double)r->lit[1][2], (double)r->lit[1][3],
+            (double)r->lit[2][0], (double)r->lit[2][1], (double)r->lit[2][2], (double)r->lit[2][3],
+            (double)r->lit[3][0], (double)r->lit[3][1], (double)r->lit[3][2], (double)r->lit[3][3],
+            (double)r->lit[4][0], (double)r->lit[4][1], (double)r->lit[4][2], (double)r->lit[4][3]);
         LOG("skin dump %s f %llu %2d: attrs v0 %02X v1 %02X v2 %02X v3 %02X v4 %02X v9 %02X | c60 %.3f %.3f %.3f %.3f c61 %.3f "
             "%.3f %.3f %.3f c62 %.3f %.3f %.3f %.3f c117 %.3f %.3f %.3f %.3f", tag, (unsigned long long)G.st.frames, i,
             r->af[0], r->af[1], r->af[2], r->af[3], r->af[4], r->af[9], (double)r->pal[0][0], (double)r->pal[0][1],
