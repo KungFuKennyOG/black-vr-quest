@@ -13,6 +13,23 @@ recompilation of the original Xbox game, with a native Quest renderer (Vulkan, s
 **You need your own copy of the game.** This project contains no game files. BLACK belongs to its owners
 (Criterion Games / Electronic Arts). This project is not affiliated with or endorsed by them.
 
+## VR features
+
+- **Hand aiming** with the game's own gun models and animations in your hand, and shots that leave the barrel.
+- **Two-handed guns:** grab the gun with the left grip to steady your aim.
+- **Real scopes:** raise a scoped gun to your eye and the 3D view zooms, with the game's own scope picture.
+- **Physical crouch and melee:** duck for real, swing the gun to melee.
+- **Laser sight**, haptics when you fire, snap or smooth turning, left-handed mode.
+- **VR SETTINGS** page in the game's own menus.
+- Comfort: no camera shake or head bob, and cutscenes on a flat screen.
+
+## Contents
+
+[What you need](#what-you-need) · [Developer mode](#1-turn-on-developer-mode-once) · [Get the APK](#2-get-the-apk) ·
+[Install](#3-install) · [Play](#4-play) · [Controls](#controls-touch-controllers-right-handed) ·
+[VR settings](#vr-settings) · [Saves](#saves) · [FAQ](#faq) · [Problems](#problems) ·
+[Known issues](#known-issues) · [Building](#building-from-source) · [Credits](#credits) · [License](#license)
+
 ---
 
 ## What you need
@@ -150,6 +167,37 @@ below 60. Setting **game rate to 30** is steadier, and a lower resolution helps 
 **Comfort:** your view only turns with your head and the stick. The game's camera shake, recoil and head bob don't
 move your view, and cutscenes play on a flat screen in front of you.
 
+## Saves
+
+Saves go in a `save` folder next to `game` (for example `/sdcard/BlackVR/save/`), and settings in `blackvr.ini`
+in the same place.
+
+- If your game is in `/sdcard/BlackVR/`, saves **survive uninstalling** and updating the app.
+- If it's in `Android/data/com.kenny.blackvr/files/`, **uninstalling deletes them** along with the game files.
+  Copy `save/` off the headset first.
+- To move to a new headset, copy the whole `BlackVR` folder (`game`, `save`, `blackvr.ini`).
+
+## FAQ
+
+**Why do I need my own disc? Why isn't the game included?**
+BLACK is Criterion's and EA's game. This project only ships the port's code: the game's files come from your disc.
+
+**Does it work on Quest 2 / Quest Pro / Pico?**
+It's made for Quest 3 and 3S. Quest 2 and Quest Pro haven't been tested and probably don't have the headroom.
+Pico isn't supported.
+
+**PCVR?**
+No. It runs standalone on the headset. For a flat PC version, see upstream
+[Black-2006-Recomp](https://github.com/portingpete/Black-2006-Recomp).
+
+**My disc is a different version.**
+Only one Xbox release works with the release APK (see [What you need](#what-you-need)). You can
+[build an APK](#building-from-source) from your own disc, but other releases haven't been tested.
+
+**The floor or my height is wrong.**
+Hold both stick clicks for a second. That recentres the view and measures your height again. Stand up straight
+while you do it.
+
 ## Problems
 
 - **Red sky / "no game files":** the folder is wrong or the copy is incomplete. You need
@@ -202,6 +250,12 @@ the game.** Every part of the port and its notes are in [`port/`](port/) and [QU
   [NOTICE](NOTICE).
 - [DrBeef](https://github.com/DrBeef)'s Quest ports, which the controls and scope are modelled on (no code from
   them is used).
+
+## Disclaimer
+
+This is an unofficial fan project. It is not made, endorsed or supported by Criterion Games or Electronic Arts.
+BLACK and its logos are trademarks of their respective owners. No game files are included or distributed here.
+Please don't ask for game files or share them in Issues.
 
 ## License
 
