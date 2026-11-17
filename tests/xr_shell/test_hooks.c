@@ -89,6 +89,8 @@ void vr_set_gun_barrel(const float d[3], int valid) { (void)d; (void)valid; }
 void vr_set_gun_laser(const float m[3], const float d[3], float l, int v) { (void)m; (void)d; (void)l; (void)v; }
 void vr_set_scope_view(float z) { (void)z; }
 float vr_scope_view(void) { return 0.0f; }
+void vr_set_scope_lowered(int l) { (void)l; }
+int vr_scope_lowered(void) { return 0; }
 int vr_scope_aim(VrQuat *q) { (void)q; return 0; }
 void vr_game_haptic(int hand, float strength, uint32_t ms) { (void)hand; (void)strength; (void)ms; }
 unsigned vr_button_presses(void) { return 0; }

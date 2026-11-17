@@ -912,7 +912,10 @@ void xrs_frame(XrShell *s)
             layers[nl++] = (const XrCompositionLayerBaseHeader *)&proj;
             if (renderer && mode == VR_PRESENT_STEREO && !show_quad_too && scoped)
                 nl += xrs_scope_layers(s, layers + nl, (uint32_t)(sizeof(layers) / sizeof(layers[0])) - nl);
-            if (renderer && mode == VR_PRESENT_STEREO && s->submit.hud && s->hud.handle) {
+            /* the rifle is down but the game has not zoomed out yet (the bolt after a shot holds it about a second):
+             * its full-screen scope picture is on the HUD, so the HUD waits (Kenny 2026-11-16: "it should stop the scope
+             * view once i put it down") */
+            if (renderer && mode == VR_PRESENT_STEREO && s->submit.hud && s->hud.handle && !vr_scope_lowered()) {
                 /* the HUD: head-locked (the compositor keeps it on the current head pose), premultiplied alpha */
                 const VrHudLayout *hl = vr_hud_layout();
                 hudq.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;

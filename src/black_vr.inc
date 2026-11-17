@@ -227,6 +227,7 @@ static int bvr_hint_stop(void)
 
 /* The 3D scope view's zoom this camera (black_vr_decide_view), 0: off. */
 static float bvr_scope_view_zoom;
+static int bvr_scope_lowered;      /* ... or the game is zoomed with the rifle down */
 
 /* -2: not the world camera (state untouched); -1: VR presentation inactive. */
 static int black_vr_decide_view(uint32_t camera)
@@ -252,7 +253,12 @@ static int black_vr_decide_view(uint32_t camera)
     if (bvr_zoom() >= bvr_scope_zoom_min()) {
         /* scope_view = zoom: the world stays 3D and the renderer zooms the eyes along the gun (vr_scope_view) */
         if (!vr_game_config()->scope_3d) return VR_PRESENT_FLAT_SCOPE;
-        bvr_scope_view_zoom = bvr_zoom();
+        /* The scope view lasts as long as the rifle is held up (the raise gesture: vr_scope_aim), not as long as the
+         * game stays zoomed: after a shot the game keeps its zoom through the bolt, 1.2-1.3 s past the rifle coming
+         * down (Kenny's log 2026-11-16 19:24:56 -> 19:24:58). Until the game zooms out the view is plain 3D and
+         * the HUD, which carries the game's scope picture, is not shown (vr_scope_lowered). */
+        if (vr_scope_aim(NULL)) bvr_scope_view_zoom = bvr_zoom();
+        else bvr_scope_lowered = 1;
     }
     return VR_PRESENT_STEREO;
 }
@@ -261,8 +267,12 @@ static int black_vr_decide(uint32_t camera)
 {
     int m;
     bvr_scope_view_zoom = 0.0f;
+    bvr_scope_lowered = 0;
     m = black_vr_decide_view(camera);
-    if (m != -2) vr_set_scope_view(m == VR_PRESENT_STEREO ? bvr_scope_view_zoom : 0.0f);   /* one store per camera */
+    if (m != -2) {
+        vr_set_scope_view(m == VR_PRESENT_STEREO ? bvr_scope_view_zoom : 0.0f);   /* one store per camera */
+        vr_set_scope_lowered(m == VR_PRESENT_STEREO && bvr_scope_lowered);
+    }
     return m;
 }
 

@@ -944,6 +944,9 @@ void vr_set_gun_two_handed(int two) { __atomic_store_n(&g_gun_two_handed, two < 
 
 unsigned vr_button_presses(void) { return __atomic_load_n(&g_button_presses, __ATOMIC_RELAXED); }
 static uint32_t g_scope_view_bits;
+static int g_scope_lowered;
+void vr_set_scope_lowered(int lowered) { __atomic_store_n(&g_scope_lowered, lowered != 0, __ATOMIC_RELAXED); }
+int vr_scope_lowered(void) { return __atomic_load_n(&g_scope_lowered, __ATOMIC_RELAXED); }
 int vr_scope_aim(VrQuat *q)
 {
     int on;

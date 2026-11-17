@@ -511,14 +511,14 @@ def secondary_objective_hooks(name, body):
 
 def lod_hooks(name, body):
     """Extend native mesh LOD and prop culling without changing real distance or masks."""
-    # Modes: 0 linear distance, 1 squared distance, 2 projected size ratio.
+    # Modes: 0 linear distance, 1 squared distance, 2 projected size ratio, 3 linear distance of a character.
     sites = {
         "sub_001C8360": [
             ("001C8417", "xmm0.f[0] = xmm0.f[0] * xmm1.f[0]; /* mulss */",
              "xmm0.f[0] = black_lod_value(xmm0.f[0] * xmm1.f[0], 0u); /* native mesh LOD metric */")],
         "sub_001C55A0": [
             ("001C5636", "xmm1.f[0] = xmm1.f[0] * xmm0.f[0]; /* mulss */",
-             "xmm1.f[0] = black_lod_value(xmm1.f[0] * xmm0.f[0], 0u); /* native character LOD metric */")],
+             "xmm1.f[0] = black_lod_value(xmm1.f[0] * xmm0.f[0], 3u); /* native character LOD metric */")],
         "sub_001CA5D0": [
             ("001CA64F", "_fca = xmm1.f[0]; _fcb = xmm2.f[0]; /* comiss */",
              "_fca = black_lod_value(xmm1.f[0], 1u); _fcb = xmm2.f[0]; /* native squared-range cull */"),

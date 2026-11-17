@@ -449,6 +449,10 @@ int vr_scope_aim(VrQuat *q);
  * it with the count when a movie started, to skip the movie on any press. */
 unsigned vr_button_presses(void);
 float vr_scope_view(void);
+/* The game still shows its own scope (zoomed, its full-screen scope picture on the HUD) but the rifle is down: the 3D
+ * scope view is off and the HUD layer is not shown until the game has zoomed out (black_vr_decide). */
+void vr_set_scope_lowered(int lowered);
+int vr_scope_lowered(void);
 int vr_gun_laser(float muzzle[3], float dir[3], float *length_m);
 int vr_gun_barrel(float d[3]);
 /* Game thread: the player fired (the muzzle flash was drawn). Render thread: the time of the last shot (CLOCK_MONOTONIC
