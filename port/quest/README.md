@@ -102,7 +102,7 @@ gives them (any of the four layouts, or your own from the Controls page). Right-
 | Left trigger | grenade |
 | Left grip near the gun | hold the gun with both hands (steadier aim; `two_hand`) |
 | Left X | health pack |
-| Left Y tap / hold | suppressor / fire mode |
+| Left Y tap / hold | fire mode / suppressor |
 | Menu (left) tap / hold 1 s | pause / objectives |
 | Raise a scoped weapon to your eye | look through the scope (`scope_raise`; other weapons never zoom) |
 | Both stick clicks (hold 1 s) | recentre the view and re-measure your standing height (or the Meta button long-press) |

@@ -146,7 +146,7 @@ the Menu held for Back does not press START in the objectives screen).
 | left trigger | Grenade | 27 (LT) |
 | left grip near the gun | two-handed aim | - |
 | left X | Health pack | 33 (d-pad down) |
-| left Y tap / held 0.5 s | Suppressor / Fire mode (the tap acts on release only if not held) | 31 (Y) / 30 (d-pad up) |
+| left Y tap / held 0.5 s | Fire mode / Suppressor (the tap acts on release only if not held) | 30 (d-pad up) / 31 (Y) |
 | left Menu tap / held 1 s | Pause / Back (objectives) | 25 (START) / 36 (BACK) |
 | both stick clicks 1 s | recentre (neither Crouch nor Use: a click only acts once the other stick has stayed up 60 ms) | - |
 | raising a scoped weapon to the eye | the scope (the aim intent, see below) | (16) |

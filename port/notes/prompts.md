@@ -24,7 +24,7 @@ Source: `port/quest/src/vr_prompts.h` (pure, header-only, unit-tested) and `src/
   not the live map, because the VR layer turns Quest inputs into actions and only then presses whatever Xbox
   control the map gives the action. Right-handed: trigger Fire, A Reload, B Melee, stick click Use, stick up/down
   weapon (zoom while scoped), stick sideways turn; left: stick move, click Crouch, trigger Grenade, X Health pack,
-  Y tap Suppressor / hold Fire mode, Menu tap Pause / hold Back; Aim = raise the gun to the eye; look = the head.
+  Y tap Fire mode / hold Suppressor, Menu tap Pause / hold Back; Aim = raise the gun to the eye; look = the head.
   `left_handed` (read as `vr_game_config()->aim_hand`) mirrors the hands; Menu stays left. The unit test drives
   `vr_map_actions` with each input and checks it produces exactly that action (both hands, taps vs holds).
 - **Text** (`vrp_prompt`, `vrp_expand`): tokens become the game's own style, "PRESS ² :", "HOLD ° :",
