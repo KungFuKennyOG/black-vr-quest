@@ -359,6 +359,8 @@ typedef struct SkinRec {
     uint8_t af[16];            /* each vertex attribute: fmt << 4 | components */
     float pal[4][4];           /* the first bone's three rows, and the 20th's first */
     unsigned long long zero;   /* bit k: bone k's three rows (c60+3k..) are all zero */
+    unsigned long long vkey, vhash;   /* where the vertex bytes are, and their hash as drawn */
+    uint32_t vbytes; uint8_t vchanged;
     float lit[5][4];           /* c1..c5: the eye and the lighting terms of the body program */
 } SkinRec;
 static struct { unsigned long long draws, nonfinite, huge, clear, notex, uber, vm; } s_skin;
@@ -366,6 +368,51 @@ static SkinRec s_skin_rec[2][96];
 static int s_skin_n[2], s_skin_cur;
 static unsigned long long s_skin_frame;
 static void skin_dump_frame(const char *tag, int k);
+/* The vertex bytes of the skinned meshes (blend weights present: bodies and the player's arms), by where they are:
+ * static geometry reads the same every frame. The pusher draws well after the game queued the draw (the real GPU
+ * does too), so bytes that differ from what the same mesh held last time were rewritten or replaced under it: logged
+ * as it happens (the vanishing bodies last a second or two, the periodic dump comes every five). */
+static struct { unsigned long long key, hash; uint32_t bytes, icount; unsigned long long seen, changed; } s_vmesh[64];
+static unsigned long long s_vmesh_changes;
+static unsigned long long skin_vhash(const uint8_t *p, size_t n)
+{
+    unsigned long long h = 0x9E3779B97F4A7C15ull ^ (unsigned long long)n, v;
+    size_t i;
+    for (i = 0; i + 8 <= n; i += 8) { memcpy(&v, p + i, 8); h = (h ^ v) * 0xFF51AFD7ED558CCDull; h ^= h >> 29; }
+    for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+    return h;
+}
+static int skin_vertices(const KGpuDraw *d, unsigned long long *key, unsigned long long *hash, uint32_t *bytes)
+{
+    const KGpuAttrSrc *a0 = &d->gvs->attr[0];
+    const uint8_t *lo, *hi;
+    int i, slot = -1, changed = 0;
+    *key = *hash = 0; *bytes = 0;
+    if (!a0->fmt || !d->gvs->attr[1].fmt || a0->hi <= a0->lo || a0->hi - a0->lo > (1 << 20)) return 0;
+    lo = a0->data + a0->lo; hi = a0->data + a0->hi;
+    *key = (unsigned long long)(uintptr_t)lo; *bytes = (uint32_t)(hi - lo);
+    *hash = skin_vhash(lo, (size_t)(hi - lo));
+    for (i = 0; i < 64; i++) {
+        if (s_vmesh[i].key == *key && s_vmesh[i].bytes == *bytes) { slot = i; break; }
+        if (slot < 0 && !s_vmesh[i].key) slot = i;
+    }
+    if (slot < 0) slot = (int)(*key >> 6) & 63;                       /* full: an entry is replaced */
+    if (s_vmesh[slot].key == *key && s_vmesh[slot].bytes == *bytes) {
+        if (s_vmesh[slot].hash != *hash) {
+            changed = 1;
+            s_vmesh[slot].changed++;
+            s_vmesh_changes++;
+            if (s_vmesh_changes <= 40u || !(s_vmesh_changes % 500u))
+                LOG("skin vertices: frame %llu: the mesh at %llX (%u bytes, %u indices) reads differently than the last time it "
+                    "was drawn (%llu changes of this mesh in %llu draws; %llu of all)", (unsigned long long)G.st.frames,
+                    *key & 0xFFFFFFFull, *bytes, d->icount, s_vmesh[slot].changed, s_vmesh[slot].seen, s_vmesh_changes);
+        }
+    } else {
+        s_vmesh[slot].key = *key; s_vmesh[slot].bytes = *bytes; s_vmesh[slot].changed = 0; s_vmesh[slot].seen = 0;
+    }
+    s_vmesh[slot].hash = *hash; s_vmesh[slot].icount = d->icount; s_vmesh[slot].seen++;
+    return changed;
+}
 static void skin_note(const KGpuDraw *d, const KPixelState *ps, bool uber, bool dummy, bool vm, bool stereo, int cull)
 {
     const float *c = d->gvs->constants;
@@ -398,9 +445,15 @@ static void skin_note(const KGpuDraw *d, const KPixelState *ps, bool uber, bool 
     if (dummy) s_skin.notex++;
     if (uber) s_skin.uber++;
     if (vm) s_skin.vm++;
-    if (s_skin_n[s_skin_cur] >= 96) return;
-    r = &s_skin_rec[s_skin_cur][s_skin_n[s_skin_cur]++];
-    memset(r, 0, sizeof(*r));
+    {
+        unsigned long long vk, vh;
+        uint32_t vb;
+        const int vc = skin_vertices(d, &vk, &vh, &vb);
+        if (s_skin_n[s_skin_cur] >= 96) return;
+        r = &s_skin_rec[s_skin_cur][s_skin_n[s_skin_cur]++];
+        memset(r, 0, sizeof(*r));
+        r->vkey = vk; r->vhash = vh; r->vbytes = vb; r->vchanged = (uint8_t)vc;
+    }
     r->vs = d->gvs->hash; r->icount = d->icount; r->vcount = d->vcount;
     memcpy(r->c0, c, sizeof(r->c0));
     r->t0[0] = c[60 * 4 + 3]; r->t0[1] = c[61 * 4 + 3]; r->t0[2] = c[62 * 4 + 3];
@@ -439,6 +492,8 @@ static void skin_dump_frame(const char *tag, int k)
             (double)r->t0[1], (double)r->t0[2], r->blend, r->sf, r->df, r->ztest, r->zfunc, r->zwrite, r->atest, r->afunc,
             r->aref, r->cull, r->uber ? " FALLBACK-SHADER" : "", r->dummy ? " NO-TEXTURE" : "", r->bad ? " BAD-BONES" : "",
             r->vm ? " AS-WEAPON" : "", r->stereo ? "" : " NOT-STEREO");
+        LOG("skin dump %s f %llu %2d: vertices at %llX, %u bytes, hash %08X%s", tag, (unsigned long long)G.st.frames, i,
+            r->vkey & 0xFFFFFFFull, r->vbytes, (unsigned)(r->vhash >> 32), r->vchanged ? " CHANGED" : "");
         LOG("skin dump %s f %llu %2d: zero bones %011llX | c1 %.2f %.2f %.2f %.2f c2 %.3f %.3f %.3f %.3f c3 %.3f %.3f %.3f %.3f c4 "
             "%.3f %.3f %.3f %.3f c5 %.3f %.3f %.3f %.3f", tag, (unsigned long long)G.st.frames, i, r->zero,
             (double)r->lit[0][0], (double)r->lit[0][1], (double)r->lit[0][2], (double)r->lit[0][3],
