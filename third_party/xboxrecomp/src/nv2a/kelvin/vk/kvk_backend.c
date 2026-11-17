@@ -361,12 +361,19 @@ static struct { unsigned long long draws, nonfinite, huge, clear, notex, uber, v
 static SkinRec s_skin_rec[2][96];
 static int s_skin_n[2], s_skin_cur;
 static unsigned long long s_skin_frame;
+static void skin_dump_frame(const char *tag, int k);
 static void skin_note(const KGpuDraw *d, const KPixelState *ps, bool uber, bool dummy, bool vm, bool stereo, int cull)
 {
     const float *c = d->gvs->constants;
     SkinRec *r;
     int i, bad = -1, kind = 0;
-    if (s_skin_frame != G.st.frames) { s_skin_frame = G.st.frames; s_skin_cur ^= 1; s_skin_n[s_skin_cur] = 0; }
+    if (s_skin_frame != G.st.frames) {
+        /* every 5 s or so, the frame just finished goes to the log by itself (Kenny 2026-11-16: no button presses;
+         * he sends the log and a video, and the time of a broken body picks the dump) */
+        static unsigned long long last;
+        if (G.st.frames - last >= 300u && s_skin_n[s_skin_cur] > 0) { last = G.st.frames; skin_dump_frame("auto", s_skin_cur); }
+        s_skin_frame = G.st.frames; s_skin_cur ^= 1; s_skin_n[s_skin_cur] = 0;
+    }
     s_skin.draws++;
     for (i = 60 * 4; i < 192 * 4; i++) {
         const float v = c[i];
@@ -401,21 +408,23 @@ static void skin_note(const KGpuDraw *d, const KPixelState *ps, bool uber, bool 
 /* the skinned draws of the last finished frame and of this one so far, to the log */
 static void skin_dump(const char *why)
 {
-    int f, i;
     LOG("skin dump (%s): %llu skinned world draws so far, %llu non-finite, %llu huge, %llu clear, %llu without a texture, "
         "%llu on the fallback shader, %llu taken for the weapon", why, s_skin.draws, s_skin.nonfinite, s_skin.huge,
         s_skin.clear, s_skin.notex, s_skin.uber, s_skin.vm);
-    for (f = 0; f < 2; f++) {
-        const int k = f ? s_skin_cur : s_skin_cur ^ 1;
-        for (i = 0; i < s_skin_n[k]; i++) {
-            const SkinRec *r = &s_skin_rec[k][i];
-            LOG("skin dump %s %2d: vs %08X idx %u vtx %u c0 %.3f %.3f %.3f %.3f bone0 at %.2f %.2f %.2f blend %u(%u,%u) "
-                "z t%u f%u w%u alpha t%u f%u r%u cull %u%s%s%s%s%s", f ? "now" : "prev", i, r->vs, r->icount, r->vcount,
-                (double)r->c0[0], (double)r->c0[1], (double)r->c0[2], (double)r->c0[3], (double)r->t0[0], (double)r->t0[1],
-                (double)r->t0[2], r->blend, r->sf, r->df, r->ztest, r->zfunc, r->zwrite, r->atest, r->afunc, r->aref,
-                r->cull, r->uber ? " FALLBACK-SHADER" : "", r->dummy ? " NO-TEXTURE" : "", r->bad ? " BAD-BONES" : "",
-                r->vm ? " AS-WEAPON" : "", r->stereo ? "" : " NOT-STEREO");
-        }
+    skin_dump_frame("prev", s_skin_cur ^ 1);
+    skin_dump_frame("now", s_skin_cur);
+}
+static void skin_dump_frame(const char *tag, int k)
+{
+    int i;
+    for (i = 0; i < s_skin_n[k]; i++) {
+        const SkinRec *r = &s_skin_rec[k][i];
+        LOG("skin dump %s f %llu %2d: vs %08X idx %u vtx %u c0 %.3f %.3f %.3f %.3f bone0 at %.2f %.2f %.2f blend %u(%u,%u) "
+            "z t%u f%u w%u alpha t%u f%u r%u cull %u%s%s%s%s%s", tag, (unsigned long long)G.st.frames, i, r->vs, r->icount,
+            r->vcount, (double)r->c0[0], (double)r->c0[1], (double)r->c0[2], (double)r->c0[3], (double)r->t0[0],
+            (double)r->t0[1], (double)r->t0[2], r->blend, r->sf, r->df, r->ztest, r->zfunc, r->zwrite, r->atest, r->afunc,
+            r->aref, r->cull, r->uber ? " FALLBACK-SHADER" : "", r->dummy ? " NO-TEXTURE" : "", r->bad ? " BAD-BONES" : "",
+            r->vm ? " AS-WEAPON" : "", r->stereo ? "" : " NOT-STEREO");
     }
 }
 static bool world_main_draw(const KvkSurf *cs, bool hud);
