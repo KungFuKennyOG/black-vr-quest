@@ -253,7 +253,8 @@ the game's ADS to be accurate: nothing is hooked. The spread's inputs are in `Vr
   1 -> 0; ducking while already crouched by the click: no press. **Melee**: B and the scripted 4 m/s swing
   ("melee swing: 4.00 m/s") both set the melee intent +4B, weapon state 28 -> 29 (the melee). **Grenade**:
   intent +43. **Health pack**: X sets latch +108 (1EA730 ran; no pack to use). **Suppressor**: Y tap ->
-  latch +107. **Fire mode**: Y hold -> d-pad up tap (the pistol has one mode). **Weapon next/prev**: the
+  latch +107. **Fire mode**: Y hold -> d-pad up tap (the pistol has one mode; this run predates the
+  2026-11-17 swap: now Y tap = fire mode, Y hold = suppressor). **Weapon next/prev**: the
   d-pad taps go out (edge-read by 1F17F0) but the weapon in hand never changed (actor +2BA = 2, slot 0;
   unverified: nothing to switch to found). **Use**: X goes out, no latch change (nothing usable in reach;
   unverified). **Pause**: Menu tap -> FLAT (pause), B resumes. **Back**: Menu hold -> BACK tap goes out, no
