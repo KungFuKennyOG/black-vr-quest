@@ -127,3 +127,100 @@ void black_lod_trace(uint32_t site, uint32_t object)
     fesetenv(&caller_environment);
     _mm_setcsr(caller_csr);
 }
+
+
+/* ---- pose trace (vanishing head/legs, 2026-11-17) -----------------------------------------------------------------
+ * On the headset a soldier's head and leg bones snap to one fixed other pose for 0.3-0.9 s and snap back; torso and arm
+ * bones do not move. sub_00091EF0 produces the pose: sub_00097E00 has sub_00097380 walk the skeleton's animation tree
+ * (root at +0xC, recursing per node) into one of two shared scratch poses (0x2C3270, 0x2C3F50). These three calls
+ * (scripts/generate.py pose_trace_hooks) log, per skeleton, that walk whenever it differs from the one before: which
+ * nodes were visited, their first words, the flags they were visited with, and where the result is. Reads only. */
+typedef struct BlackPoseNode { uint32_t node, w[6], child[8], flags, extra; float time, prev; } BlackPoseNode;
+typedef struct BlackPoseWalk { uint32_t skeleton, result, state, f98C, f970; int n, total, overrides, f1C8; BlackPoseNode l[8]; } BlackPoseWalk;
+static BlackPoseWalk black_pose_now;
+static BlackPoseWalk black_pose_last[24];
+static unsigned long long black_pose_changes;
+static int black_pose_open;
+
+void black_pose_begin(uint32_t skeleton)
+{
+    black_pose_now.skeleton = skeleton; black_pose_now.result = 0; black_pose_now.n = 0; black_pose_now.total = 0;
+    black_pose_now.state = black_pose_now.f98C = black_pose_now.f970 = 0u; black_pose_now.overrides = black_pose_now.f1C8 = 0;
+    if (black_pc_ram_span(skeleton, 0x9B0u)) {
+        black_pose_now.state = GUEST32(skeleton); black_pose_now.f98C = GUEST32(skeleton + 0x98Cu);
+        black_pose_now.f970 = GUEST32(skeleton + 0x970u);
+        black_pose_now.overrides = (int16_t)(GUEST32(skeleton + 0x5Cu) & 0xFFFFu);       /* bone overrides (sub_00095680) */
+        black_pose_now.f1C8 = (int16_t)(GUEST32(skeleton + 0x1C8u) & 0xFFFFu);
+    }
+    black_pose_open = 1;
+}
+
+/* sub_00097380(skeleton, node, x, time, previous time, flags, n): its arguments, at its entry */
+void black_pose_node(uint32_t esp)
+{
+    BlackPoseNode *l;
+    uint32_t node, t, p;
+    int i;
+    if (!black_pose_open || !black_pc_ram_span(esp, 0x20u)) return;
+    black_pose_now.total++;
+    if (black_pose_now.n >= 8) return;
+    node = GUEST32(esp + 8u);
+    l = &black_pose_now.l[black_pose_now.n++];
+    l->node = node; l->flags = GUEST32(esp + 0x18u); l->extra = GUEST32(esp + 0x1Cu);
+    t = GUEST32(esp + 0x10u); p = GUEST32(esp + 0x14u);
+    memcpy(&l->time, &t, 4); memcpy(&l->prev, &p, 4);
+    for (i = 0; i < 6; i++) l->w[i] = black_pc_ram_span(node, 0x18u) ? GUEST32(node + 4u * (uint32_t)i) : 0u;
+    for (i = 0; i < 8; i++) l->child[i] = black_pc_ram_span(l->w[4], 0x20u) ? GUEST32(l->w[4] + 4u * (uint32_t)i) : 0u;   /* what the node points at */
+}
+
+void black_pose_end(uint32_t result)
+{
+    BlackPoseWalk *last = NULL;
+    int i, changed = 0;
+    if (!black_pose_open) return;
+    black_pose_open = 0;
+    black_pose_now.result = result;
+    for (i = 0; i < 24; i++) {
+        if (black_pose_last[i].skeleton == black_pose_now.skeleton) { last = &black_pose_last[i]; break; }
+        if (!last && !black_pose_last[i].skeleton) last = &black_pose_last[i];
+    }
+    if (!last) return;
+    if (last->skeleton != black_pose_now.skeleton || last->result != result || last->n != black_pose_now.n ||
+        last->total != black_pose_now.total || last->state != black_pose_now.state || last->overrides != black_pose_now.overrides ||
+        last->f98C != black_pose_now.f98C || last->f1C8 != black_pose_now.f1C8) changed = 1;
+    for (i = 0; !changed && i < black_pose_now.n; i++)
+        if (last->l[i].node != black_pose_now.l[i].node || last->l[i].flags != black_pose_now.l[i].flags ||
+            last->l[i].w[0] != black_pose_now.l[i].w[0] || last->l[i].w[1] != black_pose_now.l[i].w[1] ||
+            last->l[i].w[4] != black_pose_now.l[i].w[4] || last->l[i].child[0] != black_pose_now.l[i].child[0] ||
+            last->l[i].child[1] != black_pose_now.l[i].child[1] || last->l[i].child[2] != black_pose_now.l[i].child[2] ||
+            last->l[i].child[3] != black_pose_now.l[i].child[3]) changed = 1;
+    if (changed) {
+        black_pose_changes++;
+        if (black_pose_changes <= 1500u || !(black_pose_changes % 500u)) {
+            /* the host's own floating-point state for the formatting, the guest's back afterwards (as black_lod_trace) */
+            const unsigned csr0 = _mm_getcsr();
+            fenv_t env0;
+            char line[1100]; int n = 0;
+            fegetenv(&env0);
+            fesetenv(FE_DFL_ENV);
+            _mm_setcsr(0x1F80u);
+            line[0] = 0;
+            for (i = 0; i < black_pose_now.n && n < 980; i++) {
+                const BlackPoseNode *l = &black_pose_now.l[i];
+                n += snprintf(line + n, sizeof line - (size_t)n, " | node %08X [%08X %08X %08X %08X %08X %08X] -> [%08X %08X %08X %08X %08X "
+                              "%08X %08X %08X] flags %X/%d t %.4f prev %.4f", l->node, l->w[0], l->w[1], l->w[2], l->w[3], l->w[4], l->w[5],
+                              l->child[0], l->child[1], l->child[2], l->child[3], l->child[4], l->child[5], l->child[6], l->child[7],
+                              l->flags, (int)l->extra, (double)l->time, (double)l->prev);
+            }
+            fprintf(stderr, "[POSE] skeleton %08X state %08X (was %08X) overrides %d +1C8 %d +98C %08X +970 %08X: %d node visit(s), result %08X "
+                    "(was %d visit(s), %08X)%s [change %llu]\n", black_pose_now.skeleton, black_pose_now.state,
+                    last->skeleton == black_pose_now.skeleton ? last->state : 0u, black_pose_now.overrides, black_pose_now.f1C8,
+                    black_pose_now.f98C, black_pose_now.f970, black_pose_now.total, result,
+                    last->skeleton == black_pose_now.skeleton ? last->total : -1,
+                    last->skeleton == black_pose_now.skeleton ? last->result : 0u, line, black_pose_changes);
+            fesetenv(&env0);
+            _mm_setcsr(csr0);
+        }
+    }
+    *last = black_pose_now;
+}

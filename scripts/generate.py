@@ -449,6 +449,7 @@ def title_hooks(name, body):
     body = checkpoint_hooks(name, body)
     body = secondary_objective_hooks(name, body)
     body = lod_hooks(name, body)
+    body = pose_trace_hooks(name, body)
     body = gameplay_tuning_hooks(name, body)
     body = scope_mask_boundary(name, body)
     return body
@@ -507,6 +508,24 @@ def secondary_objective_hooks(name, body):
     if body.count(native) != native_count or segment.count(native) != 1 or hooked in body:
         raise ValueError("Native secondary-objective comparison changed: " + name)
     return body[:start] + segment.replace(native, hooked) + body[stop:]
+
+
+def pose_trace_hooks(name, body):
+    """Log how a character's animation is evaluated, when that changes (vanishing head/legs, 2026-11-17).
+
+    sub_00091EF0 produces a skeleton's pose: sub_00097E00 has sub_00097380 walk the skeleton's animation tree
+    (root node at +0xC; the walk recurses per node) into one of two shared scratch poses, which sub_00097410 then
+    turns into bone matrices. Diagnostic only: guest state is untouched.
+    """
+    if name == "sub_00091EF0":
+        body = replace_once(body, "loc_00091EF0: ;\n",
+            "loc_00091EF0: ;\n    black_pose_begin(l_eax); /* pose trace */\n")
+        body = replace_once(body, "loc_00092016: ;\n",
+            "loc_00092016: ;\n    black_pose_end(l_edi); /* pose trace */\n")
+    elif name == "sub_00097380":
+        body = replace_once(body, "loc_00097380: ;\n",
+            "loc_00097380: ;\n    black_pose_node(l_esp); /* pose trace: one node of the animation tree */\n")
+    return body
 
 
 def lod_hooks(name, body):
@@ -1021,6 +1040,8 @@ def main():
     declarations += "\nextern int black_secondary_requirement_met(int);\n"
     declarations += "\nextern uint32_t black_audio_queue_completion(uint32_t);\n"
     declarations += "extern float black_lod_value(float, unsigned);\nextern void black_lod_trace(uint32_t, uint32_t);\n"
+    declarations += ("extern void black_pose_begin(uint32_t);\nextern void black_pose_node(uint32_t);\n"
+                     "extern void black_pose_end(uint32_t);\n")
     declarations += "extern float black_tuning_spawn_health(uint32_t, float);\n"
     declarations += "extern float black_tuning_bullet_damage(uint32_t, uint32_t, float);\n"
     declarations += "extern unsigned black_tuning_headshot(uint32_t, uint32_t, unsigned, unsigned);\n"
