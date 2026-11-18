@@ -161,7 +161,7 @@ Open **Library → Unknown sources → BLACK VR**. Stand in a clear space; the g
 | Left trigger | Grenade |
 | Left grip on the gun | Hold it with both hands (steadier aim) |
 | Left X | Health pack |
-| Left Y | Tap: suppressor. Hold: fire mode |
+| Left Y | Tap: fire mode. Hold: suppressor |
 | Menu | Tap: pause. Hold 1 s: objectives |
 | Raise a scoped gun to your eye | Look through the scope (two-handed guns need the left hand on them) |
 | Hold both stick clicks 1 s | Recentre the view and re-measure your height |
@@ -261,8 +261,20 @@ for arm64 and packages `build-quest-game/blackvr.apk`. It is resumable: run it a
 The first run takes about an hour. `scripts/quest_setup.sh --list` shows each step;
 [port/notes/setup.md](port/notes/setup.md) has the details.
 
-**Don't share an APK built with `--game`, generated code (`src/recomp/`), shader caches or anything else made from
-the game.** Every part of the port and its notes are in [`port/`](port/) and [QUEST_PORT.md](QUEST_PORT.md).
+**Don't share generated code (`src/recomp/`), shader caches, captures, logs or anything else made from the game.**
+
+### How it's put together
+
+- Base: [portingpete/Black-2006-Recomp](https://github.com/portingpete/Black-2006-Recomp) @ `2041e5a97f13`.
+- Runtime: [portingpete/xboxrecomp](https://github.com/portingpete/xboxrecomp) @ `a40397f9baec`, vendored into
+  `third_party/xboxrecomp` with this port's changes: the arm64 runtime and MMIO fault decoding, a Kelvin → Vulkan
+  backend with stereo/multiview, and USB/OHCI and APU fixes.
+- Quest app (OpenXR shell, preflight, install script): [`port/quest/`](port/quest/). Design notes for each area:
+  [`port/notes/`](port/notes/).
+- Tests: [`tests/`](tests/) (arm64 runtime, Vulkan renderer, VR glue with a fake OpenXR runtime, a headless
+  full-game harness, and more).
+- Upstream's GitHub Actions workflows are parked in `.github/workflows-upstream/` so they don't run here.
+- The flat PC version's readme from upstream is [README-PC.md](README-PC.md).
 
 ## Credits
 
