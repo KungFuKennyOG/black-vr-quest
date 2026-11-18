@@ -1,87 +1,82 @@
-# BLACK VR for Meta Quest 3
+# BLACK VR — Quest 3
 
-An unofficial, fan-made VR port of **BLACK (2006)** for standalone Meta Quest 3 / 3S.
-No PC is needed to play. You aim with your hands, crouch in real life, raise scoped guns to your eye, and can hold
-two-handed weapons with both hands.
+An unofficial community VR port of **BLACK (2006)** for standalone **Meta Quest 3 / 3S**, built on
+[portingpete/Black-2006-Recomp](https://github.com/portingpete/Black-2006-Recomp), the static recompilation of the
+original Xbox game. No PC is needed to play.
 
-It is built on [portingpete/Black-2006-Recomp](https://github.com/portingpete/Black-2006-Recomp), a static
-recompilation of the original Xbox game, with a native Quest renderer (Vulkan, stereo) and an OpenXR shell.
+**Latest release:** [v0.1.0-alpha.1](../../releases/latest). Read its release notes before you play, especially the
+known issues.
 
-> **Early alpha.** It runs the game from boot through the menus and into missions in stereo, with sound, on a
-> Quest 3. Expect rough edges, frame drops in busy fights, and bugs. See [Known issues](#known-issues).
+> **Early alpha / work in progress.** The whole game runs in stereo with sound on a Quest 3, but these are still
+> unfinished or untested on a headset:
+> - how your arms and enemy bodies look up close
+> - the 3D scope's feel and size, and the two-handed requirement for scoped rifles
+> - frame rate in the busiest fights (levels 6 and 7 especially)
+> - gesture tuning (swing to melee, duck, raise to scope)
+> - comfort extras: seated mode, a vignette
+>
+> If something feels off, try changing one VR setting at a time and say which one in your report.
 
-**This project does not include any game files.** You need your own legally acquired copy of BLACK for the
-original Xbox. We do not condone piracy. BLACK belongs to Criterion Games / Electronic Arts, and this project is not
-affiliated with or endorsed by them.
+## Download and update
 
-### Quick start
+| Platform | Download |
+|---|---|
+| **Meta Quest 3 / 3S** (standalone VR) | [`blackvr.apk`](../../releases/latest) |
 
-1. [Check your disc](#check-your-disc) is the supported release.
-2. Turn on [developer mode](#1-turn-on-developer-mode-once) on the headset.
-3. Download `blackvr.apk` from [Releases](../../releases).
-4. [Install it and copy your game files](#3-install). On a Mac it's one command.
-5. Play from **Library → Unknown sources**.
+- **Requirements:** Quest 3 or 3S, developer mode on, about 1.5 GB free, and your own BLACK disc (see
+  [Game files](#game-files)).
+- **First install:** sideload with [SideQuest](https://sidequestvr.com/setup-howto), adb, or the one-command Mac
+  script. Full steps: [Install](#install).
+- **Updating:** install the new APK over the old one. **Don't uninstall first**: if your game is in the app's own
+  folder, uninstalling deletes it along with your saves.
+- Only download BLACK VR from this repository's [Releases](../../releases) page. It isn't distributed anywhere else, so
+  an APK from another site, Discord server or "game included" bundle didn't come from here.
 
-## VR features
+### Game files
 
-- **Hand aiming** with the game's own gun models and animations in your hand, and shots that leave the barrel.
-- **Two-handed guns:** grab the gun with the left grip to steady your aim.
-- **Real scopes:** raise a scoped gun to your eye and the 3D view zooms, with the game's own scope picture.
-- **Physical crouch and melee:** duck for real, swing the gun to melee.
-- **Laser sight**, haptics when you fire, snap or smooth turning, left-handed mode.
-- **VR SETTINGS** page in the game's own menus.
-- Comfort: no camera shake or head bob, and cutscenes on a flat screen.
+**The app contains no game files.** You need your own legally acquired copy of BLACK for the original Xbox; we do
+not condone piracy. You copy your own disc's files to the headset (see [Install](#install)).
 
-## Contents
+- **Tested release:** *Black (USA)*, whose `default.xbe` has SHA-256
+  `df2739c372d254a90aeeccf5971d12097f22d89fbb90db021fda96dd4deb68f6`. Other regions, the PS2 version and repacks
+  aren't supported; the app tells you if your disc doesn't match.
+- A full dump matters: missing files mean missing levels or cutscenes. A full Redump image (7.8 GB) or a trimmed
+  XISO both work.
+- To check your disc, run this on the `default.xbe` from your extracted disc: `shasum -a 256 default.xbe` on Mac or
+  Linux, or `Get-FileHash default.xbe` in Windows PowerShell. The installer and the app check it too.
 
-[What you need](#what-you-need) · [Developer mode](#1-turn-on-developer-mode-once) · [Get the APK](#2-get-the-apk) ·
-[Install](#3-install) · [Play](#4-play) · [Controls](#controls-touch-controllers-right-handed) ·
-[VR settings](#vr-settings) · [Saves](#saves) · [FAQ](#faq) · [Problems](#problems) ·
-[Known issues](#known-issues) · [Building](#building-from-source) · [Credits](#credits) · [License](#license)
+## What's in it
+
+- **Weapons:** the game's own gun models and animations in your hand, shots that leave the barrel, a two-handed grip
+  with the left hand, a laser sight, and haptics when you fire.
+- **Scopes:** raise a scoped gun to your eye and the 3D view zooms, with the game's own scope picture.
+- **Movement and combat:** duck for real to crouch, swing the gun to melee, move towards your head, gun hand or left
+  hand, snap or smooth turning, left-handed mode.
+- **Graphics:** a native Vulkan stereo renderer, 60 Hz game on a 120 Hz display by default (30 Hz option), adjustable
+  resolution.
+- **Comfort:** your view only moves with your head and the stick: no camera shake, recoil or head bob, and
+  cutscenes on a flat screen in front of you.
+- **Settings:** a VR SETTINGS page inside the game's own Options menu.
 
 ---
 
-## What you need
+## Install
 
-- A **Meta Quest 3 or 3S** with **developer mode** on (see step 1).
-- Your own **original Xbox** disc of BLACK, as a disc image (`.iso` / `.xiso`) or an extracted folder.
-  - Only the release this port was built from works. Its `default.xbe` has the SHA-256
-    `df2739c372d254a90aeeccf5971d12097f22d89fbb90db021fda96dd4deb68f6`.
-  - The PS2 version and other Xbox releases won't work. The app tells you if the disc doesn't match.
-  - A full dump matters: missing files mean missing levels or cutscenes.
-- About **1.5 GB** free on the headset.
-- Only download BLACK VR from this repository's [Releases](../../releases) page. It isn't distributed anywhere
-  else, so an APK from another site, Discord server or "game included" bundle didn't come from here.
-- A **USB-C data cable** and a computer (Mac, Windows or Linux) to copy things to the headset. An Android phone works
-  too (see [Without a computer](#without-a-computer)).
-
-### Check your disc
-
-Check the `default.xbe` from your extracted disc before you start:
-
-- Mac / Linux: `shasum -a 256 default.xbe`
-- Windows (PowerShell): `Get-FileHash default.xbe`
-
-It should print `df2739c372d254a90aeeccf5971d12097f22d89fbb90db021fda96dd4deb68f6`. If it doesn't, the release
-APK won't run your disc. Don't worry if you only have the image: the app checks it at startup too, and the Mac
-installer extracts it for you.
-
-## 1. Turn on developer mode (once)
-
+### 1. Turn on developer mode (once)
 1. Create a free Meta developer organisation at [developers.meta.com](https://developers.meta.com/horizon/)
    (any name works).
 2. In the **Meta Horizon** phone app: **Menu → Devices → your headset → Headset settings → Developer mode → on**.
 3. Restart the headset.
 
-## 2. Get the APK
+### 2. Get the APK
 
 Download the latest `blackvr.apk` from the [Releases](../../releases) page.
 
 (Or build it yourself from your own disc: see [Building from source](#building-from-source).)
 
-## 3. Install
+### 3. Install the APK and your game files
 
-### On a Mac: one command
+#### On a Mac: one command
 
 Put these three things in one folder:
 
@@ -102,7 +97,7 @@ The script installs the tools it needs through [Homebrew](https://brew.sh) (inst
 installs the app, copies the game files (about 1.2 GB, a few minutes) and starts BLACK VR. Press **Ctrl+C** when
 you're done; it saves a log file next to the script. Run it again later to update: steps already done are skipped.
 
-### On Windows or Linux
+#### On Windows or Linux
 
 1. **Extract the disc** if you have an image. Use [extract-xiso](https://github.com/XboxDev/extract-xiso/releases):
    `extract-xiso -x BLACK.iso`. You get a folder with `default.xbe` inside; rename it to `game`.
@@ -117,13 +112,13 @@ you're done; it saves a log file next to the script. Run it again later to updat
    page; turn it on for BLACK VR and start the app again.
    (Or with adb: `adb shell appops set com.kenny.blackvr MANAGE_EXTERNAL_STORAGE allow`.)
 
-### Without a computer
+#### Without a computer
 
 With an Android phone, a USB-C OTG cable and an ADB app such as **Bugjaeger**: connect the phone to the headset,
 accept USB debugging in the headset, install `blackvr.apk` from the phone, and push your `game` folder to
 `/sdcard/BlackVR/`. Then do step 4 above in the headset.
 
-### Where the app looks for the game
+#### Where the app looks for the game
 
 In order (the first one that has `default.xbe` wins):
 
@@ -134,7 +129,7 @@ In order (the first one that has `default.xbe` wins):
 
 Folders 2-4 need *All files access*. Settings go in `blackvr.ini` and saves in `save/`, next to the `game` folder.
 
-## 4. Play
+### 4. Play
 
 Open **Library → Unknown sources → BLACK VR**. Stand in a clear space; the game uses your real height.
 
@@ -142,8 +137,8 @@ Open **Library → Unknown sources → BLACK VR**. Stand in a clear space; the g
 |---|---|
 | A test room with a **red sky** | No game files found. Check the folder (step 3). |
 | A test room with a normal sky | The game is loading. Wait a few seconds. |
-| A **solid red panel** | A startup self-check failed. See [Problems](#problems). |
-| An **orange panel** | The game stopped during startup. See [Problems](#problems). |
+| A **solid red panel** | A startup self-check failed. See [Problems](#problems-and-support). |
+| An **orange panel** | The game stopped during startup. See [Problems](#problems-and-support). |
 
 ## Controls (Touch controllers, right-handed)
 
@@ -213,19 +208,19 @@ No. It runs standalone on the headset. For a flat PC version, see upstream
 [Black-2006-Recomp](https://github.com/portingpete/Black-2006-Recomp).
 
 **My disc is a different version.**
-Only one Xbox release works with the release APK (see [What you need](#what-you-need)). You can
+Only one Xbox release works with the release APK (see [What you need](#game-files)). You can
 [build an APK](#building-from-source) from your own disc, but other releases haven't been tested.
 
 **The floor or my height is wrong.**
 Hold both stick clicks for a second. That recentres the view and measures your height again. Stand up straight
 while you do it.
 
-## Problems
+## Problems and support
 
 - **Red sky / "no game files":** the folder is wrong or the copy is incomplete. You need
   `BlackVR/game/default.xbe` on the headset, plus the rest of the disc next to it.
 - **"The recompiled code matches another XBE":** your disc is a different release from the one this APK was built
-  for. Only the release in [What you need](#what-you-need) works with the release APK. You can build an APK
+  for. Only the release in [What you need](#game-files) works with the release APK. You can build an APK
   for your own disc (see [Building from source](#building-from-source)).
 - **Red or orange panel, crash or freeze:** get the log and open an issue.
   - Mac: `bash mac_install.sh --log-only` records a run; `bash mac_install.sh --pull-logs` copies the game's own logs
@@ -235,7 +230,17 @@ while you do it.
 - **Install fails** ("signatures do not match"): uninstall the old BLACK VR first. That also deletes the game files
   in the app's own folder, so copy them again.
 
-Report problems in [Issues](../../issues) with your headset model, what you saw and the log file. Don't attach game files.
+### Reporting a bug (or that it works!)
+
+Open an [issue](../../issues) with:
+
+- headset model and its OS version
+- the BLACK VR version, and whether your disc matched the tested release
+- the VR settings you changed
+- what you did, what you saw, and which level
+- the log file
+
+Before you post a log, cut out anything private (account names, Wi-Fi names). Never attach game files.
 
 ## Known issues
 
