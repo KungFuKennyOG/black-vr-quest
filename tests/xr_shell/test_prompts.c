@@ -90,7 +90,7 @@ static void test_mapping_matches_layer(void)
     CHECK(vrp_slot_input(27, VRP_RIGHT).hand == VRP_LEFT && vrp_slot_input(27, VRP_LEFT).hand == VRP_RIGHT);
     CHECK(vrp_slot_input(1, VRP_RIGHT).kind == VRP_STICK && vrp_slot_input(1, VRP_RIGHT).hand == VRP_LEFT);
     CHECK(vrp_slot_input(13, VRP_LEFT).kind == VRP_STICK_CLICK && vrp_slot_input(13, VRP_LEFT).hand == VRP_LEFT);
-    CHECK(vrp_slot_input(30, VRP_RIGHT).hold && !vrp_slot_input(31, VRP_RIGHT).hold);
+    CHECK(vrp_slot_input(31, VRP_RIGHT).hold && !vrp_slot_input(30, VRP_RIGHT).hold);
     CHECK(vrp_slot_input(36, VRP_LEFT).kind == VRP_MENU && vrp_slot_input(36, VRP_RIGHT).hand == VRP_LEFT);
     CHECK(vrp_slot_input(16, VRP_RIGHT).kind == VRP_RAISE && vrp_slot_input(7, VRP_RIGHT).kind == VRP_HEAD);
     CHECK(vrp_slot_input(34, VRP_RIGHT).kind == VRP_NONE && vrp_slot_input(0, VRP_RIGHT).kind == VRP_NONE &&
@@ -103,8 +103,8 @@ static void test_text(void)
     CHECK(vrp_prompt(vrp_slot_input(11, VRP_RIGHT), out, 64) == 9);
     CHECK(eq(out, "PRESS \xB2 :"));
     CHECK(vrp_prompt(vrp_slot_input(11, VRP_LEFT), out, 64) > 0 && out[6] == VRP_CH_X);
-    CHECK(vrp_prompt(vrp_slot_input(30, VRP_RIGHT), out, 64) > 0 && eq(out, "HOLD \xB0 :"));
-    CHECK(vrp_prompt(vrp_slot_input(30, VRP_LEFT), out, 64) > 0 && out[5] == VRP_CH_B);
+    CHECK(vrp_prompt(vrp_slot_input(31, VRP_RIGHT), out, 64) > 0 && eq(out, "HOLD \xB0 :"));
+    CHECK(vrp_prompt(vrp_slot_input(31, VRP_LEFT), out, 64) > 0 && out[5] == VRP_CH_B);
     CHECK(vrp_prompt(vrp_slot_input(36, VRP_RIGHT), out, 64) > 0 && out[0] == 'H' && out[5] == VRP_CH_MENU);
     CHECK(vrp_prompt(vrp_slot_input(9, VRP_RIGHT), out, 64) == 8 && out[5] == VRP_CH_RT && eq(out + 6, " :"));
     CHECK(vrp_prompt(vrp_slot_input(9, VRP_LEFT), out, 64) == 8 && out[5] == VRP_CH_LT);
@@ -120,7 +120,7 @@ static void test_text(void)
     CHECK(vrp_short(vrp_slot_input(13, VRP_RIGHT), out, 64, VRP_SHORT_BARE) == 1 && out[0] == VRP_CH_R_CLICK);
     CHECK(vrp_short(vrp_slot_input(14, VRP_RIGHT), out, 64, 0) == 4 && out[0] == VRP_CH_R_UD && eq(out + 1, " UP"));
     CHECK(vrp_short(vrp_slot_input(14, VRP_RIGHT), out, 64, VRP_SHORT_BARE) == 1);
-    CHECK(vrp_short(vrp_slot_input(30, VRP_RIGHT), out, 64, 0) == 6 && eq(out, "HOLD \xB0"));
+    CHECK(vrp_short(vrp_slot_input(31, VRP_RIGHT), out, 64, 0) == 6 && eq(out, "HOLD \xB0"));
     CHECK(vrp_short(vrp_slot_input(16, VRP_RIGHT), out, 64, 0) > 0 && eq(out, "RAISE GUN TO EYE"));
     /* every input's character carries a glyph; the characters are distinct */
     {

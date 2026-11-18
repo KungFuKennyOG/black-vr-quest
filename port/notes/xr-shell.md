@@ -146,7 +146,7 @@ the Menu held for Back does not press START in the objectives screen).
 | left trigger | Grenade | 27 (LT) |
 | left grip near the gun | two-handed aim | - |
 | left X | Health pack | 33 (d-pad down) |
-| left Y tap / held 0.5 s | Suppressor / Fire mode (the tap acts on release only if not held) | 31 (Y) / 30 (d-pad up) |
+| left Y tap / held 0.5 s | Fire mode / Suppressor (the tap acts on release only if not held) | 30 (d-pad up) / 31 (Y) |
 | left Menu tap / held 1 s | Pause / Back (objectives) | 25 (START) / 36 (BACK) |
 | both stick clicks 1 s | recentre (neither Crouch nor Use: a click only acts once the other stick has stayed up 60 ms) | - |
 | raising a scoped weapon to the eye | the scope (the aim intent, see below) | (16) |
@@ -253,7 +253,8 @@ the game's ADS to be accurate: nothing is hooked. The spread's inputs are in `Vr
   1 -> 0; ducking while already crouched by the click: no press. **Melee**: B and the scripted 4 m/s swing
   ("melee swing: 4.00 m/s") both set the melee intent +4B, weapon state 28 -> 29 (the melee). **Grenade**:
   intent +43. **Health pack**: X sets latch +108 (1EA730 ran; no pack to use). **Suppressor**: Y tap ->
-  latch +107. **Fire mode**: Y hold -> d-pad up tap (the pistol has one mode). **Weapon next/prev**: the
+  latch +107. **Fire mode**: Y hold -> d-pad up tap (the pistol has one mode; this run predates the
+  2026-11-17 swap: now Y tap = fire mode, Y hold = suppressor). **Weapon next/prev**: the
   d-pad taps go out (edge-read by 1F17F0) but the weapon in hand never changed (actor +2BA = 2, slot 0;
   unverified: nothing to switch to found). **Use**: X goes out, no latch change (nothing usable in reach;
   unverified). **Pause**: Menu tap -> FLAT (pause), B resumes. **Back**: Menu hold -> BACK tap goes out, no

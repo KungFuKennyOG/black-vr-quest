@@ -152,17 +152,17 @@ static void test_taps(void)
     CHECK(held_frames(&c, &rt, &t, &x, dt, 10, VR_PAD_LEFT_THUMB) >= 5);
     t.lclick = 0;
     run(&c, &rt, &t, &x, dt, NULL);
-    /* Y tap: Suppressor (Y here) on release, a pulse of ~0.15 s; no Fire mode */
+    /* Y tap: Fire mode (d-pad up) on release, a pulse of ~0.15 s; no Suppressor */
     t.y = 1;
     CHECK(held_frames(&c, &rt, &t, &x, dt, 10, VR_PAD_Y | VR_PAD_DPAD_UP) == 0);
     t.y = 0;
-    on = held_frames(&c, &rt, &t, &x, dt, 30, VR_PAD_Y);
+    on = held_frames(&c, &rt, &t, &x, dt, 30, VR_PAD_DPAD_UP);
     CHECK(on >= 10 && on <= 12);
-    CHECK(held_frames(&c, &rt, &t, &x, dt, 30, VR_PAD_DPAD_UP) == 0);
-    /* Y held 0.5 s: Fire mode (d-pad up) once at 0.5 s, nothing on release */
+    CHECK(held_frames(&c, &rt, &t, &x, dt, 30, VR_PAD_Y) == 0);
+    /* Y held 0.5 s: Suppressor (Y here) once at 0.5 s, nothing on release */
     t.y = 1;
-    CHECK(held_frames(&c, &rt, &t, &x, dt, 35, VR_PAD_DPAD_UP) == 0);   /* 0.49 s */
-    on = held_frames(&c, &rt, &t, &x, dt, 60, VR_PAD_DPAD_UP);
+    CHECK(held_frames(&c, &rt, &t, &x, dt, 35, VR_PAD_Y) == 0);         /* 0.49 s */
+    on = held_frames(&c, &rt, &t, &x, dt, 60, VR_PAD_Y);
     CHECK(on >= 10 && on <= 12);
     t.y = 0;
     CHECK(held_frames(&c, &rt, &t, &x, dt, 30, VR_PAD_Y | VR_PAD_DPAD_UP) == 0);
@@ -194,12 +194,12 @@ static void test_taps(void)
     {
         int on1 = 0, on2 = 0, on3 = 0;
         x.ticks_valid = 1; x.game_ticks = 100;
-        t.y = 1; run(&c, &rt, &t, &x, dt, NULL); t.y = 0;           /* a Suppressor tap */
-        on1 = held_frames(&c, &rt, &t, &x, dt, 100, VR_PAD_Y);      /* 1.4 s, no game update: held all along */
+        t.y = 1; run(&c, &rt, &t, &x, dt, NULL); t.y = 0;           /* a Fire mode tap */
+        on1 = held_frames(&c, &rt, &t, &x, dt, 100, VR_PAD_DPAD_UP); /* 1.4 s, no game update: held all along */
         x.game_ticks++;
-        on2 = held_frames(&c, &rt, &t, &x, dt, 10, VR_PAD_Y);       /* one update: still held */
+        on2 = held_frames(&c, &rt, &t, &x, dt, 10, VR_PAD_DPAD_UP);  /* one update: still held */
         x.game_ticks++;
-        on3 = held_frames(&c, &rt, &t, &x, dt, 10, VR_PAD_Y);       /* two: released */
+        on3 = held_frames(&c, &rt, &t, &x, dt, 10, VR_PAD_DPAD_UP);  /* two: released */
         CHECK(on1 == 100 && on2 == 10 && on3 == 0);
         x.ticks_valid = 0;
     }
@@ -406,10 +406,10 @@ static void test_left_handed(void)
     t.rclick = 1;
     CHECK(held_frames(&c, &rt, &t, &x, 1.0 / 72.0, 10, VR_PAD_LEFT_THUMB) >= 5);
     t.rclick = 0;
-    /* B (off hand upper) tapped: suppressor */
+    /* B (off hand upper) tapped: fire mode */
     run(&c, &rt, &t, &x, 1.0 / 72.0, NULL);
     t.b = 1; held_frames(&c, &rt, &t, &x, 1.0 / 72.0, 5, 0); t.b = 0;
-    CHECK(held_frames(&c, &rt, &t, &x, 1.0 / 72.0, 20, VR_PAD_Y) >= 10);
+    CHECK(held_frames(&c, &rt, &t, &x, 1.0 / 72.0, 20, VR_PAD_DPAD_UP) >= 10);
 }
 
 /* menus: the old button pad; buttons held across a mode change act only after a release */

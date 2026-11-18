@@ -14,11 +14,11 @@
  *   right stick up/down next / previous weapon, one per push        left trigger      Grenade
  *                       (while the scope is up: the scope's zoom)     left grip         two-handed aim (vr_gestures.h)
  *   right stick click   Use / pick up / doors                         left X            Health pack
- *   right grip          nothing (scope_raise = off: holds the scope)  left Y            tap: Suppressor, hold 0.5 s:
- *   body: duck = crouch, raise the gun to the eye = scope (scoped                         Fire mode
+ *   right grip          nothing (scope_raise = off: holds the scope)  left Y            tap: Fire mode, hold 0.5 s:
+ *   body: duck = crouch, raise the gun to the eye = scope (scoped                         Suppressor
  *         weapons only)                                               left Menu         tap: Pause, hold 1 s: Back
  *                                                                                       (objectives)
- *   left_handed = 1 mirrors it: left trigger fires, X reloads, Y melees, A health pack, B suppressor / fire mode.
+ *   left_handed = 1 mirrors it: left trigger fires, X reloads, Y melees, A health pack, B fire mode / suppressor.
  *   Both stick clicks held 1 s: recentre (the clicks then do neither Crouch nor Use: a click only becomes an action
  *   once the other stick has stayed up for VRI_CLICK_DELAY_S).
  *
@@ -72,7 +72,7 @@ enum { VRA_SLOT_MOVE_FORWARD = 1 };
 
 #define VRI_PULSE_S 0.15          /* a tap action is pressed this long (>= 4 game frames at 30 Hz) */
 #define VRI_PULSE_GAP_S 0.10      /* and released this long before the same action again */
-#define VRI_Y_HOLD_S 0.5          /* Y: tap = Suppressor, held this long = Fire mode */
+#define VRI_Y_HOLD_S 0.5          /* Y: tap = Fire mode, held this long = Suppressor */
 #define VRI_MENU_HOLD_S 1.0       /* Menu: tap = Pause, held this long = Back */
 #define VRI_CLICK_DELAY_S 0.06    /* a stick click waits this long for the other (the recentre chord) */
 #define VRI_RECENTRE_S 1.0
@@ -357,15 +357,15 @@ static inline void vr_map_actions(const VrInputConfig *c, VrInputRuntime *rt, co
         }
     }
 
-    /* Y: tap Suppressor / hold Fire mode;  Menu: tap Pause / hold Back. A hold is timed from the frame the press is
+    /* Y: tap Fire mode / hold Suppressor;  Menu: tap Pause / hold Back. A hold is timed from the frame the press is
      * first seen, so one long frame (a hitch, or the slow test harness) cannot turn a tap into a hold. */
     if (off_hi) {
         if (!rt->y_down) { rt->y_down = 1; rt->y_s = 0.0; rt->y_fired = 0; }
         else rt->y_s += dt;
-        if (!rt->y_fired && rt->y_s >= VRI_Y_HOLD_S) { rt->y_fired = 1; vri_tap(rt, VRA_FIRE_MODE); }
+        if (!rt->y_fired && rt->y_s >= VRI_Y_HOLD_S) { rt->y_fired = 1; vri_tap(rt, VRA_SUPPRESSOR); }
     } else if (rt->y_down) {
         rt->y_down = 0;
-        if (!rt->y_fired) vri_tap(rt, VRA_SUPPRESSOR);
+        if (!rt->y_fired) vri_tap(rt, VRA_FIRE_MODE);
     }
     if (t->menu) {
         if (!rt->menu_down) { rt->menu_down = 1; rt->menu_s = 0.0; rt->menu_fired = 0; }
