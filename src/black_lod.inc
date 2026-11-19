@@ -136,7 +136,9 @@ void black_lod_trace(uint32_t site, uint32_t object)
  * (scripts/generate.py pose_trace_hooks) log, per skeleton, that walk whenever it differs from the one before: which
  * nodes were visited, their first words, the flags they were visited with, and where the result is. Reads only. */
 typedef struct BlackPoseNode { uint32_t node, w[6], child[8], flags, extra; float time, prev; } BlackPoseNode;
-typedef struct BlackPoseWalk { uint32_t skeleton, result, state, f98C, f970; int n, total, overrides, f1C8; BlackPoseNode l[8]; } BlackPoseWalk;
+typedef struct BlackPoseOverride { uint32_t a, bone, b; float m[12]; } BlackPoseOverride;
+typedef struct BlackPoseWalk { uint32_t skeleton, result, state, f98C, f970; int n, total, overrides, f1C8; BlackPoseNode l[8];
+                               BlackPoseOverride o[3]; } BlackPoseWalk;
 static BlackPoseWalk black_pose_now;
 static BlackPoseWalk black_pose_last[24];
 static unsigned long long black_pose_changes;
@@ -151,8 +153,27 @@ void black_pose_begin(uint32_t skeleton)
         black_pose_now.f970 = GUEST32(skeleton + 0x970u);
         black_pose_now.overrides = (int16_t)(GUEST32(skeleton + 0x5Cu) & 0xFFFFu);       /* bone overrides (sub_00095680) */
         black_pose_now.f1C8 = (int16_t)(GUEST32(skeleton + 0x1C8u) & 0xFFFFu);
+        {
+            /* the override entries {A, bone, B} (12 bytes each, list at +0x58) and the 3x4 that A points at: on desktop
+             * one entry, bone 5, whose descendants are rewritten by sub_0009C940 - the bones that go wrong */
+            const uint32_t list = GUEST32(skeleton + 0x58u);
+            int k, j;
+            memset(black_pose_now.o, 0, sizeof black_pose_now.o);
+            for (k = 0; k < 3 && k < black_pose_now.overrides; k++) {
+                BlackPoseOverride *o = &black_pose_now.o[k];
+                if (!black_pc_ram_span(list + 12u * (uint32_t)k, 12u)) break;
+                o->a = GUEST32(list + 12u * (uint32_t)k); o->bone = GUEST32(list + 12u * (uint32_t)k + 4u);
+                o->b = GUEST32(list + 12u * (uint32_t)k + 8u);
+                if (!black_pc_ram_span(o->a, 48u)) continue;
+                for (j = 0; j < 12; j++) { const uint32_t v = GUEST32(o->a + 4u * (uint32_t)j); memcpy(&o->m[j], &v, 4); }
+            }
+        }
     }
     black_pose_open = 1;
+    {
+        static int said;
+        if (!said) { said = 1; fprintf(stderr, "[POSE] trace active (pose trace 2, 2026-11-19)\n"); }
+    }
 }
 
 /* sub_00097380(skeleton, node, x, time, previous time, flags, n): its arguments, at its entry */
@@ -188,6 +209,16 @@ void black_pose_end(uint32_t result)
     if (last->skeleton != black_pose_now.skeleton || last->result != result || last->n != black_pose_now.n ||
         last->total != black_pose_now.total || last->state != black_pose_now.state || last->overrides != black_pose_now.overrides ||
         last->f98C != black_pose_now.f98C || last->f1C8 != black_pose_now.f1C8) changed = 1;
+    for (i = 0; !changed && i < 3; i++) {
+        int j;
+        if (last->o[i].a != black_pose_now.o[i].a || last->o[i].bone != black_pose_now.o[i].bone || last->o[i].b != black_pose_now.o[i].b)
+            changed = 1;
+        /* a real turn of the override, not its drift: `last` is only replaced when a line is logged for this reason */
+        for (j = 0; !changed && j < 12; j++) {
+            const float dv = black_pose_now.o[i].m[j] - last->o[i].m[j];
+            if (!(dv < 0.5f && dv > -0.5f)) changed = 1;
+        }
+    }
     for (i = 0; !changed && i < black_pose_now.n; i++)
         if (last->l[i].node != black_pose_now.l[i].node || last->l[i].flags != black_pose_now.l[i].flags ||
             last->l[i].w[0] != black_pose_now.l[i].w[0] || last->l[i].w[1] != black_pose_now.l[i].w[1] ||
@@ -200,12 +231,19 @@ void black_pose_end(uint32_t result)
             /* the host's own floating-point state for the formatting, the guest's back afterwards (as black_lod_trace) */
             const unsigned csr0 = _mm_getcsr();
             fenv_t env0;
-            char line[1100]; int n = 0;
+            char line[1600]; int n = 0;
             fegetenv(&env0);
             fesetenv(FE_DFL_ENV);
             _mm_setcsr(0x1F80u);
             line[0] = 0;
-            for (i = 0; i < black_pose_now.n && n < 980; i++) {
+            for (i = 0; i < 3 && i < black_pose_now.overrides && n < 500; i++) {
+                const BlackPoseOverride *o = &black_pose_now.o[i];
+                n += snprintf(line + n, sizeof line - (size_t)n, " | override bone %d flags %X at %08X: %.3f %.3f %.3f %.3f / %.3f %.3f %.3f "
+                              "%.3f / %.3f %.3f %.3f %.3f", (int)o->bone, o->b, o->a, (double)o->m[0], (double)o->m[1], (double)o->m[2],
+                              (double)o->m[3], (double)o->m[4], (double)o->m[5], (double)o->m[6], (double)o->m[7], (double)o->m[8],
+                              (double)o->m[9], (double)o->m[10], (double)o->m[11]);
+            }
+            for (i = 0; i < black_pose_now.n && n < 1400; i++) {
                 const BlackPoseNode *l = &black_pose_now.l[i];
                 n += snprintf(line + n, sizeof line - (size_t)n, " | node %08X [%08X %08X %08X %08X %08X %08X] -> [%08X %08X %08X %08X %08X "
                               "%08X %08X %08X] flags %X/%d t %.4f prev %.4f", l->node, l->w[0], l->w[1], l->w[2], l->w[3], l->w[4], l->w[5],
@@ -222,5 +260,54 @@ void black_pose_end(uint32_t result)
             _mm_setcsr(csr0);
         }
     }
-    *last = black_pose_now;
+    {
+        BlackPoseOverride keep[3];
+        const int same = last->skeleton == black_pose_now.skeleton && !changed;
+        memcpy(keep, last->o, sizeof keep);
+        *last = black_pose_now;
+        if (same) memcpy(last->o, keep, sizeof keep);
+    }
+}
+
+
+/* ---- animation detail (the vanishing head and legs, found 2026-11-19) -------------------------------------------
+ * sub_0017DA70 lowers a character's animation detail when it is far (level 1) or when the game's flat camera does not
+ * see it (level 2): fewer bones are animated and the scratch-pose pool shrinks, so the head and leg bones keep a stale
+ * pose and blends are dropped. The headset log of 2026-11-19 15:25 shows it: a soldier's bones jump to the wrong pose
+ * exactly when his evaluation's result moves from the third scratch pose (a blend) to the first (no blend), and back.
+ * In VR the body is on show in both cases, so the detail stays full. RECOMP_BLACK_ANIM_LOD=1 gives the game's own
+ * behaviour back. Returns 1 to keep full detail; logs, per character, when what the game wanted changes. */
+int black_anim_keep_full(uint32_t character, unsigned wanted)
+{
+#ifdef BLACK_VR
+    static int keep = -1;
+    static struct { uint32_t character; unsigned wanted; unsigned long long calls, since; } t[16];
+    static unsigned long long calls, lines;
+    int i, slot = -1;
+    if (keep < 0) {
+        const char *e = getenv("RECOMP_BLACK_ANIM_LOD");
+        keep = !(e && e[0] == '1');
+        fprintf(stderr, "[ANIM] animation detail: %s\n", keep ? "always full in VR (the game would lower it for far and unseen characters)"
+                                                              : "the game's own (RECOMP_BLACK_ANIM_LOD=1)");
+    }
+    calls++;
+    for (i = 0; i < 16; i++) {
+        if (t[i].character == character) { slot = i; break; }
+        if (slot < 0 && !t[i].character) slot = i;
+    }
+    if (slot >= 0) {
+        /* a new stretch: this character was not lowered on its last few updates, or the level differs */
+        if (t[slot].character != character || t[slot].wanted != wanted || calls - t[slot].calls > 64u) {
+            if (lines++ < 400u || !(lines % 200u))
+                fprintf(stderr, "[ANIM] character %08X: the game wants animation level %u (%s)%s [%llu]\n", character, wanted,
+                        wanted == 1u ? "far" : "not seen by the flat camera", keep ? "; kept full" : "", lines);
+            t[slot].since = calls;
+        }
+        t[slot].character = character; t[slot].wanted = wanted; t[slot].calls = calls;
+    }
+    return keep;
+#else
+    (void)character; (void)wanted;
+    return 0;
+#endif
 }

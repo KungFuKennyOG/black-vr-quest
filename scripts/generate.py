@@ -450,6 +450,7 @@ def title_hooks(name, body):
     body = secondary_objective_hooks(name, body)
     body = lod_hooks(name, body)
     body = pose_trace_hooks(name, body)
+    body = animation_detail_hooks(name, body)
     body = gameplay_tuning_hooks(name, body)
     body = scope_mask_boundary(name, body)
     return body
@@ -525,6 +526,27 @@ def pose_trace_hooks(name, body):
     elif name == "sub_00097380":
         body = replace_once(body, "loc_00097380: ;\n",
             "loc_00097380: ;\n    black_pose_node(l_esp); /* pose trace: one node of the animation tree */\n")
+    return body
+
+
+def animation_detail_hooks(name, body):
+    """VR: keep every character's animation at full detail (the vanishing head and legs, 2026-11-19).
+
+    sub_0017DA70 picks a character's animation detail before its skeleton is evaluated: by default the scratch-pose
+    pool holds 0x1C poses and all 0x2C bones are animated ([esi+0x230] = 0). A character that is far (camera factor x
+    distance over MEMF(0x2A7F08)) gets level 1, one the game's flat camera does not see ([obj+0x300] <= 0) level 2:
+    a shorter bone list and a smaller pool, so blends fall back to one unblended input (sub_00092D10) and the head and
+    leg bones are left as they are. The flat game pairs that with a low-detail mesh or with nobody looking. In VR the
+    headset sees more than the flat camera and BLACK_VR keeps the detailed mesh further out, so the detailed body is
+    drawn on the reduced skeleton. black_anim_keep_full() decides (and logs what the game wanted).
+    """
+    if name != "sub_0017DA70":
+        return body
+    body = replace_once(body, "    MEM8(l_esi + 0x230) = 1;\n",
+        "    if (black_anim_keep_full(l_esi, 1u)) goto loc_0017DB47; /* VR: full animation detail */\n"
+        "    MEM8(l_esi + 0x230) = 1;\n")
+    body = replace_once(body, "loc_0017DB15: ;\n",
+        "loc_0017DB15: ;\n    if (black_anim_keep_full(l_esi, 2u)) goto loc_0017DB47; /* VR: full animation detail */\n")
     return body
 
 
@@ -1041,7 +1063,7 @@ def main():
     declarations += "\nextern uint32_t black_audio_queue_completion(uint32_t);\n"
     declarations += "extern float black_lod_value(float, unsigned);\nextern void black_lod_trace(uint32_t, uint32_t);\n"
     declarations += ("extern void black_pose_begin(uint32_t);\nextern void black_pose_node(uint32_t);\n"
-                     "extern void black_pose_end(uint32_t);\n")
+                     "extern void black_pose_end(uint32_t);\nextern int black_anim_keep_full(uint32_t, unsigned);\n")
     declarations += "extern float black_tuning_spawn_health(uint32_t, float);\n"
     declarations += "extern float black_tuning_bullet_damage(uint32_t, uint32_t, float);\n"
     declarations += "extern unsigned black_tuning_headshot(uint32_t, uint32_t, unsigned, unsigned);\n"
