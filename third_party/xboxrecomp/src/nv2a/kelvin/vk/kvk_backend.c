@@ -3578,7 +3578,13 @@ static void draw_now(const KGpuDraw *d)
     if (!pipe) { world_skip_note(cs, hud, "pipeline", d->gvs ? d->gvs->hash : 0u); skip_note("pipeline"); return; }
     if (uber) G.st.uber_draws++;
     if (ve && ve->rel && world_main_draw(cs, hud))
-        skin_note(d, ps, uber, views[0] == G.dummy.view, vm, stereo, (int)pd.cull);
+        {
+            /* the skinned-draw diagnostics (bone jumps, pose dumps, 5 s samples) found the vanishing head and legs
+             * (2026-11-19: the game's animation detail, fixed in black_lod.inc); off unless RECOMP_SKIN_DEBUG=1 */
+            static int skin_debug = -1;
+            if (skin_debug < 0) { const char *e = getenv("RECOMP_SKIN_DEBUG"); skin_debug = e && e[0] == '1'; }
+            if (skin_debug) skin_note(d, ps, uber, views[0] == G.dummy.view, vm, stereo, (int)pd.cull);
+        }
     s1 = tset_get(views, smps);
     if (!s1) { skip_note("texture descriptors"); return; }
 
