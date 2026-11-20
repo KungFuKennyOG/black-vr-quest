@@ -216,6 +216,7 @@ typedef struct KvkVs {
     int pos_class;
     uint32_t pos_consts[6];     /* VR gun latch: constant registers feeding oPos (kvk_vsh_pos_consts) */
     uint32_t *words, nwords;
+    bool rel;                   /* reads constants through the address register: a skinned mesh's bone palette */
 } KvkVs;
 
 typedef struct KvkPs {
@@ -239,7 +240,9 @@ typedef struct KvkPipeKey {
 
 /* state: 0 being created on a compile worker, 1 ready, 2 failed (atomic). The GPU thread owns the table; a worker
  * only fills in pipe and state of an entry the GPU thread inserted. */
-typedef struct KvkPipe { bool used; KvkPipeKey key; VkPipeline pipe; int state; } KvkPipe;
+typedef struct KvkPipe { bool used; KvkPipeKey key; VkPipeline pipe; int state; int claim; bool promoted; } KvkPipe;
+/* claim: set (atomic exchange) by the worker that creates it; a second job for the same entry (a draw's urgent copy
+ * of a manifest precreation still in the queue) then does nothing. promoted: that urgent copy was posted (GPU thread) */
 
 typedef struct KvkRp { bool used; VkFormat cf, df; uint32_t views; int cload, dload; VkRenderPass rp; } KvkRp;
 typedef struct KvkFb { bool used; VkImageView c, d; VkRenderPass rp; uint32_t w, h; VkFramebuffer fb; } KvkFb;
@@ -342,6 +345,272 @@ static void skip_note(const char *why)
     G.st.skipped++;
     if (s_dbg) LOG("draw skipped: %s", why);
 }
+
+static bool is_main(uint32_t w, uint32_t h);
+/* Skinned world draws (programs that index the constants through a0: characters' bodies). Kenny 2026-11-16: on the
+ * headset the skinned bodies vanish now and then while their rigid gear stays; never on x86 / SwiftShader. Every such
+ * draw is checked (the bone palette the game sent, its opacity c0.w, its first texture, the fallback shader) and
+ * counted for the stats line, and the last frame's are kept: a both-eye capture (both thumbsticks held 2.5 s) logs
+ * them all, so a capture taken while looking at a broken body says how it was drawn. */
+typedef struct SkinRec {
+    uint32_t vs, icount, vcount;
+    float c0[4], t0[3];
+    uint8_t blend, sf, df, ztest, zfunc, zwrite, atest, afunc, aref, cull, uber, dummy, bad, vm, stereo, fog;
+    uint8_t af[16];            /* each vertex attribute: fmt << 4 | components */
+    float pal[4][4];           /* the first bone's three rows, and the 20th's first */
+    unsigned long long zero;   /* bit k: bone k's three rows (c60+3k..) are all zero */
+    unsigned long long vkey, vhash;   /* where the vertex bytes are, and their hash as drawn */
+    uint32_t vbytes; uint8_t vchanged;
+    float lit[5][4];           /* c1..c5: the eye and the lighting terms of the body program */
+} SkinRec;
+static struct { unsigned long long draws, nonfinite, huge, clear, notex, uber, vm; } s_skin;
+static SkinRec s_skin_rec[2][96];
+static int s_skin_n[2], s_skin_cur;
+static unsigned long long s_skin_frame;
+static void skin_dump_frame(const char *tag, int k);
+/* The vertex bytes of the skinned meshes (blend weights present: bodies and the player's arms), by where they are:
+ * static geometry reads the same every frame. The pusher draws well after the game queued the draw (the real GPU
+ * does too), so bytes that differ from what the same mesh held last time were rewritten or replaced under it: logged
+ * as it happens (the vanishing bodies last a second or two, the periodic dump comes every five). */
+static struct { unsigned long long key, hash; uint32_t bytes, icount; unsigned long long seen, changed, zero, used; int have_zero; } s_vmesh[64];
+static int s_vmesh_slot;          /* the entry of the mesh skin_vertices last looked at, -1: none */
+static unsigned long long s_bone_changes;
+static unsigned long long s_vmesh_changes;
+static unsigned long long skin_vhash(const uint8_t *p, size_t n)
+{
+    unsigned long long h = 0x9E3779B97F4A7C15ull ^ (unsigned long long)n, v;
+    size_t i;
+    for (i = 0; i + 8 <= n; i += 8) { memcpy(&v, p + i, 8); h = (h ^ v) * 0xFF51AFD7ED558CCDull; h ^= h >> 29; }
+    for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+    return h;
+}
+static void np_attr(const KGpuAttrSrc *as, uint32_t e, float r[4]);
+/* The bones a mesh's vertices name with a weight above zero (v4: palette rows, three per bone; v1: the weights). */
+static unsigned long long skin_used(const KGpuDraw *d)
+{
+    const KGpuAttrSrc *ai = &d->gvs->attr[4], *aw = &d->gvs->attr[1];
+    unsigned long long used = 0;
+    uint32_t e, e0, e1, k;
+    if (!ai->fmt || !ai->stride || ai->hi <= ai->lo) return ~0ull;
+    e0 = (uint32_t)(ai->lo / ai->stride); e1 = (uint32_t)(ai->hi / ai->stride);
+    for (e = e0; e <= e1 && e - e0 < 65536u; e++) {
+        float iv[4], wv[4];
+        np_attr(ai, e, iv); np_attr(aw, e, wv);
+        for (k = 0; k < 4; k++) {
+            const int b = (int)iv[k] / 3;
+            if (wv[k] > 0.004f && b >= 0 && b < 44) used |= 1ull << b;
+        }
+    }
+    return used ? used : ~0ull;
+}
+static int skin_vertices(const KGpuDraw *d, unsigned long long *key, unsigned long long *hash, uint32_t *bytes)
+{
+    const KGpuAttrSrc *a0 = &d->gvs->attr[0];
+    const uint8_t *lo, *hi;
+    int i, slot = -1, changed = 0;
+    *key = *hash = 0; *bytes = 0;
+    s_vmesh_slot = -1;
+    if (!a0->fmt || !d->gvs->attr[1].fmt || a0->hi <= a0->lo || a0->hi - a0->lo > (1 << 20)) return 0;
+    lo = a0->data + a0->lo; hi = a0->data + a0->hi;
+    *key = (unsigned long long)(uintptr_t)lo; *bytes = (uint32_t)(hi - lo);
+    *hash = skin_vhash(lo, (size_t)(hi - lo));
+    for (i = 0; i < 64; i++) {
+        if (s_vmesh[i].key == *key && s_vmesh[i].bytes == *bytes) { slot = i; break; }
+        if (slot < 0 && !s_vmesh[i].key) slot = i;
+    }
+    if (slot < 0) slot = (int)(*key >> 6) & 63;                       /* full: an entry is replaced */
+    if (s_vmesh[slot].key == *key && s_vmesh[slot].bytes == *bytes) {
+        if (s_vmesh[slot].hash != *hash) {
+            changed = 1;
+            s_vmesh[slot].changed++;
+            s_vmesh_changes++;
+            if (s_vmesh_changes <= 40u || !(s_vmesh_changes % 500u))
+                LOG("skin vertices: frame %llu: the mesh at %llX (%u bytes, %u indices) reads differently than the last time it "
+                    "was drawn (%llu changes of this mesh in %llu draws; %llu of all)", (unsigned long long)G.st.frames,
+                    *key & 0xFFFFFFFull, *bytes, d->icount, s_vmesh[slot].changed, s_vmesh[slot].seen, s_vmesh_changes);
+        }
+    } else {
+        s_vmesh[slot].key = *key; s_vmesh[slot].bytes = *bytes; s_vmesh[slot].changed = 0; s_vmesh[slot].seen = 0;
+        s_vmesh[slot].have_zero = 0; s_vmesh[slot].used = skin_used(d);
+        LOG("skin bones: mesh %u indices at %llX uses bones %011llX", d->icount, *key & 0xFFFFFFFull, s_vmesh[slot].used & 0xFFFFFFFFFFFull);
+    }
+    s_vmesh[slot].hash = *hash; s_vmesh[slot].icount = d->icount; s_vmesh[slot].seen++;
+    s_vmesh_slot = slot;
+    return changed;
+}
+static void skin_note(const KGpuDraw *d, const KPixelState *ps, bool uber, bool dummy, bool vm, bool stereo, int cull)
+{
+    const float *c = d->gvs->constants;
+    SkinRec *r;
+    int i, bad = -1, kind = 0;
+    if (s_skin_frame != G.st.frames) {
+        /* every 5 s or so, the frame just finished goes to the log by itself (Kenny 2026-11-16: no button presses;
+         * he sends the log and a video, and the time of a broken body picks the dump) */
+        static unsigned long long last;
+        if (G.st.frames - last >= 300u && s_skin_n[s_skin_cur] > 0) { last = G.st.frames; skin_dump_frame("auto", s_skin_cur); }
+        s_skin_frame = G.st.frames; s_skin_cur ^= 1; s_skin_n[s_skin_cur] = 0;
+    }
+    s_skin.draws++;
+    for (i = 60 * 4; i < 192 * 4; i++) {
+        const float v = c[i];
+        if (!(v == v) || v > 3.0e38f || v < -3.0e38f) { bad = i; kind = 1; break; }
+        if ((v > 1.0e7f || v < -1.0e7f) && bad < 0) { bad = i; kind = 2; }
+    }
+    if (kind == 1) s_skin.nonfinite++;
+    else if (kind == 2) s_skin.huge++;
+    if (kind && s_skin.nonfinite + s_skin.huge <= 12u)
+        LOG("skin check: vs %08X frame %llu: constant c%d.%c = %g (%s) in the bone palette", d->gvs->hash,
+            (unsigned long long)G.st.frames, bad / 4, "xyzw"[bad & 3], (double)c[bad], kind == 1 ? "not finite" : "huge");
+    if ((ps->blend || ps->alpha_test) && !(c[3] > 0.02f)) {
+        if (s_skin.clear++ < 12u)
+            LOG("skin check: vs %08X frame %llu: opacity c0.w = %g with %s (blend %d %d, alpha test %d func %d ref %d)",
+                d->gvs->hash, (unsigned long long)G.st.frames, (double)c[3], ps->blend ? "blending" : "the alpha test",
+                (int)ps->blend_sfactor, (int)ps->blend_dfactor, (int)ps->alpha_test, (int)ps->alpha_func, (int)ps->alpha_ref);
+    }
+    if (dummy) s_skin.notex++;
+    if (uber) s_skin.uber++;
+    if (vm) s_skin.vm++;
+    {
+        unsigned long long vk, vh;
+        uint32_t vb;
+        const int vc = skin_vertices(d, &vk, &vh, &vb);
+        if (s_vmesh_slot >= 0) {
+            /* The bones this mesh is drawn with, the moment they go wrong (Kenny's video 2026-11-17: a running teammate
+             * loses head and legs for half a second, arms and gear stay; no 5 s sample has landed on one). Three
+             * signs, each logged as it happens: a bone that becomes all zero or stops being (slot 0 is left out: no
+             * vertex uses it and it flips every frame, on SwiftShader too); a bone whose axes are not unit length
+             * (collapsed or blown up); a bone that jumps more than a metre between two draws of the mesh. */
+            static float last_t[64][44][3];
+            static unsigned long long last_bad[64], last_frame[64];
+            static unsigned jump_dumps;
+            float was[44][3];
+            unsigned long long jmask = 0;
+            float jo[3] = {0, 0, 0}, jn[3] = {0, 0, 0}, jr[9] = {0};
+            unsigned long long zero = 0, bad = 0;
+            int b, k, jb = -1;
+            float jd = 0.0f, bl = 0.0f;
+            int bb = -1;
+            for (b = 0; b < 44; b++) {
+                const float *m = c + (60 + 3 * b) * 4;
+                int z = 1;
+                float l2, dx, dy, dz, dd;
+                if (!(s_vmesh[s_vmesh_slot].used >> b & 1u)) continue;       /* a slot no vertex of this mesh reads: leftovers */
+                for (k = 0; k < 12; k++) if (m[k] != 0.0f) { z = 0; break; }
+                if (z) { zero |= 1ull << b; continue; }
+                l2 = m[0] * m[0] + m[4] * m[4] + m[8] * m[8];              /* the first axis (a column of the 3x4) */
+                if (!(l2 > 0.25f && l2 < 4.0f)) { bad |= 1ull << b; if (bb < 0) { bb = b; bl = l2; } }
+                was[b][0] = last_t[s_vmesh_slot][b][0]; was[b][1] = last_t[s_vmesh_slot][b][1]; was[b][2] = last_t[s_vmesh_slot][b][2];
+                dx = m[3] - last_t[s_vmesh_slot][b][0]; dy = m[7] - last_t[s_vmesh_slot][b][1]; dz = m[11] - last_t[s_vmesh_slot][b][2];
+                dd = dx * dx + dy * dy + dz * dz;
+                if (s_vmesh[s_vmesh_slot].have_zero && !(s_vmesh[s_vmesh_slot].zero >> b & 1u)) {
+                    if (dd > 0.25f) jmask |= 1ull << b;                    /* every bone that moved over half a metre */
+                    if (dd > jd) {
+                        jd = dd; jb = b;
+                        jo[0] = last_t[s_vmesh_slot][b][0]; jo[1] = last_t[s_vmesh_slot][b][1]; jo[2] = last_t[s_vmesh_slot][b][2];
+                        jn[0] = m[3]; jn[1] = m[7]; jn[2] = m[11];
+                        jr[0] = m[0]; jr[1] = m[1]; jr[2] = m[2]; jr[3] = m[4]; jr[4] = m[5]; jr[5] = m[6]; jr[6] = m[8]; jr[7] = m[9]; jr[8] = m[10];
+                    }
+                }
+                last_t[s_vmesh_slot][b][0] = m[3]; last_t[s_vmesh_slot][b][1] = m[7]; last_t[s_vmesh_slot][b][2] = m[11];
+            }
+            if (s_vmesh[s_vmesh_slot].have_zero) {
+                const int zc = s_vmesh[s_vmesh_slot].zero != zero, bc = last_bad[s_vmesh_slot] != bad, jc = jd > 1.0f;
+                if (zc || bc || jc) {
+                    s_bone_changes++;
+                    if (s_bone_changes <= 400u || !(s_bone_changes % 1000u))
+                        LOG("skin bones: frame %llu: mesh %u indices at %llX:%s empty %011llX -> %011llX;%s misshapen %011llX -> "
+                            "%011llX (bone %d axis length^2 %.3g);%s furthest jump %.2f (bone %d) [event %llu]",
+                            (unsigned long long)G.st.frames, d->icount, vk & 0xFFFFFFFull, zc ? " CHANGED" : "",
+                            s_vmesh[s_vmesh_slot].zero, zero, bc ? " CHANGED" : "", last_bad[s_vmesh_slot], bad, bb, (double)bl,
+                            jc ? " JUMP" : "", (double)sqrtf(jd), jb, s_bone_changes);
+                    if (jc && (s_bone_changes <= 400u || !(s_bone_changes % 1000u)))
+                        LOG("skin bones: frame %llu: mesh %u: bones moved %011llX; bone %d from %.2f %.2f %.2f to %.2f %.2f %.2f, axes "
+                            "%.2f %.2f %.2f / %.2f %.2f %.2f / %.2f %.2f %.2f; mesh last drawn %llu frame(s) ago; c117 %.2f %.2f %.2f %.2f",
+                            (unsigned long long)G.st.frames, d->icount, jmask, jb, (double)jo[0], (double)jo[1], (double)jo[2],
+                            (double)jn[0], (double)jn[1], (double)jn[2], (double)jr[0], (double)jr[1], (double)jr[2], (double)jr[3],
+                            (double)jr[4], (double)jr[5], (double)jr[6], (double)jr[7], (double)jr[8],
+                            (unsigned long long)(G.st.frames - last_frame[s_vmesh_slot]), (double)c[117 * 4], (double)c[117 * 4 + 1],
+                            (double)c[117 * 4 + 2], (double)c[117 * 4 + 3]);
+                }
+            }
+            if (s_vmesh[s_vmesh_slot].have_zero && jd > 1.0f && jump_dumps < 16u) {
+                /* the whole pose either side of the jump, for the first few: which limbs went, and where to */
+                char line[1024]; int n = 0;
+                jump_dumps++;
+                for (b = 0; b < 44 && n < 940; b++) {
+                    const float *m = c + (60 + 3 * b) * 4;
+                    if (!(s_vmesh[s_vmesh_slot].used >> b & 1u) || (zero >> b & 1u)) continue;
+                    n += snprintf(line + n, sizeof line - (size_t)n, " %d:%.2f,%.2f,%.2f>%.2f,%.2f,%.2f", b, (double)was[b][0],
+                                  (double)was[b][1], (double)was[b][2], (double)m[3], (double)m[7], (double)m[11]);
+                }
+                LOG("skin bones: frame %llu: mesh %u pose (bone:was>now):%s", (unsigned long long)G.st.frames, d->icount, line);
+            }
+            s_vmesh[s_vmesh_slot].zero = zero; s_vmesh[s_vmesh_slot].have_zero = 1; last_bad[s_vmesh_slot] = bad;
+            last_frame[s_vmesh_slot] = G.st.frames;
+        }
+        if (s_skin_n[s_skin_cur] >= 96) return;
+        r = &s_skin_rec[s_skin_cur][s_skin_n[s_skin_cur]++];
+        memset(r, 0, sizeof(*r));
+        r->vkey = vk; r->vhash = vh; r->vbytes = vb; r->vchanged = (uint8_t)vc;
+    }
+    r->vs = d->gvs->hash; r->icount = d->icount; r->vcount = d->vcount;
+    memcpy(r->c0, c, sizeof(r->c0));
+    r->t0[0] = c[60 * 4 + 3]; r->t0[1] = c[61 * 4 + 3]; r->t0[2] = c[62 * 4 + 3];
+    r->blend = (uint8_t)ps->blend; r->sf = (uint8_t)ps->blend_sfactor; r->df = (uint8_t)ps->blend_dfactor;
+    r->ztest = (uint8_t)ps->depth_test; r->zfunc = (uint8_t)(ps->depth_func & 7); r->zwrite = (uint8_t)ps->depth_write;
+    r->atest = (uint8_t)ps->alpha_test; r->afunc = (uint8_t)ps->alpha_func; r->aref = (uint8_t)ps->alpha_ref;
+    r->cull = (uint8_t)cull; r->uber = uber; r->dummy = dummy; r->bad = (uint8_t)kind; r->vm = vm; r->stereo = stereo;
+    for (i = 0; i < 16; i++) r->af[i] = (uint8_t)((d->gvs->attr[i].fmt & 15u) << 4 | (d->gvs->attr[i].count & 15u));
+    memcpy(r->pal[0], c + 60 * 4, 12 * sizeof(float));
+    memcpy(r->lit, c + 4, sizeof(r->lit));
+    for (i = 0; i < 44; i++) {
+        const float *b = c + (60 + 3 * i) * 4;
+        int k, z = 1;
+        for (k = 0; k < 12; k++) if (b[k] != 0.0f) { z = 0; break; }
+        if (z) r->zero |= 1ull << i;
+    }
+    memcpy(r->pal[3], c + 117 * 4, 4 * sizeof(float));
+}
+/* the skinned draws of the last finished frame and of this one so far, to the log */
+static void skin_dump(const char *why)
+{
+    LOG("skin dump (%s): %llu skinned world draws so far, %llu non-finite, %llu huge, %llu clear, %llu without a texture, "
+        "%llu on the fallback shader, %llu taken for the weapon", why, s_skin.draws, s_skin.nonfinite, s_skin.huge,
+        s_skin.clear, s_skin.notex, s_skin.uber, s_skin.vm);
+    skin_dump_frame("prev", s_skin_cur ^ 1);
+    skin_dump_frame("now", s_skin_cur);
+}
+static void skin_dump_frame(const char *tag, int k)
+{
+    int i;
+    for (i = 0; i < s_skin_n[k]; i++) {
+        const SkinRec *r = &s_skin_rec[k][i];
+        LOG("skin dump %s f %llu %2d: vs %08X idx %u vtx %u c0 %.3f %.3f %.3f %.3f bone0 at %.2f %.2f %.2f blend %u(%u,%u) "
+            "z t%u f%u w%u alpha t%u f%u r%u cull %u%s%s%s%s%s", tag, (unsigned long long)G.st.frames, i, r->vs, r->icount,
+            r->vcount, (double)r->c0[0], (double)r->c0[1], (double)r->c0[2], (double)r->c0[3], (double)r->t0[0],
+            (double)r->t0[1], (double)r->t0[2], r->blend, r->sf, r->df, r->ztest, r->zfunc, r->zwrite, r->atest, r->afunc,
+            r->aref, r->cull, r->uber ? " FALLBACK-SHADER" : "", r->dummy ? " NO-TEXTURE" : "", r->bad ? " BAD-BONES" : "",
+            r->vm ? " AS-WEAPON" : "", r->stereo ? "" : " NOT-STEREO");
+        LOG("skin dump %s f %llu %2d: vertices at %llX, %u bytes, hash %08X%s", tag, (unsigned long long)G.st.frames, i,
+            r->vkey & 0xFFFFFFFull, r->vbytes, (unsigned)(r->vhash >> 32), r->vchanged ? " CHANGED" : "");
+        LOG("skin dump %s f %llu %2d: zero bones %011llX | c1 %.2f %.2f %.2f %.2f c2 %.3f %.3f %.3f %.3f c3 %.3f %.3f %.3f %.3f c4 "
+            "%.3f %.3f %.3f %.3f c5 %.3f %.3f %.3f %.3f", tag, (unsigned long long)G.st.frames, i, r->zero,
+            (double)r->lit[0][0], (double)r->lit[0][1], (double)r->lit[0][2], (double)r->lit[0][3],
+            (double)r->lit[1][0], (double)r->lit[1][1], (double)r->lit[1][2], (double)r->lit[1][3],
+            (double)r->lit[2][0], (double)r->lit[2][1], (double)r->lit[2][2], (double)r->lit[2][3],
+            (double)r->lit[3][0], (double)r->lit[3][1], (double)r->lit[3][2], (double)r->lit[3][3],
+            (double)r->lit[4][0], (double)r->lit[4][1], (double)r->lit[4][2], (double)r->lit[4][3]);
+        LOG("skin dump %s f %llu %2d: attrs v0 %02X v1 %02X v2 %02X v3 %02X v4 %02X v9 %02X | c60 %.3f %.3f %.3f %.3f c61 %.3f "
+            "%.3f %.3f %.3f c62 %.3f %.3f %.3f %.3f c117 %.3f %.3f %.3f %.3f", tag, (unsigned long long)G.st.frames, i,
+            r->af[0], r->af[1], r->af[2], r->af[3], r->af[4], r->af[9], (double)r->pal[0][0], (double)r->pal[0][1],
+            (double)r->pal[0][2], (double)r->pal[0][3], (double)r->pal[1][0], (double)r->pal[1][1], (double)r->pal[1][2],
+            (double)r->pal[1][3], (double)r->pal[2][0], (double)r->pal[2][1], (double)r->pal[2][2], (double)r->pal[2][3],
+            (double)r->pal[3][0], (double)r->pal[3][1], (double)r->pal[3][2], (double)r->pal[3][3]);
+    }
+}
+static bool world_main_draw(const KvkSurf *cs, bool hud);
+/* A world draw dropped because its shader or pipeline was not made in time: logged (Kenny's device logs) */
+static void world_skip_note(const KvkSurf *cs, bool hud, const char *what, uint32_t vs);
 
 static void queue_lock(void)
 {
@@ -840,6 +1109,12 @@ typedef struct KvkJob { int kind; void *p; } KvkJob;
 #define KVK_JOBS 4096
 static KvkJob s_jobs[KVK_JOBS];
 static int s_jhead, s_jtail, s_jbusy, s_nworkers;
+/* Urgent jobs: what a draw is waiting for (a vertex program, a combiner, a pipeline met in this frame). Workers take
+ * these first: at a level start the queue holds the whole pipeline manifest, and a draw's own job waited behind it
+ * while the draw was skipped (Kenny 2026-11-15: enemies drawn with only the torso and hips for a while). */
+#define KVK_UJOBS 1024
+static KvkJob s_ujobs[KVK_UJOBS];
+static int s_uhead, s_utail;
 static pthread_mutex_t s_jlock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t s_jcond = PTHREAD_COND_INITIALIZER, s_jdone = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t s_manifest_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -888,9 +1163,9 @@ static void *worker_main(void *arg)
     for (;;) {
         KvkJob j;
         pthread_mutex_lock(&s_jlock);
-        while (s_jhead == s_jtail) pthread_cond_wait(&s_jcond, &s_jlock);
-        j = s_jobs[s_jtail % KVK_JOBS];
-        s_jtail++;
+        while (s_jhead == s_jtail && s_uhead == s_utail) pthread_cond_wait(&s_jcond, &s_jlock);
+        if (s_uhead != s_utail) j = s_ujobs[s_utail++ % KVK_UJOBS];
+        else j = s_jobs[s_jtail++ % KVK_JOBS];
         s_jbusy++;
         pthread_mutex_unlock(&s_jlock);
         job_run(j);
@@ -902,7 +1177,7 @@ static void *worker_main(void *arg)
     return NULL;
 }
 
-static void job_post(int kind, void *p)
+static void job_post_q(int kind, void *p, bool urgent)
 {
     bool run_now = false;
     pthread_mutex_lock(&s_jlock);
@@ -918,8 +1193,13 @@ static void job_post(int kind, void *p)
         }
         if (!s_nworkers) s_nworkers = -1;
     }
-    if (s_nworkers < 0 || s_jhead - s_jtail >= KVK_JOBS) {
+    if (s_nworkers < 0 || (urgent ? s_uhead - s_utail >= KVK_UJOBS : s_jhead - s_jtail >= KVK_JOBS)) {
         run_now = true;
+    } else if (urgent) {
+        s_ujobs[s_uhead % KVK_UJOBS].kind = kind;
+        s_ujobs[s_uhead % KVK_UJOBS].p = p;
+        s_uhead++;
+        pthread_cond_signal(&s_jcond);
     } else {
         s_jobs[s_jhead % KVK_JOBS].kind = kind;
         s_jobs[s_jhead % KVK_JOBS].p = p;
@@ -930,10 +1210,59 @@ static void job_post(int kind, void *p)
     if (run_now) { KvkJob j; j.kind = kind; j.p = p; job_run(j); }
 }
 
+static void job_post(int kind, void *p) { job_post_q(kind, p, false); }
+static void job_post_urgent(int kind, void *p) { job_post_q(kind, p, true); }
+
+/* ---- waiting a little for a compile a world draw needs ----------------------------------------------------------
+ * A draw whose vertex program or pipeline is still being made used to be skipped. For the world on the main target
+ * that dropped parts of characters (their limbs and heads use other programs than the torso) until the compile was
+ * done. Such a draw now waits for it, at most KVK_WAIT_FRAME_US in all per frame (a frame's hitch is bounded; past
+ * that the draw is skipped as before). RECOMP_KVK_COMPILE_WAIT_US=<us> sets the budget, 0 turns the wait off. */
+static long long s_wait_budget_us = -1;
+static unsigned long long s_wait_frame;
+static long long s_wait_left_us;
+static struct { unsigned long long waits, waited_us, wait_hits, skips_world; } s_wst;
+
+static bool compile_wait(const int *state)
+{
+    struct timespec ts;
+    long long t0;
+    bool ok;
+    if (s_wait_budget_us < 0) {
+        const char *e = getenv("RECOMP_KVK_COMPILE_WAIT_US");
+        s_wait_budget_us = e && *e ? atoll(e) : 10000;
+        if (s_wait_budget_us < 0) s_wait_budget_us = 0;
+    }
+    if (s_wait_frame != G.st.frames) { s_wait_frame = G.st.frames; s_wait_left_us = s_wait_budget_us; }
+    if (s_wait_left_us <= 0 || __atomic_load_n(state, __ATOMIC_ACQUIRE) != 0) return __atomic_load_n(state, __ATOMIC_ACQUIRE) == 1;
+    t0 = (long long)(kvk_now_ns() / 1000u);
+    pthread_mutex_lock(&s_jlock);
+    while (__atomic_load_n(state, __ATOMIC_ACQUIRE) == 0) {
+        const long long left = s_wait_left_us - ((long long)(kvk_now_ns() / 1000u) - t0);
+        long long ns;
+        if (left <= 0) break;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ns = (long long)ts.tv_nsec + (left < 2000 ? left : 2000) * 1000;   /* re-check every 2 ms at most */
+        ts.tv_sec += (time_t)(ns / 1000000000LL);
+        ts.tv_nsec = (long)(ns % 1000000000LL);
+        pthread_cond_timedwait(&s_jdone, &s_jlock, &ts);
+    }
+    pthread_mutex_unlock(&s_jlock);
+    {
+        const long long us = (long long)(kvk_now_ns() / 1000u) - t0;
+        s_wait_left_us -= us;
+        ok = __atomic_load_n(state, __ATOMIC_ACQUIRE) == 1;
+        s_wst.waits++;
+        s_wst.waited_us += (unsigned long long)us;
+        if (ok) s_wst.wait_hits++;
+    }
+    return ok;
+}
+
 void kvk_wait_compiles(void)
 {
     pthread_mutex_lock(&s_jlock);
-    while (s_jhead != s_jtail || s_jbusy) pthread_cond_wait(&s_jdone, &s_jlock);
+    while (s_jhead != s_jtail || s_uhead != s_utail || s_jbusy) pthread_cond_wait(&s_jdone, &s_jlock);
     pthread_mutex_unlock(&s_jlock);
 }
 
@@ -1050,6 +1379,7 @@ static KvkVs *vs_lookup(const void *program, uint32_t hash, uint32_t start, cons
         LOG("vertex program %08X/%u runs on the CPU (unsupported operation)", hash, start);
         return NULL;
     }
+    e->rel = strstr(e->src, "int(a0)") != NULL;
     e->slen = (uint32_t)strlen(e->src);
     e->sid = kvk_hash64(e->src, e->slen);
     e->pos_class = kvk_vsh_pos_class((const Nv2aVshProgram *)program);
@@ -1058,8 +1388,20 @@ static KvkVs *vs_lookup(const void *program, uint32_t hash, uint32_t start, cons
         e->words = (uint32_t *)malloc((size_t)nwords * 4);
         if (e->words) { memcpy(e->words, words, (size_t)nwords * 4); e->nwords = nwords; }
     }
-    job_post(0, e);
+    job_post_urgent(0, e);
     return __atomic_load_n(&e->state, __ATOMIC_ACQUIRE) == 1 ? e : NULL;
+}
+
+/* The vertex program's entry, whatever its state (NULL: never seen). */
+static KvkVs *vs_entry(uint32_t hash, uint32_t start)
+{
+    unsigned int i, slot = (hash ^ (start * 40503u)) % KVK_VS_MAX;
+    for (i = 0; i < KVK_VS_MAX; i++, slot = (slot + 1) % KVK_VS_MAX) {
+        KvkVs *q = &G.vs[slot];
+        if (!q->used) return NULL;
+        if (q->hash == hash && q->start == start) return q;
+    }
+    return NULL;
 }
 
 static VkShaderModule ps_lookup(const PSConst *c, uint64_t *sid, uint32_t *slen)
@@ -1089,7 +1431,7 @@ static VkShaderModule ps_lookup(const PSConst *c, uint64_t *sid, uint32_t *slen)
     if (!e->src) { e->state = 2; return VK_NULL_HANDLE; }
     e->slen = (uint32_t)strlen(e->src);
     e->sid = kvk_hash64(e->src, e->slen);
-    job_post(1, e);
+    job_post_urgent(1, e);
     if (__atomic_load_n(&e->state, __ATOMIC_ACQUIRE) != 1) return VK_NULL_HANDLE;
     *sid = e->sid; *slen = e->slen;
     return e->mod;
@@ -1474,6 +1816,7 @@ static void pipe_job_run(KvkPipeJob *pj)
     VkShaderModule lv = VK_NULL_HANDLE, lf = VK_NULL_HANDLE;
     VkPipeline pipe = VK_NULL_HANDLE;
     bool ok;
+    if (__atomic_exchange_n(&pj->e->claim, 1, __ATOMIC_ACQ_REL)) { free(pj); return; }   /* the other copy makes it */
     if (!d.vs) d.vs = lv = module_from_cache(KVK_STAGE_VERTEX, d.vs_sid, d.vs_len);
     if (!d.fs) d.fs = lf = module_from_cache(KVK_STAGE_FRAGMENT, d.fs_sid, d.fs_len);
     ok = d.vs && d.fs && VKOK(pipe_create(&d, &pipe));
@@ -1485,7 +1828,8 @@ static void pipe_job_run(KvkPipeJob *pj)
     free(pj);
 }
 
-static VkPipeline pipe_get(const KvkPipeDesc *d)
+/* wait: a world draw on the main target, which may wait a little for a pipeline being made (compile_wait) */
+static VkPipeline pipe_get_w(const KvkPipeDesc *d, bool wait)
 {
     KvkPipeKey k;
     uint64_t h;
@@ -1499,16 +1843,27 @@ static VkPipeline pipe_get(const KvkPipeDesc *d)
     for (i = 0; i < KVK_PIPE_MAX; i++, slot = (slot + 1) % KVK_PIPE_MAX) {
         KvkPipe *q = &G.pipe[slot];
         if (!q->used) { e = q; break; }
-        if (!memcmp(&q->key, &k, sizeof(k)))
+        if (!memcmp(&q->key, &k, sizeof(k))) {
+            int st = __atomic_load_n(&q->state, __ATOMIC_ACQUIRE);
+            if (st == 0 && !q->promoted && !__atomic_load_n(&q->claim, __ATOMIC_ACQUIRE)) {
+                /* still in the queue (a manifest precreation behind many others): an urgent copy, once; the claim
+                 * decides which copy makes it */
+                KvkPipeJob *pj = (KvkPipeJob *)calloc(1, sizeof(*pj));
+                q->promoted = true;
+                if (pj) { pj->e = q; pj->d = *d; pj->k = k; pj->record = false; job_post_urgent(3, pj); }
+            }
+            if (st == 0 && wait) compile_wait(&q->state);
             return __atomic_load_n(&q->state, __ATOMIC_ACQUIRE) == 1 ? q->pipe : VK_NULL_HANDLE;
+        }
     }
     if (!e) return VK_NULL_HANDLE;
     if (stable && pipe_async()) {
         KvkPipeJob *pj = (KvkPipeJob *)calloc(1, sizeof(*pj));
         if (!pj) return VK_NULL_HANDLE;
-        e->used = true; e->key = k; e->state = 0; e->pipe = VK_NULL_HANDLE;
+        e->used = true; e->key = k; e->state = 0; e->pipe = VK_NULL_HANDLE; e->claim = 0; e->promoted = true;
         pj->e = e; pj->d = *d; pj->k = k; pj->record = true;
-        job_post(3, pj);
+        job_post_urgent(3, pj);
+        if (wait) compile_wait(&e->state);
         return __atomic_load_n(&e->state, __ATOMIC_ACQUIRE) == 1 ? e->pipe : VK_NULL_HANDLE;
     }
     if (!VKOK(pipe_create(d, &e->pipe))) return VK_NULL_HANDLE;   /* not inserted: retried at the next use, as before */
@@ -1518,6 +1873,8 @@ static VkPipeline pipe_get(const KvkPipeDesc *d)
     if (stable) pipe_manifest_add(d, &k);
     return e->pipe;
 }
+
+static VkPipeline pipe_get(const KvkPipeDesc *d) { return pipe_get_w(d, false); }
 
 static VkRenderPass rp_get(VkFormat cf, VkFormat df, uint32_t views, int cload, int dload);
 
@@ -1576,7 +1933,7 @@ static void pipe_manifest_precreate(void)
             }
             if (!e) continue;
             if (!(pj = (KvkPipeJob *)calloc(1, sizeof(*pj)))) break;
-            e->used = true; e->key = k; e->state = 0; e->pipe = VK_NULL_HANDLE;
+            e->used = true; e->key = k; e->state = 0; e->pipe = VK_NULL_HANDLE; e->claim = 0; e->promoted = false;
             pj->e = e; pj->d = d; pj->k = k; pj->record = false;
             job_post(3, pj);
             queued++;
@@ -1797,6 +2154,18 @@ static VkDescriptorSet tset_get(const VkImageView v[4], const VkSampler s[4])
 /* ---- surfaces ---------------------------------------------------------------------------------------------------- */
 
 static bool is_main(unsigned int gw, unsigned int gh) { return gw == 640 && gh == 480; }
+
+static bool world_main_draw(const KvkSurf *cs, bool hud) { return cs && !hud && is_main(cs->gw, cs->gh); }
+
+static void world_skip_note(const KvkSurf *cs, bool hud, const char *what, uint32_t vs)
+{
+    if (!world_main_draw(cs, hud)) return;
+    s_wst.skips_world++;
+    if (s_wst.skips_world <= 20u || !(s_wst.skips_world % 200u))
+        LOG("world draw skipped: its %s was not made in time (vs %08X, frame %llu; %llu world draws skipped so far, "
+            "%llu compile waits, %.1f ms waited in all)", what, vs, (unsigned long long)G.st.frames,
+            s_wst.skips_world, s_wst.waits, (double)s_wst.waited_us / 1000.0);
+}
 
 static void surf_free(KvkSurf *s)
 {
@@ -2996,7 +3365,11 @@ static void draw_now(const KGpuDraw *d)
 
     if (d->gvs) {
         ve = vs_lookup(d->gvs->program, d->gvs->hash, d->gvs->start, NULL, 0);
-        if (!ve || !ve->mod) { skip_note("vertex program not ready"); return; }
+        if ((!ve || !ve->mod) && world_main_draw(cs, hud)) {
+            KvkVs *pe = vs_entry(d->gvs->hash, d->gvs->start);
+            if (pe && compile_wait(&pe->state) && pe->mod) ve = pe;
+        }
+        if (!ve || !ve->mod) { world_skip_note(cs, hud, "vertex program", d->gvs->hash); skip_note("vertex program not ready"); return; }
     }
     /* VR: world draws on the main target get the eye transform */
     if (G.layers > 1 && !hud && V.st.valid && V.region != REGION_SCREEN &&
@@ -3188,14 +3561,24 @@ static void draw_now(const KGpuDraw *d)
     pipe = pipe_get(&pd);
     if (!pipe && !uber) {
         /* the specialised combiner's pipeline is still being created: the ubershader's, if that one is ready */
+        const KvkPipeDesc spec = pd;
         pd.fs = ps->smooth ? G.ps_uber : G.ps_uber_flat;
         pd.fs_sid = ps->smooth ? KVK_SID_UBER : KVK_SID_UBER_FLAT;
         pd.fs_len = 0;
         pipe = pipe_get(&pd);
         uber = pipe != VK_NULL_HANDLE;
+        if (!pipe && world_main_draw(cs, hud)) {
+            /* neither is ready: a world draw waits a little for one (compile_wait), the specialised one first */
+            if ((pipe = pipe_get_w(&spec, true)) != VK_NULL_HANDLE) { pd = spec; uber = false; }
+            else if ((pipe = pipe_get_w(&pd, true)) != VK_NULL_HANDLE) uber = true;
+        }
+    } else if (!pipe && world_main_draw(cs, hud)) {
+        pipe = pipe_get_w(&pd, true);
     }
-    if (!pipe) { skip_note("pipeline"); return; }
+    if (!pipe) { world_skip_note(cs, hud, "pipeline", d->gvs ? d->gvs->hash : 0u); skip_note("pipeline"); return; }
     if (uber) G.st.uber_draws++;
+    if (ve && ve->rel && world_main_draw(cs, hud))
+        skin_note(d, ps, uber, views[0] == G.dummy.view, vm, stereo, (int)pd.cull);
     s1 = tset_get(views, smps);
     if (!s1) { skip_note("texture descriptors"); return; }
 
@@ -4000,6 +4383,12 @@ void kgpu_report(void)
         (unsigned long long)G.st.tex_uploads, (unsigned long long)G.st.tset_writes, (unsigned long long)G.st.tset_flushes,
         (unsigned long long)G.st.np_vertices, (unsigned long long)G.st.np_cache_hits,
         (unsigned long long)(G.st.tex_sig_bytes >> 20));
+    LOG("skin check: %llu skinned world draws: %llu non-finite bones, %llu huge, %llu clear (opacity 0), %llu without a "
+        "texture, %llu on the fallback shader, %llu taken for the weapon", s_skin.draws, s_skin.nonfinite, s_skin.huge,
+        s_skin.clear, s_skin.notex, s_skin.uber, s_skin.vm);
+    if (s_wst.waits || s_wst.skips_world)
+        LOG("compiles a world draw waited for: %llu (%llu ready in time, %.1f ms in all); world draws skipped: %llu",
+            s_wst.waits, s_wst.wait_hits, (double)s_wst.waited_us / 1000.0, s_wst.skips_world);
 }
 
 void kgpu_note_kick(void) { G.epoch++; }

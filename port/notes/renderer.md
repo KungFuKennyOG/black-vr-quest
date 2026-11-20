@@ -481,3 +481,27 @@ column next to a building) was still wrong.
 
 **Platform / arm64 stream:** port the Kelvin core files listed in section 6 (x86 SIMD and `windows.h` includes).
 The CPU vertex fallback (`kelvin_vsh.c`) is on the critical path whenever a vertex program is not yet compiled.
+
+## Compile waits for world draws (2026-11-15)
+
+Kenny on the headset: "sometimes the bodies only show the upper body and butt/crotch floating and moving, but no head
+arms or legs, then they reappear". Leading cause (not yet confirmed from a device log): a draw whose vertex program,
+combiner or pipeline is still being made on a compile worker was skipped, and a character's parts use different ones.
+At a level start the worker queue holds the whole pipeline manifest, so a draw's own compile waited behind it.
+- Compiles a draw asks for go to an **urgent queue** the workers take first; a manifest precreation a draw needs is
+  copied there once (`KvkPipe.promoted`; `claim` makes sure only one copy builds it).
+- A **world draw on the main target** (not the HUD) whose program or pipeline is not ready waits for it, at most
+  10 ms in all per frame (`compile_wait`; `RECOMP_KVK_COMPILE_WAIT_US`, 0 = off). Past that it is skipped as before.
+- Log: `world draw skipped: its vertex program|pipeline was not made in time (vs ..., frame ...; N world draws skipped
+  so far, M compile waits, T ms waited in all)` (first 20, then every 200th) and, with the stats line,
+  `compiles a world draw waited for: ...`. No such lines while the bodies break = it is something else.
+- **Not the cause (headset log 2026-11-15 23:27):** `skipped 0` for the whole session and no wait lines, while the
+  bodies still broke. The waits stay (harmless); the next lead is the draw lists below.
+
+## Draw lists (2026-11-15)
+The game's renderer keeps seven fixed-size draw lists ([0x2D67F4]+0xCA6C, sizes 1200/32/400/150/16/3/48 from the
+table at 0x28F410, set up each frame by 15A5F0); a full list silently drops every mesh added after it. VR's view is
+much wider than the TV's, so more meshes pass culling. Lists 0/2/3 now get their own room, 4096/2048/512
+(`src/recomp_manual.c` BLACK_DRAW_LISTS; `RECOMP_BLACK_DRAWLISTS=0` turns it off). The sizes and the finding are
+TGP482's ("fix objects vanishing at high draw distance"; facts only). Log every 600 frames when a list reached the
+game's own size: `[BLACK] draw lists (last 600 frames): most entries ...`. No such line = this was not it either.

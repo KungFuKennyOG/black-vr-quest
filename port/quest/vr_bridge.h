@@ -226,6 +226,8 @@ typedef struct {
     int   aim_barrel;          /* 1: the shot converges on the drawn gun's barrel line (else on the controller's ray) */
     float vm_offset_m[3];      /* viewmodel natural offset in aim space (x right, y up, z fwd) */
     float scope_zoom_min;      /* zoom factor at/above which the scope view starts */
+    float scope_height_deg;    /* the scope picture's centre above the head's forward, degrees; > 90: auto (the middle
+                                * of the headset's own field of view, which reaches further down than up) */
     int   scope_3d;            /* 1: the scope view zooms the 3D view, aimed with the gun (DrBeef's ports); 0: a flat
                                 * head-locked window (blackvr.ini scope_view = zoom | flat) */
     int   scope_mono;          /* 1: in the 3D scope view both eyes see the same image (blackvr.ini scope_mono) */
@@ -439,10 +441,18 @@ void vr_set_gun_laser(const float muzzle[3], const float dir[3], float length_m,
 /* Game thread: the 3D scope view's zoom (> 1 while it is on: STEREO, a scoped weapon zoomed past scope_zoom), else 0.
  * Render / XR / input threads read it. */
 void vr_set_scope_view(float zoom);
+/* The 3D scope's aim (stage space, forward -z, level; DrBeef's virtual stock, vr_gestures.h vrg_scope_aim_update),
+ * from the input thread while a scoped weapon is raised to the eye: 1 and q, else 0. The game's look and shots follow
+ * it, its camera and the zoomed eyes look along it (with the head's roll). */
+int vr_scope_aim(VrQuat *q);
 /* A count of fresh controller button presses (A/B/X/Y/Menu/triggers), from the input thread; the game thread compares
  * it with the count when a movie started, to skip the movie on any press. */
 unsigned vr_button_presses(void);
 float vr_scope_view(void);
+/* The game still shows its own scope (zoomed, its full-screen scope picture on the HUD) but the rifle is down: the 3D
+ * scope view is off and the HUD layer is not shown until the game has zoomed out (black_vr_decide). */
+void vr_set_scope_lowered(int lowered);
+int vr_scope_lowered(void);
 int vr_gun_laser(float muzzle[3], float dir[3], float *length_m);
 int vr_gun_barrel(float d[3]);
 /* Game thread: the player fired (the muzzle flash was drawn). Render thread: the time of the last shot (CLOCK_MONOTONIC

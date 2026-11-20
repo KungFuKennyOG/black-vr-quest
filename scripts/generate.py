@@ -449,6 +449,8 @@ def title_hooks(name, body):
     body = checkpoint_hooks(name, body)
     body = secondary_objective_hooks(name, body)
     body = lod_hooks(name, body)
+    body = pose_trace_hooks(name, body)
+    body = animation_detail_hooks(name, body)
     body = gameplay_tuning_hooks(name, body)
     body = scope_mask_boundary(name, body)
     return body
@@ -509,16 +511,55 @@ def secondary_objective_hooks(name, body):
     return body[:start] + segment.replace(native, hooked) + body[stop:]
 
 
+def pose_trace_hooks(name, body):
+    """Log how a character's animation is evaluated, when that changes (vanishing head/legs, 2026-11-17).
+
+    sub_00091EF0 produces a skeleton's pose: sub_00097E00 has sub_00097380 walk the skeleton's animation tree
+    (root node at +0xC; the walk recurses per node) into one of two shared scratch poses, which sub_00097410 then
+    turns into bone matrices. Diagnostic only: guest state is untouched.
+    """
+    if name == "sub_00091EF0":
+        body = replace_once(body, "loc_00091EF0: ;\n",
+            "loc_00091EF0: ;\n    black_pose_begin(l_eax); /* pose trace */\n")
+        body = replace_once(body, "loc_00092016: ;\n",
+            "loc_00092016: ;\n    black_pose_end(l_edi); /* pose trace */\n")
+    elif name == "sub_00097380":
+        body = replace_once(body, "loc_00097380: ;\n",
+            "loc_00097380: ;\n    black_pose_node(l_esp); /* pose trace: one node of the animation tree */\n")
+    return body
+
+
+def animation_detail_hooks(name, body):
+    """VR: keep every character's animation at full detail (the vanishing head and legs, 2026-11-19).
+
+    sub_0017DA70 picks a character's animation detail before its skeleton is evaluated: by default the scratch-pose
+    pool holds 0x1C poses and all 0x2C bones are animated ([esi+0x230] = 0). A character that is far (camera factor x
+    distance over MEMF(0x2A7F08)) gets level 1, one the game's flat camera does not see ([obj+0x300] <= 0) level 2:
+    a shorter bone list and a smaller pool, so blends fall back to one unblended input (sub_00092D10) and the head and
+    leg bones are left as they are. The flat game pairs that with a low-detail mesh or with nobody looking. In VR the
+    headset sees more than the flat camera and BLACK_VR keeps the detailed mesh further out, so the detailed body is
+    drawn on the reduced skeleton. black_anim_keep_full() decides (and logs what the game wanted).
+    """
+    if name != "sub_0017DA70":
+        return body
+    body = replace_once(body, "    MEM8(l_esi + 0x230) = 1;\n",
+        "    if (black_anim_keep_full(l_esi, 1u)) goto loc_0017DB47; /* VR: full animation detail */\n"
+        "    MEM8(l_esi + 0x230) = 1;\n")
+    body = replace_once(body, "loc_0017DB15: ;\n",
+        "loc_0017DB15: ;\n    if (black_anim_keep_full(l_esi, 2u)) goto loc_0017DB47; /* VR: full animation detail */\n")
+    return body
+
+
 def lod_hooks(name, body):
     """Extend native mesh LOD and prop culling without changing real distance or masks."""
-    # Modes: 0 linear distance, 1 squared distance, 2 projected size ratio.
+    # Modes: 0 linear distance, 1 squared distance, 2 projected size ratio, 3 linear distance of a character.
     sites = {
         "sub_001C8360": [
             ("001C8417", "xmm0.f[0] = xmm0.f[0] * xmm1.f[0]; /* mulss */",
              "xmm0.f[0] = black_lod_value(xmm0.f[0] * xmm1.f[0], 0u); /* native mesh LOD metric */")],
         "sub_001C55A0": [
             ("001C5636", "xmm1.f[0] = xmm1.f[0] * xmm0.f[0]; /* mulss */",
-             "xmm1.f[0] = black_lod_value(xmm1.f[0] * xmm0.f[0], 0u); /* native character LOD metric */")],
+             "xmm1.f[0] = black_lod_value(xmm1.f[0] * xmm0.f[0], 3u); /* native character LOD metric */")],
         "sub_001CA5D0": [
             ("001CA64F", "_fca = xmm1.f[0]; _fcb = xmm2.f[0]; /* comiss */",
              "_fca = black_lod_value(xmm1.f[0], 1u); _fcb = xmm2.f[0]; /* native squared-range cull */"),
@@ -1021,6 +1062,8 @@ def main():
     declarations += "\nextern int black_secondary_requirement_met(int);\n"
     declarations += "\nextern uint32_t black_audio_queue_completion(uint32_t);\n"
     declarations += "extern float black_lod_value(float, unsigned);\nextern void black_lod_trace(uint32_t, uint32_t);\n"
+    declarations += ("extern void black_pose_begin(uint32_t);\nextern void black_pose_node(uint32_t);\n"
+                     "extern void black_pose_end(uint32_t);\nextern int black_anim_keep_full(uint32_t, unsigned);\n")
     declarations += "extern float black_tuning_spawn_health(uint32_t, float);\n"
     declarations += "extern float black_tuning_bullet_damage(uint32_t, uint32_t, float);\n"
     declarations += "extern unsigned black_tuning_headshot(uint32_t, uint32_t, unsigned, unsigned);\n"

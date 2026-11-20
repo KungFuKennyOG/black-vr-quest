@@ -138,14 +138,18 @@ static XrVector3f q_rot(XrQuaternionf q, XrVector3f v)
     return o;
 }
 static int button_down(const char *name);
+static double s_head_yaw0;
+static int button_down(const char *name);
 static void head_angles(int64_t t, double *yaw, double *pitch)
 {
     const int64_t r0 = s_rot_start_ns;
     double ts;
-    *yaw = *pitch = 0.0;
+    *yaw = s_head_yaw0; *pitch = 0.0;      /* GRX_HEAD_YAW (degrees, + left): the head turned for good */
+    if (button_down("lookl")) *yaw += 35.0 * M_PI / 180.0;
+    if (button_down("lookr")) *yaw -= 35.0 * M_PI / 180.0;
     if (r0 < 0 || t < r0) return;
     ts = (double)(t - r0) * 1e-9;
-    *yaw = 0.30 * sin(2.0 * M_PI * ts / 60.0);          /* +-17 deg over 60 s: ~0.03 rad/s peak */
+    *yaw += 0.30 * sin(2.0 * M_PI * ts / 60.0);          /* +-17 deg over 60 s: ~0.03 rad/s peak */
     *pitch = 0.08 * sin(2.0 * M_PI * ts / 43.0);
 }
 static void trajectory(int64_t t, XrPosef *head, XrPosef eye[2], XrFovf fov[2])
@@ -961,6 +965,7 @@ int main(int argc, char **argv)
     s_exact_hold = (int)envf("GRX_EXACT_HOLD", 0);
     s_hand_on = s_gun_test || (int)envf("GRX_HAND", 0) || s_controls;
     s_gun_yaw = envf("GRX_GUN_YAW", 5.0) * M_PI / 180.0;
+    s_head_yaw0 = envf("GRX_HEAD_YAW", 0.0) * M_PI / 180.0;
     s_hand_yaw = envf("GRX_HAND_YAW", 0.0) * M_PI / 180.0;
     s_hand_pitch = envf("GRX_HAND_PITCH", 0.0) * M_PI / 180.0;
     /* a frame takes ~1 s here: every flip would read as the stereo view coming back (the world fade-in), so it is off

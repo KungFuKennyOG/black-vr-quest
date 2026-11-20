@@ -16,7 +16,10 @@
  *              each duck/stand edge when the game's state (read from game memory) differs, re-tried if
  *              the game did not follow; in Hold mode the crouch control is held while ducked.
  *   scope      the gun's rear sight within scope_raise_distance of an eye and the gun pointing along the
- *              view -> engaged; disengaged beyond 1.5x the distance or 40 degrees (hysteresis).
+ *              view -> engaged; disengaged beyond 1.5x the distance or 40 degrees (hysteresis). With free_aim
+ *              (the 3D scope of a two-handed gun) only the distance counts, as in DrBeef's ports.
+ *   scope aim  what the 3D scope looks and shoots along (port/notes/scope.md): a virtual stock, the line from
+ *              the head to the off hand, turned from where the head faced when the scope came up.
  *   two hand   the off hand's grip held near the gun hand (or near a point 30 cm ahead of it along the
  *              gun) engages; the aim then points from the gun hand to the off hand, with the gun hand's
  *              roll, blended in over 0.1 s; only letting go of the grip (or the off hand going behind the gun hand)
@@ -41,6 +44,8 @@ typedef struct {
     float duck_ratio;            /* 0.80 (stand back up above duck_ratio + 0.08) */
     int   scope_raise;           /* on/off */
     float scope_distance;        /* m, 0.15 */
+    float scope_lift_m;          /* m, 0.12: the off hand sits this far under the scope's line of sight */
+    float scope_smooth_s;        /* s, 0.05: the low-pass on the scope's aim (hand tremor is magnified with the view) */
     int   two_hand;              /* on/off */
     float two_hand_engage_m;     /* 0.60, within 30 deg of the gun's ray (0.20 caught a hand on a handguard only now and then) */
 } VrGestureConfig;
@@ -57,6 +62,8 @@ static inline void vrg_default_config(VrGestureConfig *c)
     c->duck_ratio = 0.80f;
     c->scope_raise = 1;
     c->scope_distance = 0.15f;
+    c->scope_lift_m = 0.12f;
+    c->scope_smooth_s = 0.05f;
     c->two_hand = 1;
     c->two_hand_engage_m = 0.60f;
 }
@@ -221,6 +228,7 @@ static inline int vrg_crouch_sync(VrCrouchSync *s, int body_ducked, int game_cro
 typedef struct {
     int   engaged;
     float last_dist, last_angle_deg;
+    int   free_aim;              /* set by the caller: the distance alone decides (no angle to the view) */
 } VrScope;
 
 /* The rear sight of the gun: a little above and behind the aim pose's origin (the controller's tip). */
@@ -244,8 +252,10 @@ static inline int vrg_scope_update(VrScope *s, const VrGestureConfig *c, int tra
     s->last_dist = d;
     s->last_angle_deg = (float)(acos(cosang > 1.0f ? 1.0f : cosang < -1.0f ? -1.0f : cosang) / VRM_DEG);
     if (!s->engaged) {
-        if (d <= c->scope_distance && s->last_angle_deg <= 25.0f) s->engaged = 1;
-    } else if (d > c->scope_distance * 1.5f || s->last_angle_deg > 40.0f) {
+        if (d <= c->scope_distance && (s->free_aim || s->last_angle_deg <= 25.0f)) s->engaged = 1;
+    } else if (d > (s->free_aim ? fmaxf(c->scope_distance * 1.5f, 0.25f) : c->scope_distance * 1.5f) ||
+               (!s->free_aim && s->last_angle_deg > 40.0f)) {
+        /* with the stock (free_aim) the cheek may leave the gun hand 25 cm (DrBeef: 0.25-0.26 m to the headset) */
         s->engaged = 0;
     }
     return s->engaged;
@@ -353,6 +363,137 @@ static inline VrPose vrg_two_hand_update(VrTwoHand *s, const VrGestureConfig *c,
         if (s->blend < 1.0f) two.orientation = vrg_nlerp(gun.orientation, two.orientation, s->blend);
         return two;
     }
+}
+
+/* ---- the scope's aim (the 3D scope view; port/notes/scope.md) ---------------------------------------------------
+ * How DrBeef's ports aim a scoped rifle (RTCWQuest, JKXR: read for the method, none of their code is used):
+ *   - a virtual stock: the aim is the line from the head to the off hand on the handguard, not the gun hand's
+ *     controller. The pivot is the head, the lever is the whole arm (about 45 cm, not the 20-30 cm between two hands
+ *     held at the face), and the wrist of the gun hand, which sits at the cheek at whatever angle, does not matter.
+ *     The off hand is taken scope_lift_m higher: a rifle's handguard is that far under the line of sight (JKXR lifts
+ *     the off hand 12 cm, RTCWQuest lowers the eye point 10 cm);
+ *   - the off hand smoothed (JKXR averages its last 5 frames): here a low-pass on the head -> hand vector;
+ *   - the yaw relative: the view starts on the head's yaw as the scope comes up and turns by as much as the aim has
+ *     turned since. Nothing jumps sideways on the way in; the pitch is the aim's own;
+ *   - no roll in the aim (the renderer gives the picture the head's roll, so the horizon stays level).
+ * A gun with no off hand on it (off_ok 0 from the start) uses the gun hand's own ray the same way. An off hand lost
+ * for a tick or two holds the aim; for longer, the gun hand's ray takes over from where the aim is (no jump), and the
+ * stock again when the off hand comes back. (It held the last aim for good: with the gun hidden the grip read as off
+ * and the scope froze, Kenny 2026-11-15.) */
+
+typedef struct {
+    int    active;
+    int    stock;                /* the virtual stock (head -> off hand); 0: the gun hand's ray */
+    int    miss;                 /* updates in a row without the off hand while on the stock (held through 3) */
+    float  yaw0_view, yaw0_aim;  /* rad, positive left: the head's and the aim's yaw as the scope came up */
+    VrVec3 v;                    /* the smoothed aim vector (stage) */
+    VrQuat q;                    /* the aim: forward -z along it, level */
+    float  yaw, pitch;           /* rad: the aim's (yaw positive left, pitch positive up) */
+} VrScopeAim;
+
+/* yaw (positive left) and pitch (positive up) of a direction; 0 when it has no horizontal part to speak of */
+static inline int vrg_dir_yaw_pitch(VrVec3 d, float *yaw, float *pitch)
+{
+    const float h = sqrtf(d.x * d.x + d.z * d.z);
+    if (!(h > 1e-4f) || h * h < 0.0003f * vrm_dot(d, d)) return 0;      /* within 1 deg of straight up or down */
+    *yaw = atan2f(-d.x, -d.z);
+    *pitch = atan2f(d.y, h);
+    return 1;
+}
+
+/* the aim continues from where it is along raw: its yaw is counted from raw's from now on */
+static inline void vrg_scope_rebase(VrScopeAim *s, VrVec3 raw)
+{
+    float y0, p0, y1, p1;
+    if (!vrg_dir_yaw_pitch(s->v, &y0, &p0) || !vrg_dir_yaw_pitch(raw, &y1, &p1)) return;
+    s->yaw0_view += (float)vrm_wrap_rad((double)(y0 - s->yaw0_aim));
+    s->yaw0_aim = y1;
+    s->v = raw;
+}
+
+/* the level orientation looking along yaw / pitch */
+static inline VrQuat vrg_yaw_pitch_rotation(float yaw, float pitch)
+{
+    const float cp = cosf(pitch);
+    return vrg_look_rotation(vrm_v3(-sinf(yaw) * cp, sinf(pitch), -cosf(yaw) * cp), vrm_v3(0, 1, 0));
+}
+
+/* The head's roll (rad): how far its right vector is turned up out of the horizontal about its forward; 0 when it
+ * looks straight up or down. */
+static inline float vrg_head_roll(VrQuat head)
+{
+    const VrVec3 f = vrm_q_rotate(head, vrm_v3(0, 0, -1)), r = vrm_q_rotate(head, vrm_v3(1, 0, 0));
+    VrVec3 lr = vrm_cross(f, vrm_v3(0, 1, 0)), lu;
+    if (!vrm_normalize(&lr)) return 0.0f;
+    lu = vrm_cross(lr, f);
+    return atan2f(vrm_dot(r, lu), vrm_dot(r, lr));
+}
+
+/* Where the scope picture's centre is shown, as a pitch above the head's forward (rad; negative: below). cfg_deg > 90:
+ * the middle of the eyes' vertical field of view (up / down: each eye's angles, down negative). A Quest's view
+ * reaches further down than up, so a picture centred on the head's forward sits high in what the wearer sees
+ * (Kenny 2026-11-16: "it doesn't feel like it's at the center of the screen (like the whole thing)"). */
+static inline float vrg_scope_centre_pitch(float cfg_deg, float up0, float down0, float up1, float down1)
+{
+    float a = cfg_deg > 90.0f ? 0.25f * (up0 + down0 + up1 + down1) : cfg_deg * 0.017453292f;
+    if (!(a == a)) a = 0.0f;
+    return a > 0.35f ? 0.35f : a < -0.35f ? -0.35f : a;
+}
+
+/* `aim` (level) with the head's roll: what the scoped picture is drawn with. Shown head-locked, its horizon then
+ * lies level in the world whichever way the head leans over the stock. */
+static inline VrQuat vrg_scope_view_rotation(VrQuat aim, VrQuat head)
+{
+    VrVec3 f = vrm_q_rotate(aim, vrm_v3(0, 0, -1));
+    float yaw, pitch;
+    if (!vrm_normalize(&f) || !vrg_dir_yaw_pitch(f, &yaw, &pitch)) return aim;
+    return vrm_q_normalize(vrm_q_mul(vrg_yaw_pitch_rotation(yaw, pitch),
+                                     vrm_q_axis_angle(vrm_v3(0, 0, 1), vrg_head_roll(head))));
+}
+
+/* One input update. on: the scope is up; gun: the gun hand's aim pose (two-handed aim included); off_ok / off_pos:
+ * the off hand holds the gun, and where. Returns the gun hand's aim orientation to use (gun's own when off). */
+static inline VrQuat vrg_scope_aim_update(VrScopeAim *s, const VrGestureConfig *c, int on, VrPose head, VrPose gun,
+                                          int off_ok, VrVec3 off_pos, double dt)
+{
+    VrVec3 raw;
+    float yaw, pitch, hy, hp;
+    int have_raw = 1;
+    if (!on) { s->active = 0; s->miss = 0; return gun.orientation; }
+    if (off_ok) {
+        raw = vrm_sub(vrm_add(off_pos, vrm_v3(0.0f, c->scope_lift_m, 0.0f)), head.position);
+        s->miss = 0;
+    } else if (s->active && s->stock && s->miss < 3) {
+        raw = s->v;                                   /* the off hand dropped for a tick: the aim is held */
+        have_raw = 0;
+        s->miss++;
+    } else {
+        raw = vrm_q_rotate(gun.orientation, vrm_v3(0, 0, -1));
+        if (s->active && s->stock) { vrg_scope_rebase(s, raw); s->stock = 0; }   /* the gun hand takes over */
+    }
+    if (!s->active) {
+        if (!vrg_dir_yaw_pitch(raw, &yaw, &pitch)) return gun.orientation;     /* no aim to start from yet */
+        s->v = raw;
+        s->stock = off_ok != 0;
+        s->yaw0_aim = yaw;
+        s->yaw0_view = vrg_dir_yaw_pitch(vrm_q_rotate(head.orientation, vrm_v3(0, 0, -1)), &hy, &hp) ? hy : yaw;
+        s->active = 1;
+    } else if (have_raw) {
+        const float tau = c->scope_smooth_s;
+        const float k = tau > 1e-4f && dt > 0.0 ? 1.0f - expf(-(float)dt / tau) : 1.0f;
+        if (off_ok && !s->stock) {                    /* the off hand came on later: the stock takes over where the */
+            vrg_scope_rebase(s, raw);                 /* aim is (no jump): its yaw is counted from here */
+            s->stock = 1;
+        }
+        s->v = vrm_add(s->v, vrm_scale(vrm_sub(raw, s->v), k));
+    }
+    if (vrg_dir_yaw_pitch(s->v, &yaw, &pitch)) {
+        const float lim = 80.0f * (float)VRM_DEG;
+        s->yaw = (float)vrm_wrap_rad((double)s->yaw0_view + vrm_wrap_rad((double)(yaw - s->yaw0_aim)));
+        s->pitch = pitch > lim ? lim : pitch < -lim ? -lim : pitch;
+        s->q = vrg_yaw_pitch_rotation(s->yaw, s->pitch);
+    }
+    return s->q;
 }
 
 #endif /* VR_GESTURES_H */

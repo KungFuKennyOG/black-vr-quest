@@ -27,6 +27,7 @@
 #include "../vr_bridge.h"
 #include "vr_config.h"
 #include "vr_input_map.h"
+#include "vr_gestures.h"
 
 #define XLOG_TAG "BlackVR"
 /* Every shell line goes to logcat and into the on-headset log file (logs/blackvr_last.log) once the game has opened
@@ -191,6 +192,13 @@ const XrsPanelOps *xrs_panel_attach(XrShell *s);
 #define XRS_SCOPE_HUD_DIST 10.0f
 #define XRS_SCOPE_HUD_TAN 0.8f
 uint32_t xrs_scope_layers(XrShell *s, const XrCompositionLayerBaseHeader **out, uint32_t cap);
+/* The pitch (rad, negative: below the head's forward) the scope's picture is centred at: the renderer's
+ * (vr_renderer_kvk.c scope_eyes), from the fields of view being submitted. */
+static inline float xrs_scope_drop(const XrShell *s)
+{
+    return vrg_scope_centre_pitch(vr_game_config()->scope_height_deg, s->submit.fov[0].angleUp, s->submit.fov[0].angleDown,
+                                  s->submit.fov[1].angleUp, s->submit.fov[1].angleDown);
+}
 typedef struct {
     int open, inited, released;
     XrSwapchain panel, laser;

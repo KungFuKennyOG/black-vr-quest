@@ -501,8 +501,13 @@ uint32_t xrs_scope_layers(XrShell *s, const XrCompositionLayerBaseHeader **out, 
     SR.q.subImage.swapchain = SR.t.sc.handle;
     SR.q.subImage.imageRect.extent.width = (int32_t)SR_TEX;
     SR.q.subImage.imageRect.extent.height = (int32_t)SR_TEX;
-    SR.q.pose.orientation.w = 1.0f;
-    SR.q.pose.position.z = -dist;
+    {
+        const float a = xrs_scope_drop(s);          /* with the scope picture (xr_session.c) */
+        SR.q.pose.orientation.x = sinf(0.5f * a);
+        SR.q.pose.orientation.w = cosf(0.5f * a);
+        SR.q.pose.position.y = dist * sinf(a);
+        SR.q.pose.position.z = -dist * cosf(a);
+    }
     SR.q.size.width = SR.q.size.height = 2.0f * SR_RING_TAN * dist;
     out[0] = (const XrCompositionLayerBaseHeader *)&SR.q;
     return 1;

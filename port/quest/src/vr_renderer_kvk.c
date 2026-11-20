@@ -411,25 +411,59 @@ static void scope_eyes(VrFrameState *f, const VrPose *hand)
     VrQuat q;
     int i;
     if (!(z > 1.001f) || !(e > 0.0f)) return;
-    if (hand) {
-        dir = vr_gun_laser(pm, am, &len) ? vrm_v3(am[0], am[1], am[2]) : vrm_v3(0, 0, -1);   /* the barrel, else the ray */
-        dir = vrm_q_rotate(hand->orientation, dir);
-    } else {
-        dir = vrm_q_rotate(f->eye[0].pose.orientation, vrm_v3(0, 0, -1));
+    {
+        /* Where it looks (DrBeef's scope): the scope aim (vr_scope_aim, the virtual stock from the head through the off
+         * hand), level, with the head's roll, so the picture's horizon stays level in the world. It looked along the
+         * drawn barrel, with up from the head: the picture was tilted as the barrel left the gaze, and the game's
+         * camera (culling) still faced the head (Kenny 2026-11-15: "tilted and there's a ton of clipping"). */
+        VrQuat aimq;
+        if (vr_scope_aim(&aimq)) {
+            q = vrg_scope_view_rotation(aimq, f->eye[0].pose.orientation);   /* the eyes: the real head */
+        } else {
+            if (hand) {
+                dir = vr_gun_laser(pm, am, &len) ? vrm_v3(am[0], am[1], am[2]) : vrm_v3(0, 0, -1);
+                dir = vrm_q_rotate(hand->orientation, dir);
+            } else {
+                dir = vrm_q_rotate(f->eye[0].pose.orientation, vrm_v3(0, 0, -1));
+            }
+            if (!vrm_normalize(&dir)) return;
+            up = vrm_q_rotate(f->eye[0].pose.orientation, vrm_v3(0, 1, 0));    /* the roll stays the head's */
+            q = vrg_look_rotation(dir, up);
+        }
     }
-    if (!vrm_normalize(&dir)) return;
-    up = vrm_q_rotate(f->eye[0].pose.orientation, vrm_v3(0, 1, 0));    /* the roll stays the head's */
-    q = vrg_look_rotation(dir, up);
     mid = vrm_scale(vrm_add(f->eye[0].pose.position, f->eye[1].pose.position), 0.5f);
-    for (i = 0; i < VR_EYE_COUNT; i++) {
-        VrPose *p = &f->eye[i].pose;
-        VrFov *v = &f->eye[i].fov;
-        p->orientation = sv_nlerp(p->orientation, q, e);
-        if (vr_game_config()->scope_mono) p->position = vrm_add(p->position, vrm_scale(vrm_sub(mid, p->position), e));
-        v->left = atanf(tanf(v->left) / z);
-        v->right = atanf(tanf(v->right) / z);
-        v->up = atanf(tanf(v->up) / z);
-        v->down = atanf(tanf(v->down) / z);
+    {
+        const VrQuat eq0 = f->eye[0].pose.orientation, eq1 = f->eye[1].pose.orientation;   /* as tracked */
+        /* The picture's centre (the aim) is shown `drop` above the head's forward: the middle of the headset's view
+         * (vrg_scope_centre_pitch; xr_session.c puts the game's scope and the surround there too). The eye is turned
+         * so the aim lies at that height in it, and the field of view narrows about that point, not about the eye's
+         * axis: a direction at tangent t is shown at c + (t - c) * zoom, the aim (t = c) exactly at c. */
+        const float drop = vrg_scope_centre_pitch(vr_game_config()->scope_height_deg, f->eye[0].fov.up, f->eye[0].fov.down,
+                                                  f->eye[1].fov.up, f->eye[1].fov.down);
+        const float cy = tanf(drop);
+        const VrQuat qe = vrm_q_normalize(vrm_q_mul(q, vrm_q_axis_angle(vrm_v3(1, 0, 0), -drop)));
+        static int logged;
+        if (!logged && e >= 1.0f) {
+            const VrVec3 f0 = vrm_q_rotate(eq0, vrm_v3(0, 0, -1)), f1 = vrm_q_rotate(eq1, vrm_v3(0, 0, -1));
+            const float cd = vrm_dot(f0, f1), cant = acosf(cd > 1.0f ? 1.0f : cd) * 57.29578f;
+            logged = 1;
+            GLOG("scope view: centred %.1f deg %s straight ahead (%s; the eyes see %.1f up, %.1f down, %.1f / %.1f to the sides; "
+                 "the two eyes face %.2f deg apart)",
+                 fabs((double)drop) * 57.29578, drop < 0.0f ? "below" : "above",
+                 vr_game_config()->scope_height_deg > 90.0f ? "the middle of the headset's view" : "scope_height",
+                 (double)f->eye[0].fov.up * 57.29578, (double)f->eye[0].fov.down * 57.29578,
+                 (double)f->eye[0].fov.left * 57.29578, (double)f->eye[0].fov.right * 57.29578, (double)cant);
+        }
+        for (i = 0; i < VR_EYE_COUNT; i++) {
+            VrPose *p = &f->eye[i].pose;
+            VrFov *v = &f->eye[i].fov;
+            p->orientation = sv_nlerp(p->orientation, qe, e);
+            if (vr_game_config()->scope_mono) p->position = vrm_add(p->position, vrm_scale(vrm_sub(mid, p->position), e));
+            v->left = atanf(tanf(v->left) / z);
+            v->right = atanf(tanf(v->right) / z);
+            v->up = atanf(cy + (tanf(v->up) - cy) / z);
+            v->down = atanf(cy + (tanf(v->down) - cy) / z);
+        }
     }
 }
 
@@ -531,7 +565,9 @@ bool kvk_vr_stereo_hook(KvkStereoFrame *out, const KvkStereoConfig *cfg, int pha
          * the gun let it go. */
         static int g_no_gun;
         if (g_two_seen) { vr_set_gun_two_handed(g_two_frame); g_no_gun = 0; }
-        else if (++g_no_gun == 10) vr_set_gun_two_handed(0);
+        /* the 3D scope hides the gun (no weapon draws while zoomed): that is not the gun gone. Counted, it let the
+         * two-handed hold go 10 flips into the zoom and the scope's aim froze (Kenny's log, 2026-11-15 23:29:44) */
+        else if (!scope_hides_weapon() && ++g_no_gun == 10) vr_set_gun_two_handed(0);
         g_two_frame = 0;
         g_two_seen = 0;
     }

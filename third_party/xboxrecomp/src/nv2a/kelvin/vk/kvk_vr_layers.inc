@@ -336,6 +336,7 @@ static void vrl_capture_record(KvkSurf *main_cs, KvkSurf *hud_cs, bool world, ui
         return;
     }
     s_cap.on = true; s_cap.w = w; s_cap.h = h;
+    skin_dump("both-eye capture");
     pass_end();
     barrier(cmd(), &s_cap.img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     compose_pass(ev, 0, main_cs, hud_cs, world);

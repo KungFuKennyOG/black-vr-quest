@@ -884,12 +884,38 @@ void xrs_frame(XrShell *s)
             proj.space = s->world_space;
             proj.viewCount = VR_EYE_COUNT;
             proj.views = pv;
-            layers[nl++] = (const XrCompositionLayerBaseHeader *)&proj;
             /* the 3D scope view: the game's own scope (on the HUD) over a black surround, both centred on the view */
             const int scoped = vr_scope_view() > 1.0f;
+            if (renderer && mode == VR_PRESENT_STEREO && !show_quad_too && scoped && s->view_space) {
+                /* The scoped picture is fixed to the head, as the reticle and the surround on it are (view space): what
+                 * it shows follows the aim, not where the head faces. Submitted in the world it was re-aimed by the
+                 * compositor for every head turn since it was drawn, and on a repeated frame slid under the reticle
+                 * (Kenny 2026-11-16: "it's not aligned with the cross air"). The eyes relative to the head they were
+                 * drawn for: the first eye's orientation at their midpoint. */
+                const VrQuat hq = vrm_q(s->submit.pose[0].orientation.x, s->submit.pose[0].orientation.y,
+                                        s->submit.pose[0].orientation.z, s->submit.pose[0].orientation.w);
+                const VrQuat hi = vrm_q_conj(hq);
+                const VrVec3 mid = vrm_v3(0.5f * (s->submit.pose[0].position.x + s->submit.pose[1].position.x),
+                                          0.5f * (s->submit.pose[0].position.y + s->submit.pose[1].position.y),
+                                          0.5f * (s->submit.pose[0].position.z + s->submit.pose[1].position.z));
+                for (i = 0; i < VR_EYE_COUNT; i++) {
+                    const XrPosef *ep = &s->submit.pose[i];
+                    const VrQuat q = vrm_q_normalize(vrm_q_mul(hi, vrm_q(ep->orientation.x, ep->orientation.y,
+                                                                         ep->orientation.z, ep->orientation.w)));
+                    const VrVec3 t = vrm_q_rotate(hi, vrm_sub(vrm_v3(ep->position.x, ep->position.y, ep->position.z), mid));
+                    pv[i].pose.orientation.x = q.x; pv[i].pose.orientation.y = q.y;
+                    pv[i].pose.orientation.z = q.z; pv[i].pose.orientation.w = q.w;
+                    pv[i].pose.position.x = t.x; pv[i].pose.position.y = t.y; pv[i].pose.position.z = t.z;
+                }
+                proj.space = s->view_space;
+            }
+            layers[nl++] = (const XrCompositionLayerBaseHeader *)&proj;
             if (renderer && mode == VR_PRESENT_STEREO && !show_quad_too && scoped)
                 nl += xrs_scope_layers(s, layers + nl, (uint32_t)(sizeof(layers) / sizeof(layers[0])) - nl);
-            if (renderer && mode == VR_PRESENT_STEREO && s->submit.hud && s->hud.handle) {
+            /* the rifle is down but the game has not zoomed out yet (the bolt after a shot holds it about a second):
+             * its full-screen scope picture is on the HUD, so the HUD waits (Kenny 2026-11-16: "it should stop the scope
+             * view once i put it down") */
+            if (renderer && mode == VR_PRESENT_STEREO && s->submit.hud && s->hud.handle && !vr_scope_lowered()) {
                 /* the HUD: head-locked (the compositor keeps it on the current head pose), premultiplied alpha */
                 const VrHudLayout *hl = vr_hud_layout();
                 hudq.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
@@ -900,9 +926,14 @@ void xrs_frame(XrShell *s)
                 hudq.subImage.imageRect.extent.height = (int32_t)s->hud.height;
                 hudq.pose = identity_pose();
                 if (scoped) {
-                    /* the scope's picture centred on the view (its centre is the zoomed gun line), far out (the eyes
-                     * look through it at the distance), XRS_SCOPE_HUD_TAN wide */
-                    hudq.pose.position.z = -XRS_SCOPE_HUD_DIST;
+                    /* the scope's picture centred where the renderer shows the aim (the middle of the headset's view,
+                     * xrs_scope_drop; its centre is the zoomed gun line), far out (the eyes look through it at the
+                     * distance), XRS_SCOPE_HUD_TAN wide, facing the eyes */
+                    const float a = xrs_scope_drop(s);
+                    hudq.pose.orientation.x = sinf(0.5f * a);
+                    hudq.pose.orientation.w = cosf(0.5f * a);
+                    hudq.pose.position.y = XRS_SCOPE_HUD_DIST * sinf(a);
+                    hudq.pose.position.z = -XRS_SCOPE_HUD_DIST * cosf(a);
                 } else {
                     /* turned about the eyes' x axis by hud_height, still facing them: BLACK's HUD lives along the
                      * top of its image, 22 deg above the view centre when level */

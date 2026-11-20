@@ -707,6 +707,94 @@ static void test_scope(void)
     CHECK(!vrg_scope_update(&sc, &gc, 1, pose_look(V(0.032f, 1.55f, -0.14f), 0, 0), eye, fwd));
 }
 
+/* The 3D scope's aim (DrBeef's virtual stock) and its release by distance alone once up. */
+static void test_scope_aim(void)
+{
+    VrGestureConfig gc;
+    VrScopeAim sa;
+    VrScope sc;
+    VrPose head = pose_look(V(0.0f, 1.6f, 0.0f), 30, 0), gun = pose_look(V(0.03f, 1.55f, -0.12f), 0, 0);
+    VrVec3 off, f, r, eye[2] = { { -0.032f, 1.6f, 0.0f }, { 0.032f, 1.6f, 0.0f } };
+    VrQuat q, v;
+    float yaw, pitch;
+    int i;
+    vrg_default_config(&gc);
+    memset(&sa, 0, sizeof(sa));
+    /* off: the gun hand's own orientation, nothing active */
+    q = vrg_scope_aim_update(&sa, &gc, 0, head, gun, 1, V(0, 1.48f, -0.45f), 1.0 / 72.0);
+    CHECK(!sa.active && fabsf(q.w - gun.orientation.w) < 1e-6f);
+    /* up with the head turned 30 deg left and the stock straight ahead: it starts on the head's yaw (no jump) and is
+     * level (the off hand 12 cm under the eye's line: the lift) */
+    off = V(0.0f, 1.6f - 0.12f, -0.45f);
+    q = vrg_scope_aim_update(&sa, &gc, 1, head, gun, 1, off, 1.0 / 72.0);
+    CHECK(sa.active && sa.stock);
+    f = vrm_q_rotate(q, V(0, 0, -1));
+    CHECK(vrg_dir_yaw_pitch(f, &yaw, &pitch));
+    CHECK(fabsf(yaw - (float)(30 * VRM_DEG)) < 1e-3f && fabsf(pitch) < 1e-3f);
+    r = vrm_q_rotate(q, V(1, 0, 0));
+    CHECK(fabsf(r.y) < 1e-5f);                                 /* no roll in the aim */
+    /* the stock turned 10 deg right (the off hand moved): the aim turns 10 deg right from where it began, after the
+     * smoothing settles; the gun hand's own turn does not count */
+    off = vrm_add(V(0.0f, 1.6f, 0.0f), V(sinf((float)(10 * VRM_DEG)) * 0.45f, -0.12f, -cosf((float)(10 * VRM_DEG)) * 0.45f));
+    gun = pose_look(gun.position, -40, 15);
+    for (i = 0; i < 100; i++) q = vrg_scope_aim_update(&sa, &gc, 1, head, gun, 1, off, 1.0 / 72.0);
+    f = vrm_q_rotate(q, V(0, 0, -1));
+    CHECK(vrg_dir_yaw_pitch(f, &yaw, &pitch));
+    CHECK(fabsf(yaw - (float)(20 * VRM_DEG)) < 2e-3f && fabsf(pitch) < 2e-3f);
+    /* the smoothing: one update after a 2 deg step of the off hand moves the aim only part of the way */
+    {
+        float y0 = yaw, y1;
+        const VrVec3 off2 = vrm_add(V(0.0f, 1.6f, 0.0f), V(sinf((float)(12 * VRM_DEG)) * 0.45f, -0.12f, -cosf((float)(12 * VRM_DEG)) * 0.45f));
+        q = vrg_scope_aim_update(&sa, &gc, 1, head, gun, 1, off2, 1.0 / 72.0);
+        CHECK(vrg_dir_yaw_pitch(vrm_q_rotate(q, V(0, 0, -1)), &y1, &pitch));
+        CHECK(y1 < y0 && y1 > y0 - (float)(2 * VRM_DEG) * 0.5f);
+        off = off2;
+    }
+    /* the off hand lost for a tick: the last aim is held; for longer: the gun hand's ray takes over without a jump, and
+     * turns the aim from there (it froze for good, Kenny 2026-11-15) */
+    {
+        float y0, y1, y2;
+        CHECK(vrg_dir_yaw_pitch(vrm_q_rotate(q, V(0, 0, -1)), &y0, &pitch));
+        q = vrg_scope_aim_update(&sa, &gc, 1, head, gun, 0, V(5, 5, 5), 1.0 / 72.0);
+        CHECK(vrg_dir_yaw_pitch(vrm_q_rotate(q, V(0, 0, -1)), &y1, &pitch));
+        CHECK(fabsf(y1 - y0) < 1e-5f && sa.stock);
+        for (i = 0; i < 3; i++) q = vrg_scope_aim_update(&sa, &gc, 1, head, gun, 0, V(5, 5, 5), 1.0 / 72.0);
+        CHECK(!sa.stock);
+        CHECK(vrg_dir_yaw_pitch(vrm_q_rotate(q, V(0, 0, -1)), &y1, &pitch));
+        CHECK(fabsf(y1 - y0) < 1e-4f);                         /* no jump on the switch */
+        gun = pose_look(gun.position, -40 - 10, 15);           /* the gun hand turns 10 deg right */
+        for (i = 0; i < 100; i++) q = vrg_scope_aim_update(&sa, &gc, 1, head, gun, 0, V(5, 5, 5), 1.0 / 72.0);
+        CHECK(vrg_dir_yaw_pitch(vrm_q_rotate(q, V(0, 0, -1)), &y2, &pitch));
+        CHECK(fabsf(y2 - (y0 - (float)(10 * VRM_DEG))) < 2e-3f);
+        /* the off hand back: the stock again, from where the aim is */
+        q = vrg_scope_aim_update(&sa, &gc, 1, head, gun, 1, off, 1.0 / 72.0);
+        CHECK(sa.stock);
+        CHECK(vrg_dir_yaw_pitch(vrm_q_rotate(q, V(0, 0, -1)), &y1, &pitch));
+        CHECK(fabsf(y1 - y2) < 1e-3f);
+    }
+    /* down and up again: it starts from the head's yaw again */
+    vrg_scope_aim_update(&sa, &gc, 0, head, gun, 1, off, 1.0 / 72.0);
+    CHECK(!sa.active);
+    /* one-handed (no stock): the gun hand's ray, relative too */
+    q = vrg_scope_aim_update(&sa, &gc, 1, head, pose_look(gun.position, 0, 5), 0, off, 1.0 / 72.0);
+    CHECK(sa.active && !sa.stock);
+    CHECK(vrg_dir_yaw_pitch(vrm_q_rotate(q, V(0, 0, -1)), &yaw, &pitch));
+    CHECK(fabsf(yaw - (float)(30 * VRM_DEG)) < 1e-3f && fabsf(pitch - (float)(5 * VRM_DEG)) < 1e-3f);
+    /* the view: the aim with the head's roll (the head rolled 20 deg), its horizon level in the world */
+    head.orientation = vrm_q_mul(pose_look(V(0, 0, 0), 30, 0).orientation, vrm_q_axis_angle(V(0, 0, 1), (float)(20 * VRM_DEG)));
+    CHECK(fabsf(vrg_head_roll(head.orientation) - (float)(20 * VRM_DEG)) < 1e-4f);
+    v = vrg_scope_view_rotation(q, head.orientation);
+    CHECK(vrm_dot(vrm_q_rotate(v, V(0, 0, -1)), vrm_q_rotate(q, V(0, 0, -1))) > 0.99999f);
+    CHECK(fabsf(vrg_head_roll(v) - (float)(20 * VRM_DEG)) < 1e-4f);
+    /* release: up (with the angle rule), then free_aim: the head turned 60 deg off the gun keeps it; distance drops it */
+    memset(&sc, 0, sizeof(sc));
+    CHECK(vrg_scope_update(&sc, &gc, 1, pose_look(V(0.032f, 1.55f, -0.14f), 0, 0), eye, V(0, 0, -1)));
+    sc.free_aim = 1;
+    CHECK(vrg_scope_update(&sc, &gc, 1, pose_look(V(0.032f, 1.55f, -0.14f), 60, 0), eye, V(0, 0, -1)));
+    CHECK(vrg_scope_update(&sc, &gc, 1, pose_look(V(0.032f, 1.55f, -0.26f), 0, 0), eye, V(0, 0, -1)));   /* 0.24 m */
+    CHECK(!vrg_scope_update(&sc, &gc, 1, pose_look(V(0.032f, 1.55f, -0.34f), 0, 0), eye, V(0, 0, -1)));
+}
+
 static void test_two_hand(void)
 {
     VrGestureConfig gc;
@@ -799,6 +887,7 @@ static void test_gestures(void)
     test_swing();
     test_duck();
     test_scope();
+    test_scope_aim();
     test_two_hand();
 }
 
